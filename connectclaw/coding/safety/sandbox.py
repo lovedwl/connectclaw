@@ -161,16 +161,13 @@ class BwrapSandbox(Sandbox):
         # Filter empty args
         bwrap_args = [a for a in bwrap_args if a]
 
-        # Wrap command with ulimit for resource limits
-        full_command = (
-            f"bash -c '"
+        # Apply resource limits inline, single shell level
+        ulimits = (
             f"ulimit -v $(({self.max_memory_mb} * 1024)) 2>/dev/null; "
             f"ulimit -t {self.max_cpu_seconds} 2>/dev/null; "
             f"ulimit -u {self.max_processes} 2>/dev/null; "
-            f"{command}'"
         )
-
-        bwrap_args.extend(["--", "bash", "-c", full_command])
+        bwrap_args.extend(["--", "bash", "-c", ulimits + command])
 
         return await _run_command(bwrap_args, timeout, self.max_output_bytes, self.level)
 
@@ -334,12 +331,16 @@ async def _run_command(
             except Exception:
                 pass
             try:
-                await asyncio.wait_for(proc.wait(), timeout=5)
+                # Try to read whatever was captured before timeout
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    proc.communicate(), timeout=3
+                )
             except asyncio.TimeoutError:
-                pass
+                await proc.wait()
+                stdout_bytes, stderr_bytes = b"", b""
             result.exit_code = proc.returncode or -1
             result.wall_time_ms = (time.time() - t0) * 1000
-            return result
+            # Fall through to decode partial output below
 
         raw_stdout = stdout_bytes.decode("utf-8", errors="replace")
         raw_stderr = stderr_bytes.decode("utf-8", errors="replace")

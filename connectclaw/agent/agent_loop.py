@@ -136,7 +136,7 @@ async def _run_loop(
 
             # Stream assistant response
             message = await _stream_assistant_response(
-                current_context, config, signal, emit
+                current_context, config, signal, emit,
             )
 
             if message.stop_reason in ("error", "aborted"):
@@ -156,12 +156,31 @@ async def _run_loop(
 
             tool_results: list[ToolResultMessage] = []
             if has_more_tool_calls:
+                # Notify live card of tool calls
+                for tc in tool_calls:
+                    if config.on_tool_call:
+                        await config.on_tool_call(
+                            tc.get("name", "?"),
+                            tc.get("arguments", {}),
+                        )
                 tool_results = await _execute_tool_calls(
                     current_context, message, tool_calls, config, signal, emit
                 )
                 for result in tool_results:
                     current_context.messages.append(result)
                     new_messages.append(result)
+                    # Notify live card of tool results
+                    if config.on_tool_result:
+                        res_text = ""
+                        if hasattr(result, "content"):
+                            for b in result.content:
+                                if isinstance(b, dict) and b.get("type") == "text":
+                                    res_text += b.get("text", "")
+                        await config.on_tool_result(
+                            result.tool_name if hasattr(result, "tool_name") else "?",
+                            result.is_error if hasattr(result, "is_error") else False,
+                            res_text,
+                        )
 
             await emit({
                 "type": "turn_end",
@@ -234,6 +253,7 @@ async def _stream_assistant_response(
     partial_message: AssistantMessage | None = None
     added_partial = False
     event_count = 0
+    thinking_start_time: float | None = None
 
     logger.debug("[STREAM] calling stream_simple(api_key=%s, base_url=%s, reasoning=%s)",
                  "***" if api_key else "None", config.model.base_url, config.reasoning)
@@ -268,7 +288,38 @@ async def _stream_assistant_response(
                         "message": _message_to_dict(partial_message),
                     })
 
-            case "text_delta" | "thinking_delta" | "toolcall_delta":
+            case "thinking_delta":
+                if event.partial and partial_message:
+                    partial_message = event.partial
+                    context.messages[-1] = partial_message  # type: ignore[index]
+                    if thinking_start_time is None:
+                        thinking_start_time = time.time()
+                    if config.on_thinking_delta and event.delta:
+                        await config.on_thinking_delta(event.delta)
+                    await emit({
+                        "type": "message_update",
+                        "message": _message_to_dict(partial_message),
+                        "stream_event": event.__dict__,
+                    })
+
+            case "text_delta":
+                if event.partial and partial_message:
+                    partial_message = event.partial
+                    context.messages[-1] = partial_message  # type: ignore[index]
+                    # End thinking phase if it was active
+                    if thinking_start_time is not None:
+                        if config.on_thinking_done:
+                            await config.on_thinking_done(time.time() - thinking_start_time)
+                        thinking_start_time = None
+                    if config.on_text_delta and event.delta:
+                        await config.on_text_delta(event.delta)
+                    await emit({
+                        "type": "message_update",
+                        "message": _message_to_dict(partial_message),
+                        "stream_event": event.__dict__,
+                    })
+
+            case "toolcall_delta":
                 if event.partial and partial_message:
                     partial_message = event.partial
                     context.messages[-1] = partial_message  # type: ignore[index]
@@ -285,6 +336,13 @@ async def _stream_assistant_response(
                                  final.stop_reason, len(final.content))
                     if final.stop_reason == "error":
                         logger.debug("[STREAM]   error_message=%s", final.error_message)
+                    # End thinking phase if active
+                    if thinking_start_time is not None:
+                        if config.on_thinking_done:
+                            await config.on_thinking_done(time.time() - thinking_start_time)
+                        thinking_start_time = None
+                    if config.on_text_done:
+                        await config.on_text_done()
                     if added_partial:
                         context.messages[-1] = final  # type: ignore[index]
                     else:
@@ -301,6 +359,11 @@ async def _stream_assistant_response(
 
             case "error":
                 logger.error("[STREAM] ERROR: %s", event.error_message)
+                if thinking_start_time is not None and config.on_thinking_done:
+                    await config.on_thinking_done(time.time() - thinking_start_time)
+                thinking_start_time = None
+                if config.on_text_done:
+                    await config.on_text_done()
                 error_msg = AssistantMessage(
                     content=[{"type": "text", "text": ""}],
                     model=config.model.id,

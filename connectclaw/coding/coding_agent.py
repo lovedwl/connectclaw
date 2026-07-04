@@ -155,7 +155,9 @@ class CodingAgent:
 
     # ── Conversation Management ─────────────────────────────
 
-    async def handle_message(self, conversation_key: str, text: str) -> str | None:
+    async def handle_message(
+        self, conversation_key: str, text: str, live_card_callbacks: dict[str, Any] | None = None
+    ) -> str | None:
         """Handle an incoming message."""
         # Refresh tools each turn (pick up newly written dynamic tools)
         tools = self._refresh_tools()
@@ -164,6 +166,10 @@ class CodingAgent:
 
         # Refresh harness tools (pick up newly created dynamic tools)
         await harness.set_tools(tools)
+
+        # Set live card callbacks for real-time Feishu display
+        if live_card_callbacks:
+            await harness.set_live_card_callbacks(**live_card_callbacks)
 
         # Get RAG context for this turn
         rag_context = await self._rag.search(text)
@@ -207,9 +213,9 @@ class CodingAgent:
             if text_blocks:
                 resp = "\n".join(text_blocks)
             elif thinking_blocks:
-                # Model returned only thinking, no text — use last thinking as fallback
+                # Model returned only thinking, no text — use thinking as response
                 logger.debug("[CODING] no text blocks, falling back to thinking (%d blocks)", len(thinking_blocks))
-                resp = f"[thinking] {thinking_blocks[-1][:500]}"
+                resp = thinking_blocks[-1][:2000]
             else:
                 resp = "(empty response)"
 

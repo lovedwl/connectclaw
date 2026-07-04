@@ -70,9 +70,10 @@ class FeishuChannel(Channel):
             logger.info("[%s] %s", chat_id[:8], text[:100])
 
             try:
-                response = await on_message(chat_id, text)
+                # Create live card callbacks for this message
+                callbacks = channel.create_live_card(chat_id)
+                response = await on_message(chat_id, text, callbacks)
                 if response:
-                    # Stream response via CardKit for live typing effect
                     await channel._stream_text(chat_id, response)
             except Exception as e:
                 logger.error("Message handler error: %s", e)
@@ -96,19 +97,25 @@ class FeishuChannel(Channel):
         self._running = True
         self._stop_event.clear()
         try:
-            while self._running:
-                await asyncio.sleep(1)
+            while self._running and not self._stop_event.is_set():
+                await asyncio.sleep(0.5)
         except asyncio.CancelledError:
             logger.info("Channel keep-alive cancelled, disconnecting...")
         finally:
             self._running = False
 
-    async def close(self) -> None:
+    def close_safe(self) -> None:
+        """Signal shutdown without blocking (for signal handlers)."""
         self._running = False
         self._stop_event.set()
+
+    async def close(self) -> None:
+        self.close_safe()
         if self._sdk is not None:
             try:
-                await self._sdk.disconnect()
+                await asyncio.wait_for(self._sdk.disconnect(), timeout=3)
+            except asyncio.TimeoutError:
+                logger.debug("Disconnect timed out, forcing stop")
             except Exception as e:
                 logger.debug("Disconnect error (non-critical): %s", e)
             self._sdk = None
@@ -116,28 +123,13 @@ class FeishuChannel(Channel):
     # ── Sending ─────────────────────────────────────────────
 
     async def _stream_text(self, conversation_key: str, text: str) -> None:
-        """Stream text via CardKit markdown streaming for live typing effect.
-
-        Falls back to plain text send if streaming fails.
-        """
+        """Send response as markdown for full formatting (tables, bold, etc)."""
         if self._sdk is None:
             logger.error("_stream_text: not connected")
             return
-
-        # Split into paragraphs for natural-feeling streaming
-        chunks = _split_for_streaming(text)
-
-        async def producer(stream):
-            for chunk in chunks:
-                await stream.append(chunk)
-
-        try:
-            result = await self._sdk.stream(conversation_key, {"markdown": producer})
-            if not result.ok:
-                logger.debug("stream failed, falling back to text: %s", result.error)
-                await self.send_message(conversation_key, text)
-        except Exception as e:
-            logger.debug("stream exception, falling back to text: %s", e)
+        result = await self._sdk.send(conversation_key, {"markdown": text})
+        if not result.ok:
+            logger.debug("markdown send failed, falling back to text: %s", result.error)
             await self.send_message(conversation_key, text)
 
     async def send_message(self, conversation_key: str, text: str) -> str:
@@ -164,6 +156,129 @@ class FeishuChannel(Channel):
 
     async def send_thinking_indicator(self, conversation_key: str) -> None:
         pass  # Not supported by Feishu bot API
+
+    # ── Live Card (Phase 1 thinking + Phase 2 streaming) ─────
+
+    def create_live_card(self, chat_id: str) -> dict[str, Any]:
+        """Create callbacks for the agent loop. Phase 1: regular card with
+        collapsible thinking sections (update_card, throttled). Phase 2: streaming text."""
+        sdk = self._sdk
+        if sdk is None:
+            return {}
+
+        state = {
+            "chat_id": chat_id,
+            "message_id": None,
+            "history": "",
+            "thinking_buf": "",
+            "thinking_start": 0.0,
+            "text_started": False,
+            "last_flush": 0.0,
+        }
+        lock = asyncio.Lock()
+
+        async def _flush() -> None:
+            """Send or update the thinking card with collapsible sections."""
+            async with lock:
+                sections = _parse_history(state["history"])
+                if state["thinking_buf"]:
+                    elapsed = time.time() - state["thinking_start"]
+                    sections.append({
+                        "title": f"💭 思考中... ({elapsed:.1f}s)",
+                        "content": state["thinking_buf"],
+                        "expanded": True,
+                    })
+                card = _build_sections_card(sections)
+                if state["message_id"] is None:
+                    result = await sdk.send(chat_id, {"card": card})
+                    if result.ok and result.message_id:
+                        state["message_id"] = result.message_id
+                else:
+                    try:
+                        await sdk.update_card(state["message_id"], card)
+                    except Exception as e:
+                        logger.debug("update_card failed, re-sending: %s", e)
+                        state["message_id"] = None
+                        await sdk.send(chat_id, {"card": card})  # fallback: send new
+
+        # Fire card immediately
+        asyncio.create_task(_flush())
+
+        # ── Callbacks ──────────────────────────────────────
+
+        async def on_thinking_delta(text: str) -> None:
+            now = time.time()
+            async with lock:
+                if not state["thinking_buf"]:
+                    state["thinking_start"] = now
+                state["thinking_buf"] += text
+                # Throttle: max 1 update per second for thinking progress
+                if now - state["last_flush"] < 1.0:
+                    return
+                state["last_flush"] = now
+            await _flush()
+
+        async def on_thinking_done(elapsed: float) -> None:
+            async with lock:
+                if not state["thinking_buf"]:
+                    return
+                state["history"] += f"\n\n💭 思考了 {elapsed:.1f}s\n\n{state['thinking_buf']}\n"
+                state["thinking_buf"] = ""
+            await _flush()
+
+        async def on_tool_call(name: str, args: dict) -> None:
+            async with lock:
+                if state["thinking_buf"]:
+                    elapsed = time.time() - state["thinking_start"]
+                    state["history"] += f"\n\n💭 思考了 {elapsed:.1f}s\n\n{state['thinking_buf']}\n"
+                    state["thinking_buf"] = ""
+                state["history"] += f"\n\n🔧 **{name}**\n```json\n{json.dumps(args, ensure_ascii=False, indent=2)}\n```\n"
+            await _flush()
+
+        async def on_tool_result(name: str, is_error: bool, result_text: str = "") -> None:
+            async with lock:
+                status = "✅" if not is_error else "❌"
+                # Merge result into the LAST tool call header
+                old = f"🔧 **{name}**"
+                # Build result: for read, show line count; for others, show output
+                if name == "read" and result_text:
+                    lines = result_text.count("\n") + 1
+                    summary = f"读取 {lines} 行"
+                elif result_text:
+                    summary = result_text[:300]
+                else:
+                    summary = ""
+                new = f"🔧 **{name}** {status}"
+                parts = state["history"].rsplit(old, 1)
+                if len(parts) == 2:
+                    body = f"{new}\n{summary}" if summary else new
+                    state["history"] = parts[0] + body + parts[1]
+            await _flush()
+
+        async def on_text_delta(text: str) -> None:
+            needs_flush = False
+            async with lock:
+                if not state["text_started"]:
+                    state["text_started"] = True
+                    if state["thinking_buf"]:
+                        elapsed = time.time() - state["thinking_start"]
+                        state["history"] += f"\n\n💭 思考了 {elapsed:.1f}s\n\n{state['thinking_buf']}\n"
+                        state["thinking_buf"] = ""
+                    needs_flush = True
+            if needs_flush:
+                await _flush()
+
+        async def on_text_done() -> None:
+            pass
+
+        return {
+            "on_thinking_delta": on_thinking_delta,
+            "on_thinking_done": on_thinking_done,
+            "on_tool_call": on_tool_call,
+            "on_tool_result": on_tool_result,
+            "on_text_delta": on_text_delta,
+            "on_text_done": on_text_done,
+        }
 
     async def send_error(self, conversation_key: str, error: str) -> str:
         return await self.send_message(conversation_key, f"Error: {error[:500]}")
@@ -260,30 +375,83 @@ class FeishuChannel(Channel):
 
 
 def _split_for_streaming(text: str) -> list[str]:
-    """Split text into chunks for natural CardKit streaming."""
+    """Split text at punctuation boundaries for smooth CardKit streaming.
+
+    Each chunk is a natural language clause — Chinese flows character by
+    character, English keeps words together. CardKit's ~2 chars/50ms makes
+    this feel like real-time typing.
+    """
     if not text:
         return [""]
 
-    # Split on double-newline (paragraph boundaries)
     import re
-    paragraphs = re.split(r'\n\n+', text)
-    chunks: list[str] = []
-    for para in paragraphs:
-        para = para.strip()
-        if not para:
+    # Split at sentence/clause boundaries.
+    # '.' only when followed by space/newline/end (English period),
+    # not when part of filenames/numbers/URLs (main.py, 3.14).
+    parts = re.split(r'(?<=[。！？；：!?\n])\s*|(?<=\.)(?=\s+|$)\s*', text)
+    return [p for p in parts if p]
+
+
+def _parse_history(history: str) -> list[dict]:
+    """Parse history string into [{title, content, expanded}, ...]."""
+    import re
+    sections = []
+    parts = re.split(r'\n\n(?=💭 思考了|🔧 )', history.strip())
+    for part in parts:
+        part = part.strip()
+        if not part:
             continue
-        # Add paragraph separator between chunks
-        if chunks:
-            chunks.append("\n\n")
-        # Break long paragraphs on sentence boundaries
-        if len(para) > 80:
-            sentences = re.split(r'(?<=[.!?。！？])\s+', para)
-            for i, s in enumerate(sentences):
-                if s:
-                    chunks.append(s + (" " if i < len(sentences) - 1 else ""))
-        else:
-            chunks.append(para)
-    return chunks if chunks else [text]
+        lines = part.split("\n", 1)
+        title = lines[0].strip()
+        body = lines[1].strip() if len(lines) > 1 else ""
+        if len(body) > 1500:
+            body = body[:1500] + "..."
+        sections.append({
+            "title": title,
+            "content": body,
+            "expanded": False,
+        })
+    # Keep last 5, merge older
+    if len(sections) > 3:
+        older = sections[:-3]
+        sections = sections[-3:]
+        older_content = "\n\n".join(
+            f"**{s['title']}**\n{s['content']}" for s in older
+        )
+        sections.insert(0, {
+            "title": f"📋 更早的 {len(older)} 个步骤",
+            "content": older_content,
+            "expanded": False,
+        })
+    return sections
+
+
+def _build_sections_card(sections: list[dict]) -> dict:
+    """Build a card JSON with collapsible panel sections."""
+    elements = []
+    for sec in sections:
+        elements.append({
+            "tag": "collapsible_panel",
+            "expanded": sec.get("expanded", False),
+            "background_color": "grey",
+            "padding": "8px 8px 8px 8px",
+            "margin": "4px 0px 4px 0px",
+            "border": {"color": "grey", "corner_radius": "6px"},
+            "header": {
+                "title": {"tag": "plain_text", "content": sec["title"]},
+                "background_color": "grey",
+            },
+            "elements": [
+                {"tag": "markdown", "content": sec.get("content", "") or " "}
+            ],
+        })
+    if not elements:
+        elements.append({"tag": "markdown", "content": "💭 思考中..."})
+    return {
+        "schema": "2.0",
+        "config": {"wide_screen_mode": True},
+        "body": {"elements": elements},
+    }
 
 
 def _build_card(

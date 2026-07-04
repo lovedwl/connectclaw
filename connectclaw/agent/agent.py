@@ -72,6 +72,7 @@ class Agent:
         self.convert_to_llm = convert_to_llm or _default_convert_to_llm
         self.transform_context = transform_context
         self.stream_fn = stream_fn or stream_simple
+        self._live_card: dict[str, Any] = {}
 
         self._active_run: dict[str, Any] | None = None
 
@@ -186,6 +187,10 @@ class Agent:
 
     def set_thinking_level(self, level: ThinkingLevel) -> None:
         self._state.thinking_level = level
+
+    def set_live_card_callbacks(self, **callbacks: Any) -> None:
+        """Set live card callbacks for real-time Feishu display."""
+        self._live_card = callbacks
 
     def set_tools(self, tools: list[AgentTool]) -> None:
         self._state.tools = tools
@@ -309,6 +314,7 @@ class Agent:
         if self._state.thinking_level != "off":
             reasoning = self._state.thinking_level
 
+        lc = self._live_card
         return AgentLoopConfig(
             model=self._state.model,  # type: ignore[arg-type]
             reasoning=reasoning,
@@ -320,6 +326,12 @@ class Agent:
             tool_execution=self._tool_execution,
             session_id=self._session_id,
             max_retry_delay_ms=self._max_retry_delay_ms,
+            on_thinking_delta=lc.get("on_thinking_delta"),
+            on_thinking_done=lc.get("on_thinking_done"),
+            on_tool_call=lc.get("on_tool_call"),
+            on_tool_result=lc.get("on_tool_result"),
+            on_text_delta=lc.get("on_text_delta"),
+            on_text_done=lc.get("on_text_done"),
         )
 
     async def _emit_event(self, event: AgentEvent) -> None:
