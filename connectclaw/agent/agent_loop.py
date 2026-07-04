@@ -1,0 +1,600 @@
+"""
+Agent loop — the heart of the system.
+
+Double-loop pattern (mirrors pi-mono):
+- OUTER LOOP: processes follow-up messages (queued after agent would stop)
+- INNER LOOP: processes tool calls and steering messages
+"""
+
+import asyncio
+import json
+import time
+from typing import Any, Awaitable, Callable
+
+from connectclaw.logging import get_logger
+from connectclaw.provider.stream import stream_simple
+from connectclaw.provider.types import (
+    AssistantMessage,
+    Context,
+    ToolResultMessage,
+)
+
+from .types import (
+    AgentContext,
+    AgentEvent,
+    AgentLoopConfig,
+    AgentMessage,
+    AgentTool,
+    AgentToolResult,
+    ToolExecutionMode,
+)
+
+logger = get_logger(__name__)
+
+
+AgentEventSink = Callable[[AgentEvent], Awaitable[None]]
+
+
+# ── Public API ─────────────────────────────────────────────────
+
+
+async def run_agent_loop(
+    prompts: list[AgentMessage],
+    context: AgentContext,
+    config: AgentLoopConfig,
+    emit: AgentEventSink,
+    signal: asyncio.Event | None = None,
+) -> list[AgentMessage]:
+    """Start an agent loop with new prompt messages."""
+    new_messages: list[AgentMessage] = []
+    current_context = AgentContext(
+        system_prompt=context.system_prompt,
+        messages=[*context.messages, *prompts],
+        tools=context.tools,
+    )
+    new_messages.extend(prompts)
+
+    await emit({"type": "agent_start"})
+    await emit({"type": "turn_start"})
+    for prompt in prompts:
+        await emit({"type": "message_start", "message": prompt})
+        await emit({"type": "message_end", "message": prompt})
+
+    await _run_loop(current_context, new_messages, config, signal, emit)
+    return new_messages
+
+
+async def run_agent_loop_continue(
+    context: AgentContext,
+    config: AgentLoopConfig,
+    emit: AgentEventSink,
+    signal: asyncio.Event | None = None,
+) -> list[AgentMessage]:
+    """Continue an agent loop from existing context."""
+    if not context.messages:
+        raise ValueError("Cannot continue: no messages in context")
+
+    last = context.messages[-1]
+    if last.role == "assistant":
+        raise ValueError("Cannot continue from message role: assistant")
+
+    new_messages: list[AgentMessage] = []
+    current_context = AgentContext(
+        system_prompt=context.system_prompt,
+        messages=[*context.messages],
+        tools=context.tools,
+    )
+
+    await emit({"type": "agent_start"})
+    await emit({"type": "turn_start"})
+
+    await _run_loop(current_context, new_messages, config, signal, emit)
+    return new_messages
+
+
+# ── Main Loop ──────────────────────────────────────────────────
+
+
+async def _run_loop(
+    current_context: AgentContext,
+    new_messages: list[AgentMessage],
+    config: AgentLoopConfig,
+    signal: asyncio.Event | None,
+    emit: AgentEventSink,
+) -> None:
+    """Main loop logic shared by prompt and continue."""
+
+    first_turn = True
+    pending_messages: list[AgentMessage] = []
+
+    if config.get_steering_messages:
+        pending_messages = await config.get_steering_messages()
+
+    # OUTER LOOP: follow-up messages
+    while True:
+        has_more_tool_calls = True
+
+        # INNER LOOP: tool calls + steering
+        while has_more_tool_calls or pending_messages:
+            if signal and signal.is_set():
+                await emit({"type": "agent_end", "messages": new_messages})
+                return
+
+            if not first_turn:
+                await emit({"type": "turn_start"})
+            else:
+                first_turn = False
+
+            # Inject pending messages before next assistant response
+            if pending_messages:
+                for msg in pending_messages:
+                    await emit({"type": "message_start", "message": msg})
+                    await emit({"type": "message_end", "message": msg})
+                    current_context.messages.append(msg)
+                    new_messages.append(msg)
+                pending_messages = []
+
+            # Stream assistant response
+            message = await _stream_assistant_response(
+                current_context, config, signal, emit
+            )
+
+            if message.stop_reason in ("error", "aborted"):
+                await emit({
+                    "type": "turn_end",
+                    "message": message,
+                    "tool_results": [],
+                })
+                await emit({"type": "agent_end", "messages": new_messages})
+                return
+
+            new_messages.append(message)
+
+            # Check for tool calls
+            tool_calls = [c for c in message.content if c.get("type") == "toolCall"]
+            has_more_tool_calls = len(tool_calls) > 0
+
+            tool_results: list[ToolResultMessage] = []
+            if has_more_tool_calls:
+                tool_results = await _execute_tool_calls(
+                    current_context, message, tool_calls, config, signal, emit
+                )
+                for result in tool_results:
+                    current_context.messages.append(result)
+                    new_messages.append(result)
+
+            await emit({
+                "type": "turn_end",
+                "message": message,
+                "tool_results": [tr.__dict__ if hasattr(tr, "__dict__") else tr for tr in tool_results],
+            })
+
+            # Check steering messages
+            if config.get_steering_messages:
+                pending_messages = await config.get_steering_messages()
+            else:
+                pending_messages = []
+
+        # Check follow-up messages
+        follow_up: list[AgentMessage] = []
+        if config.get_follow_up_messages:
+            follow_up = await config.get_follow_up_messages()
+
+        if follow_up:
+            pending_messages = follow_up
+            continue
+
+        break
+
+    await emit({"type": "agent_end", "messages": new_messages})
+
+
+# ── Assistant Response Streaming ───────────────────────────────
+
+
+async def _stream_assistant_response(
+    context: AgentContext,
+    config: AgentLoopConfig,
+    signal: asyncio.Event | None,
+    emit: AgentEventSink,
+) -> AssistantMessage:
+    """Stream an assistant response from the LLM."""
+
+    # Apply context transform if configured
+    messages = list(context.messages)
+    if config.transform_context:
+        messages = await config.transform_context(messages, signal)
+
+    # Convert to LLM-compatible messages
+    llm_messages = messages
+    if config.convert_to_llm:
+        llm_messages = config.convert_to_llm(messages)
+        # Filter to recognized roles (all messages are dataclasses now)
+        llm_messages = [m for m in llm_messages if m.role in ("user", "assistant", "toolResult")]
+
+    logger.debug("[STREAM] sending %d messages to LLM (after filter, from %d total)",
+                 len(llm_messages), len(messages))
+
+    # Build LLM context
+    llm_context = Context(
+        system_prompt=context.system_prompt,
+        messages=llm_messages,  # type: ignore[arg-type]
+        tools=[_tool_to_tooldef(t) for t in (context.tools or [])] if context.tools else None,
+    )
+
+    # Resolve API key
+    api_key = config.api_key
+    if not api_key and config.get_api_key:
+        result = config.get_api_key(config.model.provider)
+        if asyncio.iscoroutine(result):
+            api_key = await result
+        else:
+            api_key = result
+
+    partial_message: AssistantMessage | None = None
+    added_partial = False
+    event_count = 0
+
+    logger.debug("[STREAM] calling stream_simple(api_key=%s, base_url=%s, reasoning=%s)",
+                 "***" if api_key else "None", config.model.base_url, config.reasoning)
+
+    async for event in stream_simple(
+        config.model,
+        llm_context,
+        api_key=api_key,
+        signal=signal,
+        reasoning=config.reasoning,
+        session_id=config.session_id,
+        max_retries=config.max_retries,
+        base_url=config.model.base_url,
+    ):
+        event_count += 1
+        if signal and signal.is_set():
+            break
+
+        # Debug first few events
+        if event_count <= 5:
+            logger.debug("[STREAM] event[%d]: %s delta_len=%d error=%s",
+                         event_count, event.type, len(event.delta or ""), event.error_message)
+
+        match event.type:
+            case "start":
+                if event.partial:
+                    partial_message = event.partial
+                    context.messages.append(partial_message)  # type: ignore[arg-type]
+                    added_partial = True
+                    await emit({
+                        "type": "message_start",
+                        "message": _message_to_dict(partial_message),
+                    })
+
+            case "text_delta" | "thinking_delta" | "toolcall_delta":
+                if event.partial and partial_message:
+                    partial_message = event.partial
+                    context.messages[-1] = partial_message  # type: ignore[index]
+                    await emit({
+                        "type": "message_update",
+                        "message": _message_to_dict(partial_message),
+                        "stream_event": event.__dict__,
+                    })
+
+            case "done":
+                if event.message:
+                    final = event.message
+                    logger.debug("[STREAM] done: stop_reason=%s content_blocks=%d",
+                                 final.stop_reason, len(final.content))
+                    if final.stop_reason == "error":
+                        logger.debug("[STREAM]   error_message=%s", final.error_message)
+                    if added_partial:
+                        context.messages[-1] = final  # type: ignore[index]
+                    else:
+                        context.messages.append(final)  # type: ignore[arg-type]
+                        await emit({
+                            "type": "message_start",
+                            "message": _message_to_dict(final),
+                        })
+                    await emit({
+                        "type": "message_end",
+                        "message": _message_to_dict(final),
+                    })
+                    return final
+
+            case "error":
+                logger.error("[STREAM] ERROR: %s", event.error_message)
+                error_msg = AssistantMessage(
+                    content=[{"type": "text", "text": ""}],
+                    model=config.model.id,
+                    stop_reason="error",
+                    usage={},
+                    error_message=event.error_message,
+                    timestamp=time.time() * 1000,
+                )
+                if added_partial:
+                    context.messages[-1] = error_msg  # type: ignore[index]
+                await emit({
+                    "type": "message_end",
+                    "message": _message_to_dict(error_msg),
+                })
+                return error_msg
+
+    logger.warning("[STREAM] stream ended with %d events, no done/error", event_count)
+    # If stream ended without done/error, return whatever we have
+    final = partial_message or AssistantMessage(
+        content=[{"type": "text", "text": ""}],
+        model=config.model.id,
+        stop_reason="stop",
+        usage={},
+        timestamp=time.time() * 1000,
+    )
+    return final
+
+
+# ── Tool Execution ─────────────────────────────────────────────
+
+
+async def _execute_tool_calls(
+    current_context: AgentContext,
+    assistant_message: AssistantMessage,
+    tool_calls: list[dict[str, Any]],
+    config: AgentLoopConfig,
+    signal: asyncio.Event | None,
+    emit: AgentEventSink,
+) -> list[ToolResultMessage]:
+    """Execute tool calls. Supports sequential and parallel modes."""
+
+    if config.tool_execution == "sequential":
+        return await _execute_sequential(
+            current_context, assistant_message, tool_calls, config, signal, emit
+        )
+    return await _execute_parallel(
+        current_context, assistant_message, tool_calls, config, signal, emit
+    )
+
+
+async def _execute_sequential(
+    current_context: AgentContext,
+    assistant_message: AssistantMessage,
+    tool_calls: list[dict[str, Any]],
+    config: AgentLoopConfig,
+    signal: asyncio.Event | None,
+    emit: AgentEventSink,
+) -> list[ToolResultMessage]:
+    results: list[ToolResultMessage] = []
+
+    for tc in tool_calls:
+        if signal and signal.is_set():
+            break
+        result_msg = await _execute_single_tool(
+            current_context, assistant_message, tc, config, signal, emit
+        )
+        results.append(result_msg)
+        await emit({"type": "message_start", "message": _message_to_dict(result_msg)})
+        await emit({"type": "message_end", "message": _message_to_dict(result_msg)})
+
+    return results
+
+
+async def _execute_parallel(
+    current_context: AgentContext,
+    assistant_message: AssistantMessage,
+    tool_calls: list[dict[str, Any]],
+    config: AgentLoopConfig,
+    signal: asyncio.Event | None,
+    emit: AgentEventSink,
+) -> list[ToolResultMessage]:
+    """Parallel execution: preflight sequentially, execute concurrently."""
+
+    # Phase 1: Preflight (sequential)
+    preparations: list[tuple[dict, AgentTool, dict]] = []
+    for tc in tool_calls:
+        await emit({
+            "type": "tool_execution_start",
+            "tool_call_id": tc["id"],
+            "tool_name": tc["name"],
+            "args": tc.get("arguments", {}),
+        })
+
+        tool, validated_args = await _prepare_tool_call(
+            current_context, tc, config, signal
+        )
+        preparations.append((tc, tool, validated_args))
+
+    # Phase 2: Execute all concurrently
+    async def run_one(tc: dict, tool: AgentTool, args: dict) -> AgentToolResult:
+        try:
+            result = await tool.execute(tc["id"], args, signal=signal)
+            return result
+        except Exception as e:
+            return AgentToolResult(
+                content=[{"type": "text", "text": str(e)}],
+                details=None,
+            )
+
+    tasks = [run_one(tc, tool, args) for tc, tool, args in preparations]
+    executed = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Phase 3: Finalize in source order
+    results: list[ToolResultMessage] = []
+    for (tc, tool, args), exec_result in zip(preparations, executed):
+        if signal and signal.is_set():
+            break
+
+        if isinstance(exec_result, Exception):
+            result = AgentToolResult(
+                content=[{"type": "text", "text": str(exec_result)}],
+                details=None,
+            )
+            is_error = True
+        elif isinstance(exec_result, AgentToolResult):
+            result = exec_result
+            is_error = False
+        else:
+            result = AgentToolResult(
+                content=[{"type": "text", "text": f"Unexpected result: {exec_result}"}],
+                details=None,
+            )
+            is_error = True
+
+        # Call after_tool_call hook
+        if config.after_tool_call:
+            hook_result = await config.after_tool_call(
+                {
+                    "tool_call": tc,
+                    "result": result,
+                    "is_error": is_error,
+                    "context": current_context,
+                },
+                signal,
+            )
+            if hook_result and hook_result.get("result"):
+                result = hook_result["result"]
+            if hook_result and "is_error" in hook_result:
+                is_error = hook_result["is_error"]
+
+        await emit({
+            "type": "tool_execution_end",
+            "tool_call_id": tc["id"],
+            "tool_name": tc["name"],
+            "result": result.__dict__,
+            "is_error": is_error,
+        })
+
+        msg = ToolResultMessage(
+            tool_call_id=tc["id"],
+            tool_name=tc["name"],
+            content=result.content,
+            is_error=is_error,
+            timestamp=time.time() * 1000,
+        )
+        await emit({"type": "message_start", "message": _message_to_dict(msg)})
+        await emit({"type": "message_end", "message": _message_to_dict(msg)})
+        results.append(msg)
+
+    return results
+
+
+async def _execute_single_tool(
+    current_context: AgentContext,
+    assistant_message: AssistantMessage,
+    tc: dict[str, Any],
+    config: AgentLoopConfig,
+    signal: asyncio.Event | None,
+    emit: AgentEventSink,
+) -> ToolResultMessage:
+    """Execute a single tool call (sequential mode)."""
+
+    await emit({
+        "type": "tool_execution_start",
+        "tool_call_id": tc["id"],
+        "tool_name": tc["name"],
+        "args": tc.get("arguments", {}),
+    })
+
+    tool, validated_args = await _prepare_tool_call(
+        current_context, tc, config, signal
+    )
+    result, is_error = await _execute_prepared_tool(tc, tool, validated_args, signal)
+
+    if config.after_tool_call:
+        hook_result = await config.after_tool_call(
+            {
+                "tool_call": tc,
+                "result": result,
+                "is_error": is_error,
+                "context": current_context,
+            },
+            signal,
+        )
+        if hook_result and hook_result.get("result"):
+            result = hook_result["result"]
+        if hook_result and "is_error" in hook_result:
+            is_error = hook_result["is_error"]
+
+    await emit({
+        "type": "tool_execution_end",
+        "tool_call_id": tc["id"],
+        "tool_name": tc["name"],
+        "result": result.__dict__,
+        "is_error": is_error,
+    })
+
+    msg = ToolResultMessage(
+        tool_call_id=tc["id"],
+        tool_name=tc["name"],
+        content=result.content,
+        is_error=is_error,
+        timestamp=time.time() * 1000,
+    )
+    return msg
+
+
+async def _prepare_tool_call(
+    current_context: AgentContext,
+    tc: dict[str, Any],
+    config: AgentLoopConfig,
+    signal: asyncio.Event | None,
+) -> tuple[AgentTool, dict[str, Any]]:
+    """Find tool, validate args, call before_tool_call hook."""
+    tool = None
+    for t in (current_context.tools or []):
+        if t.name == tc["name"]:
+            tool = t
+            break
+
+    if tool is None:
+        raise RuntimeError(f"Tool '{tc['name']}' not found")
+
+    args = tc.get("arguments", {})
+
+    # Call before_tool_call hook
+    if config.before_tool_call:
+        hook_result = await config.before_tool_call(
+            {
+                "tool_call": tc,
+                "args": args,
+                "context": current_context,
+            },
+            signal,
+        )
+        if hook_result and hook_result.get("block"):
+            raise RuntimeError(hook_result.get("reason", "Tool execution blocked"))
+
+    return tool, args
+
+
+async def _execute_prepared_tool(
+    tc: dict[str, Any],
+    tool: AgentTool,
+    args: dict[str, Any],
+    signal: asyncio.Event | None,
+) -> tuple[AgentToolResult, bool]:
+    """Execute a prepared tool call."""
+    try:
+        result = await tool.execute(tc["id"], args, signal=signal)
+        return result, False
+    except Exception as e:
+        return (
+            AgentToolResult(
+                content=[{"type": "text", "text": str(e)}],
+                details=None,
+            ),
+            True,
+        )
+
+
+# ── Helpers ────────────────────────────────────────────────────
+
+
+def _tool_to_tooldef(tool: AgentTool):
+    """Convert AgentTool to ToolDef for the provider layer."""
+    from connectclaw.provider.types import ToolDef
+    return ToolDef(
+        name=tool.name,
+        description=tool.description,
+        parameters=tool.parameters,
+    )
+
+
+def _message_to_dict(msg) -> dict[str, Any]:
+    """Return message as-is — keep dataclass intact so state.messages uses .role."""
+    return msg

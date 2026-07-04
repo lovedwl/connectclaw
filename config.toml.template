@@ -1,0 +1,58 @@
+# ConnectClaw Configuration Template
+# Copy this file to ~/.connectclaw/config.toml and fill in your values
+
+[llm]
+# LLM API key (required)
+api_key = "${LLM_API_KEY}"
+# LLM API base URL
+base_url = "https://api.deepseek.com"
+# Model ID to use
+model_id = "deepseek-chat"
+
+[feishu]
+# Feishu/Lark app ID (required)
+app_id = "${FEISHU_APP_ID}"
+# Feishu/Lark app secret (required)
+app_secret = "${FEISHU_APP_SECRET}"
+
+[vision]
+# Vision model API key (for image analysis, optional)
+api_key = "${VISION_API_KEY}"
+# Vision API base URL
+base_url = ""
+# Vision model ID
+model_id = ""
+
+[agent]
+# Working directory (default: current directory)
+cwd = "."
+# Thinking/reasoning level: off, minimal, low, medium, high, xhigh
+thinking_level = "off"
+
+[session]
+# Session storage directory
+dir = "~/.connectclaw/sessions"
+
+[rag]
+# Enable RAG (requires lancedb, sentence-transformers, FlagEmbedding)
+enabled = false
+# Directory containing documents to index
+docs_dir = ""
+# LanceDB database path
+db_path = "~/.connectclaw/rag_db"
+# Number of candidates to retrieve from vector search
+top_k = 20
+# Number of results after reranking
+top_n = 5
+
+[web_search]
+# Bing Web Search API key (leave empty to disable)
+bing_api_key = ""
+
+[compaction]
+# Enable automatic context compaction
+enabled = true
+# Token reserve before triggering compaction
+reserve_tokens = 16384
+# Tokens to keep in recent context after compaction
+keep_recent_tokens = 20000

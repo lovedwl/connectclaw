@@ -1,0 +1,44 @@
+[project]
+name = "connectclaw"
+version = "0.1.0"
+description = "AI coding agent connected to Feishu IM"
+requires-python = ">=3.14"
+readme = "README.md"
+license = { text = "AGPL-3.0-or-later" }
+
+dependencies = [
+    "openai>=2.0.0",
+    "tiktoken>=0.9.0",
+    "aiofiles>=25.0.0",
+    "pyyaml>=6.0",
+    "questionary>=2.1.1",
+    "qrcode>=8.2",
+    "lark-oapi>=1.7.0",
+    "lark-channel-sdk>=1.1.0",
+]
+
+[project.optional-dependencies]
+rag = [
+    "lancedb>=0.20.0",
+    "sentence-transformers>=4.0.0",
+    "FlagEmbedding>=1.3.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.25.0",
+]
+
+[project.scripts]
+connectclaw = "connectclaw.main:cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["connectclaw"]
+
+[tool.hatch.build]
+only-packages = true
