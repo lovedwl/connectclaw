@@ -7,8 +7,8 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 
-OnMessageCallback = Callable[[str, str], Awaitable[str | None]]
-"""Callback: (conversation_key, text) -> response_text"""
+OnMessageCallback = Callable[..., Awaitable[str | None]]
+"""Callback: (conversation_key, text, live_card_callbacks=None) -> response_text"""
 
 
 class Channel(ABC):

@@ -35,18 +35,19 @@ cp .env.template .env
 
 | 功能 | 说明 |
 |------|------|
-| 文件读写 | read / write（写已存在文件必须先读） |
+| 实时思考卡片 | 思考过程 + 工具调用可见，折叠式展示，工具结果显示 |
+| 文件读写 | read / write（写已存在文件必须先读，限定 cwd） |
 | Shell 执行 | bash（三级安全：危险拒绝 / 可疑授权 / 沙箱隔离） |
 | 网页搜索 | web_search（Bing 子 agent） |
-| 图片分析 | image_analyze（Mimo 视觉模型子 agent） |
+| 图片分析 | image_analyze（通用视觉模型，OpenAI 兼容 API） |
 | 并行子 agent | task（DAG 并行分发，全部完成后聚合结果） |
 | 自创工具 | 写入 `~/.connectclaw/tools/*.tool.json`，下一轮立即可用 |
-| 流式输出 | CardKit 流式卡片，逐段打字效果 |
+| Markdown 回复 | 支持表格、加粗、代码块等 GFM 格式 |
 | RAG | BGE-M3 嵌入 + LanceDB + BGE-Reranker 重排序（可选） |
 | 沙箱 | bwrap → unshare → rlimit 三层自动降级 |
 | 上下文压缩 | provider usage 锚点估算 + 结构化摘要 + 增量合并 |
 | 会话持久化 | JSONL 树形结构，支持分支和压缩 |
-| 飞书卡片授权 | bash 可疑命令 / 网络访问 / 沙箱逃逸需用户审批 |
+| 飞书卡片授权 | bash 可疑命令 / 网络访问 / 沙箱逃逸需用户审批，60s 超时 |
 
 ## 项目结构
 

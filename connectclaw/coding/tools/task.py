@@ -18,6 +18,7 @@ import time
 from typing import Any
 
 from connectclaw.agent.agent import Agent
+from connectclaw.agent.harness.messages import convert_to_llm
 from connectclaw.agent.types import AgentTool, AgentToolResult, ThinkingLevel
 from connectclaw.provider.types import Model
 
@@ -149,6 +150,8 @@ class TaskTool(AgentTool):
             model=self._model,
             thinking_level=self._thinking_level,
             tools=tools,
+            convert_to_llm=convert_to_llm,
+            get_api_key=lambda _: self._api_key,
         )
 
         try:

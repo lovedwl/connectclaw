@@ -106,6 +106,7 @@ class AgentHarness:
         self._compaction_settings = compaction_settings or CompactionSettings()
         self._get_api_key = get_api_key
         self._hooks = AgentHarnessHooks()
+        self._live_card_callbacks: dict[str, Any] = {}
 
         # Resolve system prompt
         if callable(system_prompt):
@@ -184,6 +185,11 @@ class AgentHarness:
         self._model = model
         if self._agent:
             self._agent.set_model(model)
+
+    async def set_live_card_callbacks(self, **callbacks: Any) -> None:
+        self._live_card_callbacks = callbacks
+        if self._agent:
+            self._agent.set_live_card_callbacks(**callbacks)
 
     async def set_tools(self, tools: list[AgentTool]) -> None:
         self._tools = tools
@@ -272,6 +278,7 @@ class AgentHarness:
                 convert_to_llm=convert_to_llm,
                 get_api_key=self._get_api_key,
             )
+            self._agent.set_live_card_callbacks(**self._live_card_callbacks)
         else:
             # Update existing agent state for the new turn
             self._agent.set_system_prompt(system_prompt)

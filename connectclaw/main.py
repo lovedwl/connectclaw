@@ -86,10 +86,10 @@ async def main(argv: list[str] | None = None) -> None:
     if config.rag.enabled:
         await coding_agent.initialize_rag()
 
-    async def on_message(conversation_key: str, text: str) -> str | None:
+    async def on_message(conversation_key: str, text: str, live_card_callbacks: dict | None = None) -> str | None:
         logger.info("[%s] User: %s", conversation_key[:8], text[:100])
         try:
-            response = await coding_agent.handle_message(conversation_key, text)
+            response = await coding_agent.handle_message(conversation_key, text, live_card_callbacks)
             if response:
                 logger.info("[%s] Assistant: %s", conversation_key[:8], response[:100])
             return response
@@ -104,6 +104,7 @@ async def main(argv: list[str] | None = None) -> None:
     def _on_sigint() -> None:
         logger.info("Received SIGINT, shutting down...")
         stop_event.set()
+        channel.close_safe()
 
     loop.add_signal_handler(signal.SIGINT, _on_sigint)
 

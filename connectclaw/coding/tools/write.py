@@ -16,7 +16,7 @@ class WriteTool(AgentTool):
     name = "write"
     label = "write"
     description = (
-        "Write content to a file. "
+        "Write content to a file. Only files within the working directory can be written. "
         "If the file already exists, you MUST read it first using the read tool. "
         "The file will be written atomically."
     )
@@ -49,6 +49,21 @@ class WriteTool(AgentTool):
         file_path = params["file_path"]
         content = params["content"]
         absolute_path = self._resolve_path(file_path)
+
+        # Only allow writes within cwd — bash runs in sandbox which can't
+        # see files outside cwd, so write must match.
+        cwd_abs = os.path.abspath(self._cwd)
+        if not absolute_path.startswith(cwd_abs + os.sep) and absolute_path != cwd_abs:
+            return AgentToolResult(
+                content=[{
+                    "type": "text",
+                    "text": (
+                        f"Error: Can only write files within the working directory "
+                        f"({self._cwd}). '{file_path}' is outside. "
+                        f"Use /tmp paths inside cwd or write to the project directory."
+                    ),
+                }],
+            )
 
         # Enforce read-before-write for existing files
         if os.path.exists(absolute_path):

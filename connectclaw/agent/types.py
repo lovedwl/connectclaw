@@ -156,3 +156,11 @@ class AgentLoopConfig:
     transport: str = "sse"
     max_retry_delay_ms: int = 60_000
     max_retries: int = 3
+    # Live card callbacks (Phase 1 thinking card + Phase 2 text streaming)
+    on_thinking_delta: Callable[[str], Awaitable[None]] | None = None
+    on_thinking_done: Callable[[float], Awaitable[None]] | None = None
+    on_tool_call: Callable[[str, dict], Awaitable[None]] | None = None
+    on_tool_result: Callable[[str, bool, str], Awaitable[None]] | None = None
+    # (tool_name, is_error, result_text)
+    on_text_delta: Callable[[str], Awaitable[None]] | None = None
+    on_text_done: Callable[[], Awaitable[None]] | None = None
