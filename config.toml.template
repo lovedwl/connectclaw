@@ -46,8 +46,13 @@ top_k = 20
 top_n = 5
 
 [web_search]
-# Bing Web Search API key (leave empty to disable)
-bing_api_key = ""
+# Path to glyph binary (free TUI browser, Bing engine, no API key needed)
+# Install: git clone https://github.com/k1y0miiii/glyph.git && cd glyph && cargo install --locked --path crates/app
+glyph_bin = "glyph"
+# Max characters in search/fetch response
+max_chars = 8000
+# Timeout in seconds
+timeout = 30
 
 [compaction]
 # Enable automatic context compaction

@@ -229,7 +229,10 @@ async def _pick_options(existing: dict | None = None) -> dict:
     if rag:
         docs = await questionary.path("Document directory:", default=".", only_directories=True).ask_async() or ""
 
-    bing = await questionary.password("Bing Web Search API Key (optional):").ask_async()
+    glyph = await questionary.text(
+        "Glyph binary path (web search, default: glyph):",
+        default="glyph",
+    ).ask_async()
     vision_api_key = await questionary.password("Vision Model API Key (optional):").ask_async()
     vision_model_id = ""
     vision_base_url = ""
@@ -241,7 +244,7 @@ async def _pick_options(existing: dict | None = None) -> dict:
         "thinking_level": thinking or "off",
         "rag_enabled": bool(rag and docs),
         "rag_docs_dir": docs or "",
-        "bing_api_key": (bing or "").strip(),
+        "glyph_bin": (glyph or "glyph").strip(),
         "vision_api_key": (vision_api_key or "").strip(),
         "vision_model_id": vision_model_id.strip(),
         "vision_base_url": vision_base_url.strip(),
@@ -261,7 +264,7 @@ def _write_config(feishu: dict, model: dict, opts: dict) -> str:
         f"[agent]\ncwd = \"{os.getcwd()}\"\nthinking_level = \"{opts['thinking_level']}\"\n\n"
         f"[session]\ndir = \"~/.connectclaw/sessions\"\n\n"
         f"[rag]\nenabled = {str(opts['rag_enabled']).lower()}\ndocs_dir = \"{opts['rag_docs_dir']}\"\ndb_path = \"~/.connectclaw/rag_db\"\ntop_k = 20\ntop_n = 5\n\n"
-        f"[web_search]\nbing_api_key = \"{opts['bing_api_key']}\"\n\n"
+        f"[web_search]\nglyph_bin = \"{opts['glyph_bin']}\"\nmax_chars = 8000\ntimeout = 30\n\n"
         f"[compaction]\nenabled = true\nreserve_tokens = 16384\nkeep_recent_tokens = 20000\n"
     )
     with open(CONFIG_PATH, "w") as f:
@@ -299,7 +302,7 @@ def _load_existing_config() -> dict | None:
         "thinking_level": c.agent.thinking_level,
         "rag_enabled": c.rag.enabled,
         "rag_docs_dir": c.rag.docs_dir,
-        "bing_api_key": c.web_search.bing_api_key,
+        "glyph_bin": c.web_search.glyph_bin,
         "vision_api_key": c.vision.api_key,
         "vision_model_id": c.vision.model_id,
         "vision_base_url": c.vision.base_url,

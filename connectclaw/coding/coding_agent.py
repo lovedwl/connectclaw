@@ -26,7 +26,7 @@ from .tools.dynamic import load_dynamic_tools
 from .tools.image_analyze import create_image_analyze_tool
 from .tools.read import create_read_tool
 from .tools.task import create_task_tool
-from .tools.web_search import create_web_search_tool
+from .tools.web_search import create_web_fetch_tool, create_web_search_tool
 from .tools.write import create_write_tool
 
 logger = get_logger(__name__)
@@ -59,7 +59,16 @@ class CodingAgent:
         self._write_tool = create_write_tool(config.agent.cwd, self._read_tool)
         self._bash_guard = BashGuard()
         self._bash_tool = create_bash_tool(config.agent.cwd, self._bash_guard)
-        self._web_search_tool = create_web_search_tool(api_key=config.web_search.bing_api_key)
+        self._web_search_tool = create_web_search_tool(
+            glyph_bin=config.web_search.glyph_bin,
+            max_chars=config.web_search.max_chars,
+            timeout=config.web_search.timeout,
+        )
+        self._web_fetch_tool = create_web_fetch_tool(
+            glyph_bin=config.web_search.glyph_bin,
+            max_chars=config.web_search.max_chars,
+            timeout=config.web_search.timeout,
+        )
         self._image_tool = create_image_analyze_tool(
             api_key=config.vision.api_key,
             base_url=config.vision.base_url,
@@ -136,6 +145,7 @@ class CodingAgent:
             self._write_tool,
             self._bash_tool,
             self._web_search_tool,
+            self._web_fetch_tool,
             self._image_tool,
         ]
 

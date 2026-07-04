@@ -198,24 +198,50 @@ class JsonlSessionStorage:
         return entry_id
 
     async def get_path_to_root(self, leaf_id: str | None = None) -> list[SessionEntry]:
-        """Walk parent chain from leaf to root."""
+        """Collect all entries from root to leaf, handling branching (parallel tool calls).
+
+        The session DAG branches when an assistant message issues multiple parallel
+        tool calls — each tool result shares the same parent.  A simple parent-chain
+        walk would follow only one sibling and silently drop the others, breaking
+        tool_call/tool_result pairing.
+
+        This method does a full DFS traversal from the root node, visiting siblings
+        in insertion order, so all parallel tool results are preserved.
+        """
         lid = leaf_id or self._current_leaf_id
         if not lid:
             return []
 
-        result: list[SessionEntry] = []
-        current = self._by_id.get(lid)
-        while current:
-            result.append(current)
-            pid = None
-            if hasattr(current, "parent_id"):
-                pid = current.parent_id
+        # Build children map keyed by parent_id.
+        children: dict[str, list[SessionEntry]] = {}
+        for entry in self._entries:
+            pid: str | None = None
+            if hasattr(entry, "parent_id"):
+                pid = entry.parent_id
             if pid:
-                current = self._by_id.get(pid)
-            else:
-                break
+                children.setdefault(pid, []).append(entry)
 
-        return list(reversed(result))
+        # Find roots (entries with no parent_id).
+        roots = [
+            e for e in self._entries
+            if not (hasattr(e, "parent_id") and e.parent_id)
+        ]
+
+        result: list[SessionEntry] = []
+
+        def walk(entry_id: str) -> None:
+            entry = self._by_id.get(entry_id)
+            if entry is None:
+                return
+            result.append(entry)
+            # Visit children in insertion order (preserved by _entries list order).
+            for child in children.get(entry_id, []):
+                walk(child.id)
+
+        for root in roots:
+            walk(root.id)
+
+        return result
 
     @property
     def entries(self) -> list[SessionEntry]:
