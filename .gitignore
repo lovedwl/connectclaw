@@ -1,0 +1,16 @@
+# ConnectClaw
+.env
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+dist/
+build/
+*.egg-info/
+config.toml
+.DS_Store
+*.jsonl
+sessions/
+
+# uv
+/uv.lock
