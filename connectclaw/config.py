@@ -120,7 +120,9 @@ class RAGConfig:
 
 @dataclass
 class WebSearchConfig:
-    bing_api_key: str = ""
+    glyph_bin: str = "glyph"
+    max_chars: int = 8000
+    timeout: int = 30
 
 
 @dataclass
@@ -235,9 +237,15 @@ class Config:
         # Web Search
         ws = raw.get("web_search", {})
         web_search = WebSearchConfig(
-            bing_api_key=_expand_env(
-                os.environ.get("BING_API_KEY", "")
-                or ws.get("bing_api_key", "")
+            glyph_bin=os.environ.get("GLYPH_BIN")
+                or ws.get("glyph_bin", "glyph"),
+            max_chars=int(
+                os.environ.get("WEB_SEARCH_MAX_CHARS", "")
+                or ws.get("max_chars", 8000)
+            ),
+            timeout=int(
+                os.environ.get("WEB_SEARCH_TIMEOUT", "")
+                or ws.get("timeout", 30)
             ),
         )
 

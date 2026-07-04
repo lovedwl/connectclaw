@@ -231,6 +231,11 @@ async def _stream_assistant_response(
         # Filter to recognized roles (all messages are dataclasses now)
         llm_messages = [m for m in llm_messages if m.role in ("user", "assistant", "toolResult")]
 
+        # Defensive: strip orphan tool_calls — assistant messages whose
+        # tool_call_ids have no matching tool result messages.  Happens when
+        # a session was interrupted mid-turn (tools issued but never executed).
+        llm_messages = _strip_orphan_tool_calls(llm_messages)
+
     logger.debug("[STREAM] sending %d messages to LLM (after filter, from %d total)",
                  len(llm_messages), len(messages))
 
@@ -646,6 +651,71 @@ async def _execute_prepared_tool(
 
 
 # ── Helpers ────────────────────────────────────────────────────
+
+
+def _strip_orphan_tool_calls(messages: list) -> list:
+    """Remove tool_calls from assistant messages that lack matching tool results.
+
+    If a session was interrupted mid-turn (e.g. the agent issued tool calls but
+    crashed before executing them), the stored history contains an assistant
+    message with tool_calls but no ToolResultMessage for those call IDs.
+    The API rejects such messages with a 400 error.
+    """
+    # Collect all tool_call_ids that have matching tool result messages.
+    satisfied_ids: set[str] = set()
+    for m in messages:
+        if m.role == "toolResult" and hasattr(m, "tool_call_id") and m.tool_call_id:
+            satisfied_ids.add(m.tool_call_id)
+
+    result = []
+    for m in messages:
+        if m.role != "assistant":
+            result.append(m)
+            continue
+
+        content = getattr(m, "content", [])
+        if not isinstance(content, list):
+            result.append(m)
+            continue
+
+        # Split content into tool_calls and non-tool-call blocks.
+        tool_blocks = [b for b in content if b.get("type") == "toolCall"]
+        non_tool_blocks = [b for b in content if b.get("type") != "toolCall"]
+
+        if not tool_blocks:
+            result.append(m)
+            continue
+
+        # Check whether every tool_call in this message has a matching result.
+        orphan = False
+        for tb in tool_blocks:
+            tc_id = tb.get("id", "")
+            if tc_id and tc_id not in satisfied_ids:
+                orphan = True
+                break
+
+        if not orphan:
+            result.append(m)
+            continue
+
+        # Orphan found — strip tool_calls, keep text + thinking only.
+        get_logger(__name__).warning(
+            "Stripping orphan tool_calls from assistant message (%d tool call(s), "
+            "missing tool results — session was interrupted mid-turn)",
+            len(tool_blocks),
+        )
+        stripped = type(m)(
+            role="assistant",
+            content=non_tool_blocks,
+            model=getattr(m, "model", ""),
+            stop_reason=getattr(m, "stop_reason", "stop"),
+            usage=getattr(m, "usage", {}),
+            error_message=getattr(m, "error_message", None),
+            timestamp=getattr(m, "timestamp", 0.0),
+        )
+        result.append(stripped)
+
+    return result
 
 
 def _tool_to_tooldef(tool: AgentTool):

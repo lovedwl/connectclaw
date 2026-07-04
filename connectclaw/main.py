@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import signal
 import sys
 
@@ -69,7 +70,10 @@ async def main(argv: list[str] | None = None) -> None:
     logger.info("  CWD: %s", config.agent.cwd)
     logger.info("  Sessions: %s", config.session.dir)
     logger.info("  RAG: %s", "enabled" if config.rag.enabled else "disabled")
-    logger.info("  Web Search: %s", "configured" if config.web_search.bing_api_key else "not configured")
+    glyph_available = shutil.which(config.web_search.glyph_bin) is not None or os.path.isfile(
+        os.path.expanduser("~/.cargo/bin/glyph")
+    )
+    logger.info("  Web Search: %s", "available (glyph)" if glyph_available else "glyph not found — git clone https://github.com/k1y0miiii/glyph.git && cd glyph && cargo install --locked --path crates/app")
     logger.info("  Vision: %s", "configured" if config.vision.api_key else "not configured")
 
     if not config.llm.api_key:

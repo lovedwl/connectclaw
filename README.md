@@ -38,7 +38,7 @@ cp .env.template .env
 | 实时思考卡片 | 思考过程 + 工具调用可见，折叠式展示，工具结果显示 |
 | 文件读写 | read / write（写已存在文件必须先读，限定 cwd） |
 | Shell 执行 | bash（三级安全：危险拒绝 / 可疑授权 / 沙箱隔离） |
-| 网页搜索 | web_search（Bing 子 agent） |
+| 网页搜索 | web_search + web_fetch（glyph 浏览器，Bing 引擎，免费） |
 | 图片分析 | image_analyze（通用视觉模型，OpenAI 兼容 API） |
 | 并行子 agent | task（DAG 并行分发，全部完成后聚合结果） |
 | 自创工具 | 写入 `~/.connectclaw/tools/*.tool.json`，下一轮立即可用 |
@@ -57,7 +57,7 @@ connectclaw/
 ├── agent/        Agent 框架 + 双循环引擎
 │   └── harness/  编排器 · 会话 · 压缩 · RAG · Prompt
 ├── coding/       应用层
-│   ├── tools/     所有工具（read/write/bash/web_search/image_analyze/task/dynamic）
+│   ├── tools/     所有工具（read/write/bash/web_search/web_fetch/image_analyze/task/dynamic）
 │   └── safety/    三层沙箱
 ├── channel/      飞书 IM 接入
 ├── config.py     TOML 配置管理
