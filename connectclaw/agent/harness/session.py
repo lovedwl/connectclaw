@@ -16,6 +16,8 @@ from typing import Any, Literal
 import aiofiles
 import aiofiles.os
 
+from connectclaw.provider.types import Message, normalize_message
+
 
 # ── Session Entries ────────────────────────────────────────────
 
@@ -153,7 +155,7 @@ class JsonlSessionStorage:
         await aiofiles.os.makedirs(os.path.dirname(file_path), exist_ok=True)
 
         async with aiofiles.open(file_path, "w") as f:
-            await f.write(json.dumps(header.__dict__) + "\n")
+            await f.write(json.dumps(header.__dict__, ensure_ascii=False) + "\n")
 
         storage = cls(file_path)
         storage._header = header
@@ -163,7 +165,7 @@ class JsonlSessionStorage:
         """Append one line to JSONL file and update in-memory state."""
         entry_data = _entry_to_dict(entry)
         async with aiofiles.open(self._file_path, "a") as f:
-            await f.write(json.dumps(entry_data, default=str) + "\n")
+            await f.write(json.dumps(entry_data, default=str, ensure_ascii=False) + "\n")
 
         self._entries.append(entry)
         self._by_id[entry.id] = entry
@@ -260,9 +262,28 @@ class SessionRepo:
 
     def __init__(self, sessions_dir: str):
         self._dir = sessions_dir
+        self._map_path = os.path.join(self._dir, "_conversations.json")
+        self._conv_map: dict[str, str] = {}  # chat_id → session_id
 
     async def ensure_dir(self) -> None:
         await aiofiles.os.makedirs(self._dir, exist_ok=True)
+
+    async def _load_map(self) -> None:
+        """Load chat_id → session_id mapping from disk."""
+        if self._conv_map:
+            return
+        try:
+            async with aiofiles.open(self._map_path, "r") as f:
+                data = json.loads(await f.read())
+                if isinstance(data, dict):
+                    self._conv_map = data
+        except (FileNotFoundError, json.JSONDecodeError):
+            self._conv_map = {}
+
+    async def _save_map(self) -> None:
+        """Persist chat_id → session_id mapping to disk."""
+        async with aiofiles.open(self._map_path, "w") as f:
+            await f.write(json.dumps(self._conv_map, ensure_ascii=False))
 
     def session_path(self, session_id: str) -> str:
         return os.path.join(self._dir, f"{session_id}.jsonl")
@@ -295,12 +316,41 @@ class SessionRepo:
 
         return sessions
 
+    async def get_or_create_for_chat(self, chat_id: str, cwd: str) -> JsonlSessionStorage:
+        """Get the existing session for a chat, or create a new one.
+        Persists the chat_id → session_id mapping so context survives restarts."""
+        await self.ensure_dir()
+        await self._load_map()
+
+        sid = self._conv_map.get(chat_id)
+        if sid:
+            fpath = self.session_path(sid)
+            if os.path.exists(fpath):
+                return await JsonlSessionStorage.open(fpath)
+            # Stale mapping — file was deleted
+            del self._conv_map[chat_id]
+
+        # Create new session
+        sid = str(uuid.uuid4()).replace("-", "")[:12]
+        fpath = self.session_path(sid)
+        storage = await JsonlSessionStorage.create(fpath, cwd, sid)
+        self._conv_map[chat_id] = sid
+        await self._save_map()
+        return storage
+
     async def create_session(self, cwd: str, session_id: str | None = None) -> JsonlSessionStorage:
         """Create a new session."""
         await self.ensure_dir()
         sid = session_id or str(uuid.uuid4()).replace("-", "")[:12]
         fpath = self.session_path(sid)
         return await JsonlSessionStorage.create(fpath, cwd, sid)
+
+    async def forget_chat(self, chat_id: str) -> None:
+        """Remove the chat_id → session_id mapping so the next message
+        creates a brand-new session."""
+        await self._load_map()
+        self._conv_map.pop(chat_id, None)
+        await self._save_map()
 
     async def open_session(self, session_id: str) -> JsonlSessionStorage | None:
         """Open an existing session by ID."""
@@ -324,8 +374,6 @@ def _entry_to_dict(entry: SessionEntry) -> dict:
 
 def build_session_context(entries: list[SessionEntry]) -> SessionContext:
     """Walk path-to-root and reconstruct message list with compaction."""
-    from connectclaw.provider.types import Message, normalize_message
-
     messages: list[Message] = []
     compaction_summary: str | None = None
     branch_summaries: list[str] = []

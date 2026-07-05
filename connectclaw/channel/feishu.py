@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -33,9 +35,10 @@ class AuthRequest:
     request_id: str
     conversation_key: str
     command: str
+    message_id: str = ""  # card message_id for in-place update
     created_at: float = field(default_factory=time.time)
-    resolved: bool = False
     approved: bool = False
+    event: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class FeishuChannel(Channel):
@@ -47,7 +50,6 @@ class FeishuChannel(Channel):
         self._running = False
         self._stop_event: asyncio.Event = asyncio.Event()
         self._auth_requests: dict[str, AuthRequest] = {}
-        self._auth_results: asyncio.Queue[tuple[str, bool]] = asyncio.Queue()
 
     # ── Start / Stop ────────────────────────────────────────
 
@@ -61,7 +63,12 @@ class FeishuChannel(Channel):
         channel = self
 
         async def on_msg(msg) -> None:
-            """Handle inbound message from SDK Channel."""
+            """Handle inbound message from SDK Channel.
+
+            The actual processing is scheduled as a separate asyncio task so
+            the SDK's ChatPipeline serial queue is released immediately.
+            Slash commands skip the live card (no thinking panel).
+            """
             chat_id = msg.chat_id
             text = (msg.content_text or "").strip()
             if not text:
@@ -69,14 +76,19 @@ class FeishuChannel(Channel):
 
             logger.info("[%s] %s", chat_id[:8], text[:100])
 
-            try:
-                # Create live card callbacks for this message
-                callbacks = channel.create_live_card(chat_id)
-                response = await on_message(chat_id, text, callbacks)
-                if response:
-                    await channel._stream_text(chat_id, response)
-            except Exception as e:
-                logger.error("Message handler error: %s", e)
+            # Commands don't need the live thinking card
+            is_cmd = text.startswith("/")
+
+            async def _process() -> None:
+                try:
+                    callbacks = None if is_cmd else channel.create_live_card(chat_id)
+                    response = await on_message(chat_id, text, callbacks)
+                    if response:
+                        await channel._stream_text(chat_id, response)
+                except Exception as e:
+                    logger.error("Message handler error: %s", e)
+
+            asyncio.create_task(_process())
 
         sdk.on("message", on_msg)
 
@@ -89,6 +101,10 @@ class FeishuChannel(Channel):
             logger.error("Channel error: %s", error)
 
         sdk.on("error", on_error)
+
+        # Register card action handler (for non-auth cards; auth cards are
+        # intercepted earlier via monkey-patch on _on_p2_card_action_trigger)
+        sdk.on("cardAction", channel.handle_card_action)
 
         logger.info("Feishu WebSocket connecting...")
         await sdk.connect_until_ready(timeout=30)
@@ -222,25 +238,32 @@ class FeishuChannel(Channel):
             async with lock:
                 if not state["thinking_buf"]:
                     return
-                state["history"] += f"\n\n💭 思考了 {elapsed:.1f}s\n\n{state['thinking_buf']}\n"
+                state["history"] += f"\n\n💭 已思考 {elapsed:.1f}s\n\n{state['thinking_buf']}\n"
                 state["thinking_buf"] = ""
             await _flush()
 
-        async def on_tool_call(name: str, args: dict) -> None:
+        # Map tool_call_id → short label for result matching
+        _tool_labels: dict[str, str] = {}
+
+        async def on_tool_call(name: str, args: dict, tc_id: str = "") -> None:
             async with lock:
                 if state["thinking_buf"]:
                     elapsed = time.time() - state["thinking_start"]
-                    state["history"] += f"\n\n💭 思考了 {elapsed:.1f}s\n\n{state['thinking_buf']}\n"
+                    state["history"] += f"\n\n💭 已思考 {elapsed:.1f}s\n\n{state['thinking_buf']}\n"
                     state["thinking_buf"] = ""
-                state["history"] += f"\n\n🔧 **{name}**\n```json\n{json.dumps(args, ensure_ascii=False, indent=2)}\n```\n"
+                # Embed a unique marker so results can be matched even
+                # when multiple tools share the same name.
+                label = f"🔧 **{name}** `[{tc_id[:8] if tc_id else '?'}]`"
+                state["history"] += f"\n\n{label}\n```json\n{json.dumps(args, ensure_ascii=False, indent=2)}\n```\n"
+                if tc_id:
+                    _tool_labels[tc_id] = label
             await _flush()
 
-        async def on_tool_result(name: str, is_error: bool, result_text: str = "") -> None:
+        async def on_tool_result(name: str, is_error: bool, result_text: str = "",
+                                 tc_id: str = "") -> None:
             async with lock:
                 status = "✅" if not is_error else "❌"
-                # Merge result into the LAST tool call header
-                old = f"🔧 **{name}**"
-                # Build result: for read, show line count; for others, show output
+                old = _tool_labels.pop(tc_id, f"🔧 **{name}**") if tc_id else f"🔧 **{name}**"
                 if name == "read" and result_text:
                     lines = result_text.count("\n") + 1
                     summary = f"读取 {lines} 行"
@@ -248,7 +271,7 @@ class FeishuChannel(Channel):
                     summary = result_text[:300]
                 else:
                     summary = ""
-                new = f"🔧 **{name}** {status}"
+                new = f"{old} {status}"
                 parts = state["history"].rsplit(old, 1)
                 if len(parts) == 2:
                     body = f"{new}\n{summary}" if summary else new
@@ -262,7 +285,7 @@ class FeishuChannel(Channel):
                     state["text_started"] = True
                     if state["thinking_buf"]:
                         elapsed = time.time() - state["thinking_start"]
-                        state["history"] += f"\n\n💭 思考了 {elapsed:.1f}s\n\n{state['thinking_buf']}\n"
+                        state["history"] += f"\n\n💭 已思考 {elapsed:.1f}s\n\n{state['thinking_buf']}\n"
                         state["thinking_buf"] = ""
                     needs_flush = True
             if needs_flush:
@@ -325,53 +348,105 @@ class FeishuChannel(Channel):
         self, *, conversation_key: str, title: str, template: str,
         command: str, description: str, timeout: float = 60.0,
     ) -> bool:
-        import uuid
-
         rid = str(uuid.uuid4())[:8]
         auth = AuthRequest(request_id=rid, conversation_key=conversation_key, command=command)
         self._auth_requests[rid] = auth
 
         card = _build_card(command, rid, title, description, template)
-        await self.send_card(conversation_key, card)
+        msg_id = await self.send_card(conversation_key, card)
+        auth.message_id = msg_id
+        logger.info("[AUTH] sent card for %s: message_id=%s command=%s",
+                    rid, msg_id, command[:80])
 
         try:
             async with asyncio.timeout(timeout):
-                while not auth.resolved:
-                    try:
-                        r, approved = await asyncio.wait_for(
-                            self._auth_results.get(), timeout=1.0
-                        )
-                        if r == rid:
-                            auth.resolved = True
-                            auth.approved = approved
-                    except asyncio.TimeoutError:
-                        continue
+                await auth.event.wait()
         except TimeoutError:
-            auth.resolved = True
             auth.approved = False
-            await self.send_message(
-                conversation_key,
-                f"Timed out. Command NOT executed: `{command}`",
-            )
+            logger.info("[AUTH] %s timed out after %ss", rid, timeout)
+            if msg_id:
+                await self._update_auth_card(msg_id, command, rid,
+                                             approved=False, timed_out=True)
 
         self._auth_requests.pop(rid, None)
-        if not auth.approved:
-            await self.send_message(conversation_key, f"Denied: `{command}`")
+        if msg_id:
+            await self._update_auth_card(msg_id, command, rid,
+                                         approved=auth.approved, timed_out=False)
         return auth.approved
 
-    def handle_card_action(self, event: dict) -> None:
-        """Handle card button callback (for webhook mode)."""
-        action = event.get("event", {}).get("action", {})
+    async def _update_auth_card(
+        self, message_id: str,
+        command: str, request_id: str,
+        approved: bool, timed_out: bool,
+    ) -> None:
+        """Replace the auth card with a resolved state (no buttons)."""
+        if timed_out:
+            header_color = "grey"
+            status_text = "⏰ Timed out"
+            status_detail = f"Authorization request expired.\n\n**Command:**\n```\n{command}\n```"
+        elif approved:
+            header_color = "green"
+            status_text = "✅ Approved"
+            status_detail = f"Command will be executed.\n\n**Command:**\n```\n{command}\n```"
+        else:
+            header_color = "red"
+            status_text = "❌ Denied"
+            status_detail = f"Command will NOT be executed.\n\n**Command:**\n```\n{command}\n```"
+
+        resolved_card = {
+            "schema": "2.0",
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "title": {"tag": "plain_text", "content": status_text},
+                "template": header_color,
+            },
+            "body": {
+                "elements": [
+                    {"tag": "markdown", "content": status_detail},
+                    {"tag": "markdown",
+                     "content": f"<font color='grey'>Request: {request_id}</font>"},
+                ],
+            },
+        }
         try:
-            value = json.loads(action.get("value", "{}"))
-        except json.JSONDecodeError:
+            await self._sdk.update_card(message_id, resolved_card)
+        except Exception as e:
+            logger.debug("update_card for auth result failed: %s", e)
+
+    def handle_card_action(self, event) -> None:
+        """Handle card button callback (WebSocket mode).
+
+        Receives a ``CardActionEvent`` dataclass from the SDK Channel.
+        Extracts ``request_id`` and ``action`` from the button's JSON value
+        and resolves the pending :class:`AuthRequest`.
+        """
+        action_value = event.action.value
+        logger.info("[AUTH] cardAction received: raw_value=%s type=%s tag=%s",
+                    repr(action_value), type(action_value).__name__, event.action.tag)
+
+        # SDK normalizes: JSON string → dict, but keep the string fallback
+        if isinstance(action_value, str):
+            try:
+                action_value = json.loads(action_value)
+            except json.JSONDecodeError:
+                logger.warning("[AUTH] cardAction value is not valid JSON: %s", action_value[:200])
+                return
+        if not isinstance(action_value, dict):
+            logger.warning("[AUTH] cardAction value is not a dict: %s", type(action_value).__name__)
             return
-        rid = value.get("request_id", "")
-        approved = value.get("action") == "approve"
+
+        rid = action_value.get("request_id", "")
+        approved = action_value.get("action") == "approve"
+        logger.info("[AUTH] request_id=%s approved=%s pending_requests=%s",
+                    rid, approved, list(self._auth_requests.keys()))
+
         if rid and rid in self._auth_requests:
-            self._auth_requests[rid].resolved = True
             self._auth_requests[rid].approved = approved
-            self._auth_results.put_nowait((rid, approved))
+            self._auth_requests[rid].event.set()
+            logger.info("[AUTH] resolved request %s: approved=%s", rid, approved)
+        else:
+            logger.warning("[AUTH] unknown or stale request_id=%s (pending: %s)",
+                           rid, list(self._auth_requests.keys())[:5])
 
 
 def _split_for_streaming(text: str) -> list[str]:
@@ -384,7 +459,6 @@ def _split_for_streaming(text: str) -> list[str]:
     if not text:
         return [""]
 
-    import re
     # Split at sentence/clause boundaries.
     # '.' only when followed by space/newline/end (English period),
     # not when part of filenames/numbers/URLs (main.py, 3.14).
@@ -394,9 +468,8 @@ def _split_for_streaming(text: str) -> list[str]:
 
 def _parse_history(history: str) -> list[dict]:
     """Parse history string into [{title, content, expanded}, ...]."""
-    import re
     sections = []
-    parts = re.split(r'\n\n(?=💭 思考了|🔧 )', history.strip())
+    parts = re.split(r'\n\n(?=💭 已思考|🔧 )', history.strip())
     for part in parts:
         part = part.strip()
         if not part:
@@ -457,52 +530,61 @@ def _build_sections_card(sections: list[dict]) -> dict:
 def _build_card(
     command: str, request_id: str, title: str, description: str, template: str
 ) -> dict:
+    # CardKit v2 notes (from SDK card/builder.py):
+    # - `action` container tag is gone — buttons go directly in body.elements
+    # - `note` tag is gone — use grey markdown instead
+    # - Multiple buttons in one row → column_set
     return {
+        "schema": "2.0",
         "config": {"wide_screen_mode": True},
         "header": {
             "title": {"tag": "plain_text", "content": title},
             "template": template,
         },
-        "elements": [
-            {
-                "tag": "div",
-                "text": {
-                    "tag": "lark_md",
+        "body": {
+            "elements": [
+                {
+                    "tag": "markdown",
                     "content": f"{description}\n\n**Command:**\n```\n{command}\n```\n\nAllow?",
                 },
-            },
-            {"tag": "hr"},
-            {
-                "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "Approve"},
-                        "type": "primary",
-                        "value": json.dumps({
-                            "action": "approve",
-                            "request_id": request_id,
-                        }),
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "Deny"},
-                        "type": "danger",
-                        "value": json.dumps({
-                            "action": "deny",
-                            "request_id": request_id,
-                        }),
-                    },
-                ],
-            },
-            {
-                "tag": "note",
-                "elements": [
-                    {
-                        "tag": "plain_text",
-                        "content": f"Request: {request_id} | Expires 60s",
-                    }
-                ],
-            },
-        ],
+                {"tag": "hr"},
+                {
+                    "tag": "column_set",
+                    "columns": [
+                        {
+                            "tag": "column",
+                            "elements": [
+                                {
+                                    "tag": "button",
+                                    "text": {"tag": "plain_text", "content": "✅ Approve"},
+                                    "type": "primary",
+                                    "value": {
+                                        "action": "approve",
+                                        "request_id": request_id,
+                                    },
+                                },
+                            ],
+                        },
+                        {
+                            "tag": "column",
+                            "elements": [
+                                {
+                                    "tag": "button",
+                                    "text": {"tag": "plain_text", "content": "❌ Deny"},
+                                    "type": "danger",
+                                    "value": {
+                                        "action": "deny",
+                                        "request_id": request_id,
+                                    },
+                                },
+                            ],
+                        },
+                    ],
+                },
+                {
+                    "tag": "markdown",
+                    "content": f"<font color='grey'>Request: {request_id} | Expires 60s</font>",
+                },
+            ],
+        },
     }

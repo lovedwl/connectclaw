@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from connectclaw.agent.types import AgentTool, AgentToolResult
+from connectclaw.coding.safety.sandbox import detect_best_sandbox
 
 
 class DynamicTool(AgentTool):
@@ -53,7 +54,6 @@ class DynamicTool(AgentTool):
             )
 
         # Execute via sandbox
-        from connectclaw.coding.safety.sandbox import detect_best_sandbox
         sandbox_cls = detect_best_sandbox()
         sandbox = sandbox_cls(cwd=self._cwd, max_memory_mb=256, max_cpu_seconds=120)
         result = await sandbox.execute(cmd, timeout=120)

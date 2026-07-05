@@ -52,6 +52,8 @@ class Agent:
         session_id: str | None = None,
         get_api_key: Callable | None = None,
         max_retry_delay_ms: int = 60_000,
+        before_tool_call: Callable | None = None,
+        after_tool_call: Callable | None = None,
     ):
         self._state = AgentState(
             system_prompt=system_prompt,
@@ -69,6 +71,8 @@ class Agent:
         self._session_id = session_id
         self._get_api_key = get_api_key
         self._max_retry_delay_ms = max_retry_delay_ms
+        self._before_tool_call = before_tool_call
+        self._after_tool_call = after_tool_call
         self.convert_to_llm = convert_to_llm or _default_convert_to_llm
         self.transform_context = transform_context
         self.stream_fn = stream_fn or stream_simple
@@ -324,6 +328,8 @@ class Agent:
             get_steering_messages=self._drain_steering,
             get_follow_up_messages=self._drain_follow_up,
             tool_execution=self._tool_execution,
+            before_tool_call=self._before_tool_call,
+            after_tool_call=self._after_tool_call,
             session_id=self._session_id,
             max_retry_delay_ms=self._max_retry_delay_ms,
             on_thinking_delta=lc.get("on_thinking_delta"),

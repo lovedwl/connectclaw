@@ -16,6 +16,7 @@ from connectclaw.provider.stream import stream_simple
 from connectclaw.provider.types import (
     AssistantMessage,
     Context,
+    ToolDef,
     ToolResultMessage,
 )
 
@@ -162,6 +163,7 @@ async def _run_loop(
                         await config.on_tool_call(
                             tc.get("name", "?"),
                             tc.get("arguments", {}),
+                            tc.get("id", ""),
                         )
                 tool_results = await _execute_tool_calls(
                     current_context, message, tool_calls, config, signal, emit
@@ -180,6 +182,7 @@ async def _run_loop(
                             result.tool_name if hasattr(result, "tool_name") else "?",
                             result.is_error if hasattr(result, "is_error") else False,
                             res_text,
+                            result.tool_call_id if hasattr(result, "tool_call_id") else "",
                         )
 
             await emit({
@@ -432,9 +435,18 @@ async def _execute_sequential(
     for tc in tool_calls:
         if signal and signal.is_set():
             break
-        result_msg = await _execute_single_tool(
-            current_context, assistant_message, tc, config, signal, emit
-        )
+        try:
+            result_msg = await _execute_single_tool(
+                current_context, assistant_message, tc, config, signal, emit
+            )
+        except Exception as e:
+            result_msg = ToolResultMessage(
+                tool_call_id=tc["id"],
+                tool_name=tc["name"],
+                content=[{"type": "text", "text": str(e)}],
+                is_error=True,
+                timestamp=time.time() * 1000,
+            )
         results.append(result_msg)
         await emit({"type": "message_start", "message": _message_to_dict(result_msg)})
         await emit({"type": "message_end", "message": _message_to_dict(result_msg)})
@@ -452,8 +464,13 @@ async def _execute_parallel(
 ) -> list[ToolResultMessage]:
     """Parallel execution: preflight sequentially, execute concurrently."""
 
-    # Phase 1: Preflight (sequential)
+    # Phase 1: Preflight — find tools, validate args, fire auth hooks.
+    # ALL tools start preflight concurrently so that every auth card is
+    # sent at once.  asyncio.gather waits for all of them before we
+    # proceed to Phase 2 (execution).
     preparations: list[tuple[dict, AgentTool, dict]] = []
+    preflight_errors: dict[str, AgentToolResult] = {}  # tool_call_id → error
+
     for tc in tool_calls:
         await emit({
             "type": "tool_execution_start",
@@ -462,12 +479,37 @@ async def _execute_parallel(
             "args": tc.get("arguments", {}),
         })
 
-        tool, validated_args = await _prepare_tool_call(
-            current_context, tc, config, signal
-        )
-        preparations.append((tc, tool, validated_args))
+    logger.debug("[PREFLIGHT] launching %d tools concurrently", len(tool_calls))
 
-    # Phase 2: Execute all concurrently
+    async def _preflight_one(tc: dict) -> tuple[dict, AgentTool, dict] | None:
+        t0 = time.time()
+        try:
+            tool, validated_args = await _prepare_tool_call(
+                current_context, tc, config, signal
+            )
+            logger.debug("[PREFLIGHT] %s(%s) ok in %.1fs",
+                         tc["name"], tc["id"][:8], time.time() - t0)
+            return (tc, tool, validated_args)
+        except Exception as e:
+            logger.debug("[PREFLIGHT] %s(%s) failed in %.1fs: %s",
+                         tc["name"], tc["id"][:8], time.time() - t0, e)
+            preflight_errors[tc["id"]] = AgentToolResult(
+                content=[{"type": "text", "text": str(e)}],
+                details=None,
+            )
+            return None
+
+    preflight_tasks = [_preflight_one(tc) for tc in tool_calls]
+    preflight_results = await asyncio.gather(*preflight_tasks)
+    logger.debug("[PREFLIGHT] all done — %d ok, %d errors",
+                 len([r for r in preflight_results if r is not None]),
+                 len(preflight_errors))
+    for result in preflight_results:
+        if result is not None:
+            tc, tool, validated_args = result
+            preparations.append((tc, tool, validated_args))
+
+    # Phase 2: Execute prepared tools concurrently
     async def run_one(tc: dict, tool: AgentTool, args: dict) -> AgentToolResult:
         try:
             result = await tool.execute(tc["id"], args, signal=signal)
@@ -532,6 +574,30 @@ async def _execute_parallel(
             tool_name=tc["name"],
             content=result.content,
             is_error=is_error,
+            timestamp=time.time() * 1000,
+        )
+        await emit({"type": "message_start", "message": _message_to_dict(msg)})
+        await emit({"type": "message_end", "message": _message_to_dict(msg)})
+        results.append(msg)
+
+    # Emit results for tools that failed during preflight (auth denied etc.)
+    for tc_id, err_result in preflight_errors.items():
+        # Find the original tool call dict
+        tc = next((t for t in tool_calls if t["id"] == tc_id), None)
+        if tc is None:
+            continue
+        await emit({
+            "type": "tool_execution_end",
+            "tool_call_id": tc_id,
+            "tool_name": tc["name"],
+            "result": err_result.__dict__,
+            "is_error": True,
+        })
+        msg = ToolResultMessage(
+            tool_call_id=tc_id,
+            tool_name=tc["name"],
+            content=err_result.content,
+            is_error=True,
             timestamp=time.time() * 1000,
         )
         await emit({"type": "message_start", "message": _message_to_dict(msg)})
@@ -699,6 +765,19 @@ def _strip_orphan_tool_calls(messages: list) -> list:
             continue
 
         # Orphan found — strip tool_calls, keep text + thinking only.
+        # If nothing is left after stripping (all blocks were orphan
+        # tool calls), drop the message entirely to avoid a 400 error
+        # from the API ("content or tool_calls must be set").
+        meaningful = [b for b in non_tool_blocks
+                      if b.get("type") in ("text", "thinking")]
+        if not meaningful:
+            get_logger(__name__).warning(
+                "Dropping orphan assistant message (%d tool call(s), "
+                "no text/thinking left — session was interrupted mid-turn)",
+                len(tool_blocks),
+            )
+            continue
+
         get_logger(__name__).warning(
             "Stripping orphan tool_calls from assistant message (%d tool call(s), "
             "missing tool results — session was interrupted mid-turn)",
@@ -720,7 +799,6 @@ def _strip_orphan_tool_calls(messages: list) -> list:
 
 def _tool_to_tooldef(tool: AgentTool):
     """Convert AgentTool to ToolDef for the provider layer."""
-    from connectclaw.provider.types import ToolDef
     return ToolDef(
         name=tool.name,
         description=tool.description,

@@ -196,6 +196,11 @@ class AgentHarness:
         if self._agent:
             self._agent.set_tools(tools)
 
+    def abort(self) -> None:
+        """Signal the current agent run to stop."""
+        if self._agent:
+            self._agent.abort()
+
     async def set_system_prompt(self, prompt: str) -> None:
         self._system_prompt = prompt
         if self._agent:
@@ -267,6 +272,28 @@ class AgentHarness:
                 ctx = build_session_context(entries)
                 messages = list(ctx.messages)
 
+        # Wrap harness hooks into callables for the agent loop
+        _before_tool_hooks = list(self._hooks.before_tool)
+        _after_tool_hooks = list(self._hooks.after_tool)
+
+        async def _before_tool_wrapper(ctx: dict, signal=None) -> dict | None:
+            for hook in _before_tool_hooks:
+                result = hook(ctx, signal)
+                if asyncio.iscoroutine(result):
+                    result = await result
+                if result and result.get("block"):
+                    return result
+            return None
+
+        async def _after_tool_wrapper(ctx: dict, signal=None) -> dict | None:
+            for hook in _after_tool_hooks:
+                result = hook(ctx, signal)
+                if asyncio.iscoroutine(result):
+                    result = await result
+                if result:
+                    return result
+            return None
+
         # Create or reuse the agent
         if self._agent is None:
             self._agent = Agent(
@@ -277,6 +304,8 @@ class AgentHarness:
                 messages=messages,
                 convert_to_llm=convert_to_llm,
                 get_api_key=self._get_api_key,
+                before_tool_call=_before_tool_wrapper if _before_tool_hooks else None,
+                after_tool_call=_after_tool_wrapper if _after_tool_hooks else None,
             )
             self._agent.set_live_card_callbacks(**self._live_card_callbacks)
         else:
@@ -285,6 +314,9 @@ class AgentHarness:
             self._agent.set_model(self._model)
             self._agent.set_thinking_level(self._thinking_level)
             self._agent.set_tools(self._tools)
+            # Update hooks (may have changed since last turn)
+            self._agent._before_tool_call = _before_tool_wrapper if _before_tool_hooks else None
+            self._agent._after_tool_call = _after_tool_wrapper if _after_tool_hooks else None
             # Reset messages to session context
             self._agent.state.messages = list(messages)
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 from dataclasses import dataclass
 
@@ -164,8 +165,6 @@ def _clean_search(dump: str) -> str:
     We slice from the first numbered result to the last real result,
     dropping the header and footer.
     """
-    import re
-
     lines = dump.split("\n")
 
     # Find where results start: first line matching "  N." (indented number + dot)
@@ -225,7 +224,6 @@ def _clean_fetch(dump: str) -> str:
 
 def _collapse(text: str) -> str:
     """Normalize line endings: replace 3+ consecutive newlines with 2."""
-    import re
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 

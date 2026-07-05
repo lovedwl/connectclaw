@@ -8,6 +8,7 @@ import re
 from typing import Any, Literal
 
 from connectclaw.agent.types import AgentTool, AgentToolResult
+from connectclaw.coding.safety.sandbox import detect_best_sandbox
 
 
 class BashGuard:
@@ -97,7 +98,6 @@ class BashTool(AgentTool):
     def __init__(self, cwd: str, guard: BashGuard | None = None):
         self._cwd = cwd
         self._guard = guard or BashGuard()
-        from connectclaw.coding.safety.sandbox import detect_best_sandbox
         self._sandbox_cls = detect_best_sandbox()
 
     async def execute(
