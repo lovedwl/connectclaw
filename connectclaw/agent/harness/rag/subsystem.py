@@ -66,6 +66,10 @@ class RAGSubsystem:
 
         import os
 
+        # Safety limits to prevent runaway memory usage
+        _MAX_TOTAL_BYTES = 50 * 1024 * 1024    # 50 MB
+        _MAX_FILE_COUNT = 2000                  # max files to ingest
+
         # Lazy import heavy ML dependencies
         try:
             from connectclaw.provider.embedding import EmbeddingProvider
@@ -86,13 +90,49 @@ class RAGSubsystem:
                 top_n=self._config.top_n,
             )
 
-            # Ingest documents
+            # Ingest documents with safety limits
             docs_dir = os.path.expanduser(self._config.docs_dir)
-            docs = await self._doc_store.ingest_directory(docs_dir)
-            for doc in docs:
-                await self._emb_store.add_document(doc)
+            if not os.path.isdir(docs_dir):
+                logger.warning("RAG docs_dir does not exist: %s", docs_dir)
+                self._initialized = True
+                return
 
-            logger.info("RAG initialized: %d documents indexed", len(docs))
+            docs = await self._doc_store.ingest_directory(docs_dir)
+
+            total_bytes = sum(len(d.content) for d in docs)
+            logger.info("RAG scanned %d files (%d bytes) from %s",
+                       len(docs), total_bytes, docs_dir)
+
+            # Check limits before embedding
+            if len(docs) > _MAX_FILE_COUNT:
+                logger.warning(
+                    "RAG: too many files (%d > %d limit) — "
+                    "narrow docs_dir to a smaller scope. Skipping embedding.",
+                    len(docs), _MAX_FILE_COUNT,
+                )
+                self._initialized = True
+                return
+
+            if total_bytes > _MAX_TOTAL_BYTES:
+                logger.warning(
+                    "RAG: total content too large (%.1f MB > %d MB limit) — "
+                    "narrow docs_dir to a smaller scope. Skipping embedding.",
+                    total_bytes / (1024 * 1024), _MAX_TOTAL_BYTES // (1024 * 1024),
+                )
+                self._initialized = True
+                return
+
+            indexed = 0
+            for doc in docs:
+                try:
+                    added = await self._emb_store.add_document(doc)
+                    indexed += added
+                except ImportError:
+                    raise  # re-raise to outer handler
+                except Exception as e:
+                    logger.debug("RAG: failed to embed %s: %s", doc.path, e)
+
+            logger.info("RAG initialized: %d documents, %d chunks indexed", len(docs), indexed)
         except ImportError as e:
             logger.warning("RAG not available (missing dependencies): %s", e)
         except Exception as e:
