@@ -22,6 +22,79 @@ from connectclaw.logging import get_logger
 logger = get_logger(__name__)
 
 
+async def _download_feishu_images(
+    *,
+    channel: FeishuChannel,
+    conversation_key: str,
+    resources: list,
+    message_id: str,
+    max_images: int = 5,
+) -> list[dict]:
+    """Download Feishu images to local cache.
+
+    Saves images to ``~/.cache/cc/i/`` with short sequential names
+    (1.png, 2.jpg, ...).  Returns a list of dicts with path, mime_type,
+    and size_bytes for each successfully downloaded image.
+    """
+    from connectclaw.coding.tools.image_analyze import MIME_TO_EXT, detect_mime_type
+
+    image_resources = [r for r in resources if r.type == "image"]
+    if not image_resources:
+        return []
+
+    cache_dir = os.path.expanduser("~/.cache/cc/i")
+    os.makedirs(cache_dir, exist_ok=True)
+
+    overflow = len(image_resources) - max_images
+    to_process = image_resources[:max_images]
+
+    saved = []
+    for i, res in enumerate(to_process):
+        file_key = res.file_key
+        if not file_key:
+            continue
+
+        logger.info("[%s] downloading image %d/%d: %s",
+                     conversation_key[:8], i + 1, len(to_process), file_key[:20])
+
+        try:
+            image_data = await channel.download_resource(
+                file_key, resource_type="image", message_id=message_id,
+            )
+        except Exception as e:
+            logger.error("[%s] image download failed: %s", conversation_key[:8], e)
+            continue
+
+        if image_data is None:
+            logger.warning("[%s] image download returned empty: %s",
+                           conversation_key[:8], file_key[:20])
+            continue
+
+        mime_type = detect_mime_type(image_data)
+        ext = MIME_TO_EXT.get(mime_type, ".png")
+        filename = f"{len(saved) + 1}{ext}"
+        filepath = os.path.join(cache_dir, filename)
+
+        with open(filepath, "wb") as f:
+            f.write(image_data)
+
+        size_kb = len(image_data) // 1024
+        logger.info("[%s] saved image: %s (%s, %dKB)",
+                     conversation_key[:8], filepath, mime_type, size_kb)
+
+        saved.append({
+            "path": f"~/.cache/cc/i/{filename}",
+            "mime_type": mime_type,
+            "size_bytes": len(image_data),
+        })
+
+    if overflow > 0:
+        logger.info("[%s] %d image(s) skipped (max %d)",
+                     conversation_key[:8], overflow, max_images)
+
+    return saved
+
+
 def _parse_args(argv: list[str]) -> dict:
     """Parse CLI arguments. Returns {onboard: bool, home: str|None}."""
     result = {"onboard": False, "home": None}
@@ -91,7 +164,36 @@ async def main(argv: list[str] | None = None) -> None:
     if config.rag.enabled:
         await coding_agent.initialize_rag()
 
-    async def on_message(conversation_key: str, text: str, live_card_callbacks: dict | None = None) -> str | None:
+    async def on_message(
+        conversation_key: str,
+        text: str,
+        live_card_callbacks: dict | None = None,
+        **kwargs,
+    ) -> str | None:
+        # Download and cache Feishu images before agent processing
+        resources = kwargs.get("resources") or []
+        message_id = kwargs.get("message_id", "")
+
+        if resources:
+            saved_images = await _download_feishu_images(
+                channel=channel,
+                conversation_key=conversation_key,
+                resources=resources,
+                message_id=message_id,
+                max_images=config.agent.max_images,
+            )
+            if saved_images:
+                parts = [text] if text else []
+                parts.append("---")
+                if len(saved_images) == 1:
+                    parts.append("用户发送了 1 张图片，可使用 image_analyze 工具查看：")
+                else:
+                    parts.append(f"用户发送了 {len(saved_images)} 张图片，可使用 image_analyze 工具查看：")
+                for img in saved_images:
+                    size_kb = img["size_bytes"] // 1024
+                    parts.append(f"- {img['path']} ({img['mime_type']}, {size_kb}KB)")
+                text = "\n".join(parts)
+
         logger.info("[%s] User: %s", conversation_key[:8], text[:100])
 
         # Dispatch slash commands

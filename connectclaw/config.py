@@ -102,6 +102,7 @@ class VisionConfig:
 class AgentConfig:
     cwd: str = field(default_factory=os.getcwd)
     thinking_level: str = "off"
+    max_images: int = 5
 
 
 @dataclass
@@ -212,6 +213,7 @@ class Config:
                 or ag.get("cwd", os.getcwd()),
             thinking_level=os.environ.get("CONNECTCLAW_THINKING")
                 or ag.get("thinking_level", "off"),
+            max_images=int(ag.get("max_images", 5)),
         )
 
         # Session
