@@ -8,7 +8,8 @@ from typing import Any
 
 
 OnMessageCallback = Callable[..., Awaitable[str | None]]
-"""Callback: (conversation_key, text, live_card_callbacks=None) -> response_text"""
+"""Callback: (conversation_key, text, live_card_callbacks=None, *,
+              resources=None, message_id=None) -> response_text"""
 
 
 class Channel(ABC):

@@ -71,10 +71,18 @@ class FeishuChannel(Channel):
             """
             chat_id = msg.chat_id
             text = (msg.content_text or "").strip()
-            if not text:
+            resources = msg.resources or []
+            message_id = msg.message_id or ""
+
+            # Allow pure-image messages (no text but has resources)
+            if not text and not resources:
                 return
 
-            logger.info("[%s] %s", chat_id[:8], text[:100])
+            logger.info(
+                "[%s] %s",
+                chat_id[:8],
+                text[:100] if text else f"[{len(resources)} resource(s)]",
+            )
 
             # Commands don't need the live thinking card
             is_cmd = text.startswith("/")
@@ -82,7 +90,11 @@ class FeishuChannel(Channel):
             async def _process() -> None:
                 try:
                     callbacks = None if is_cmd else channel.create_live_card(chat_id)
-                    response = await on_message(chat_id, text, callbacks)
+                    response = await on_message(
+                        chat_id, text, callbacks,
+                        resources=resources,
+                        message_id=message_id,
+                    )
                     if response:
                         await channel._stream_text(chat_id, response)
                 except Exception as e:
@@ -305,6 +317,17 @@ class FeishuChannel(Channel):
 
     async def send_error(self, conversation_key: str, error: str) -> str:
         return await self.send_message(conversation_key, f"Error: {error[:500]}")
+
+    async def download_resource(
+        self, file_key: str, resource_type: str = "image", message_id: str = "",
+    ) -> bytes | None:
+        """Download a media resource from Feishu. Thin wrapper around SDK."""
+        if self._sdk is None:
+            logger.error("download_resource: not connected")
+            return None
+        return await self._sdk.download_resource(
+            file_key, resource_type, message_id or None,
+        )
 
     # ── Authorization Cards ─────────────────────────────────
 

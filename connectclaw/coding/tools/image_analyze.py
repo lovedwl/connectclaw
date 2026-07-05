@@ -21,6 +21,31 @@ from connectclaw.agent.types import AgentTool, AgentToolResult
 from connectclaw.provider.types import Context, Model
 
 
+def detect_mime_type(image_data: bytes) -> str:
+    """Detect MIME type from magic bytes. Returns 'image/png' as safe default."""
+    if image_data[:8] == b'\x89PNG\r\n\x1a\n':
+        return "image/png"
+    if image_data[:2] == b'\xff\xd8':
+        return "image/jpeg"
+    if image_data[:6] in (b'GIF87a', b'GIF89a'):
+        return "image/gif"
+    if image_data[:4] == b'RIFF' and image_data[8:12] == b'WEBP':
+        return "image/webp"
+    if image_data[:2] == b'BM':
+        return "image/bmp"
+    return "image/png"
+
+
+# Map MIME type to file extension
+MIME_TO_EXT = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/bmp": ".bmp",
+}
+
+
 @dataclass
 class VisionConfig:
     api_key: str = ""
@@ -42,7 +67,7 @@ class ImageAnalyzeTool(AgentTool):
         "properties": {
             "image_path": {
                 "type": "string",
-                "description": "Absolute path to the image file",
+                "description": "Absolute path to the image file (supports ~ for home directory)",
             },
             "question": {
                 "type": "string",
@@ -80,7 +105,8 @@ class ImageAnalyzeTool(AgentTool):
         image_path = params["image_path"]
         question = params.get("question", "Describe this image in detail")
 
-        # Resolve path
+        # Resolve path: expand ~, then make absolute
+        image_path = os.path.expanduser(image_path)
         if not os.path.isabs(image_path):
             image_path = os.path.normpath(os.path.join(self._cwd, image_path))
 
