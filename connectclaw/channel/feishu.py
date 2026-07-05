@@ -1,7 +1,7 @@
 """
-Feishu (Lark) channel via lark-oapi SDK Channel module.
+Feishu (Lark) channel via lark-channel-sdk.
 
-Uses lark_oapi.channel.FeishuChannel for WebSocket connection,
+Uses lark_channel.FeishuChannel for WebSocket connection,
 message receiving, dedup, and sending — no manual wire-up.
 """
 
@@ -15,7 +15,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from lark_oapi.channel import FeishuChannel as SdkChannel  # noqa: F401 — must import before asyncio loop starts
+from lark_channel import FeishuChannel as SdkChannel  # noqa: F401 — must import before asyncio loop starts
 
 from connectclaw.logging import get_logger
 
@@ -42,7 +42,7 @@ class AuthRequest:
 
 
 class FeishuChannel(Channel):
-    """Feishu channel backed by lark_oapi.channel.FeishuChannel."""
+    """Feishu channel backed by lark_channel.FeishuChannel."""
 
     def __init__(self, config: FeishuConfig):
         self._config = config

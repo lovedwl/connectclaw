@@ -39,12 +39,42 @@ class DocumentStore:
     def documents(self) -> dict[str, Document]:
         return dict(self._documents)
 
+    # Don't read files larger than this (5 MB) as RAG documents.
+    _MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024
+
     async def ingest_file(self, path: str) -> Document | None:
-        """Read and chunk a single file. Returns None if not readable."""
+        """Read and chunk a single file. Returns None if not readable,
+        too large, or binary."""
+        # Check file size first (avoid reading giant files)
         try:
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                content = f.read()
+            file_size = os.path.getsize(path)
+            if file_size > self._MAX_FILE_SIZE_BYTES:
+                return None
+        except OSError:
+            return None
+
+        # Read first chunk to detect binary content
+        try:
+            with open(path, "rb") as f:
+                head = f.read(8192)
+        except OSError:
+            return None
+
+        if b"\x00" in head:
+            return None  # binary file
+
+        # Decode and read full content
+        try:
+            content = head.decode("utf-8", errors="replace")
+            if file_size > 8192:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    f.seek(8192)
+                    content += f.read()
         except (OSError, UnicodeDecodeError):
+            return None
+
+        # Skip files that are mostly garbage after decode
+        if _looks_binary(content):
             return None
 
         chunks = self._chunk(content, os.path.splitext(path)[1])
@@ -58,7 +88,8 @@ class DocumentStore:
         return doc
 
     async def ingest_directory(self, path: str, recursive: bool = True) -> list[Document]:
-        """Recursively ingest a directory tree. Skips binary files."""
+        """Recursively ingest a directory tree. Skips binary files and
+        known non-document directories (``.venv``, ``.git``, ``target``, etc.)."""
         docs: list[Document] = []
         target = Path(path)
 
@@ -69,9 +100,15 @@ class DocumentStore:
         for file_path in target.glob(pattern):
             if not file_path.is_file():
                 continue
+
+            # Skip known non-document directories anywhere in the path
+            if _has_excluded_dir(file_path):
+                continue
+
             ext = file_path.suffix.lower()
             if ext in _SKIP_EXTENSIONS:
                 continue
+
             doc = await self.ingest_file(str(file_path))
             if doc:
                 docs.append(doc)
@@ -154,12 +191,45 @@ class DocumentStore:
 # File extensions to skip during ingestion
 _SKIP_EXTENSIONS = {
     ".pyc", ".pyo", ".so", ".dll", ".dylib",
-    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".ico",
-    ".mp3", ".mp4", ".avi", ".mov", ".mkv",
-    ".zip", ".tar", ".gz", ".bz2", ".xz",
+    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".ico", ".svg",
+    ".mp3", ".mp4", ".avi", ".mov", ".mkv", ".wav", ".flac",
+    ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar",
     ".pdf", ".doc", ".docx", ".xls", ".xlsx",
-    ".exe", ".bin", ".dat", ".db", ".sqlite",
-    ".o", ".a", ".class", ".jar",
-    ".woff", ".woff2", ".ttf", ".eot",
-    ".wasm", ".onnx", ".pt", ".pth",
+    ".exe", ".bin", ".dat", ".db", ".sqlite", ".sqlite3",
+    ".o", ".a", ".class", ".jar", ".pyc",
+    ".woff", ".woff2", ".ttf", ".eot", ".otf",
+    ".wasm", ".onnx", ".pt", ".pth", ".bin",
+    ".rlib", ".rmeta", ".pack", ".idx", ".rev", ".keep",
+    ".lock",  # package-lock / Cargo.lock are rarely useful docs
+    ".ipynb",  # Jupyter notebooks — too much JSON noise for chunking
 }
+
+# Directory name components that should never be recursed into
+_EXCLUDED_DIR_NAMES = {
+    ".venv", "venv", ".env", "env",
+    ".git", ".hg", ".svn",
+    "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+    "target",  # Rust build artifacts
+    "node_modules", "bower_components",
+    ".tox", "eggs", ".eggs", ".egg-info",
+    "dist", "build", "__pycache__",
+    ".idea", ".vscode", ".vs",
+    ".claude",  # Claude Code internal directory
+}
+
+
+def _has_excluded_dir(file_path: Path) -> bool:
+    """True if any path component is a known non-document directory."""
+    return bool(_EXCLUDED_DIR_NAMES.intersection(file_path.parts))
+
+
+def _looks_binary(content: str) -> bool:
+    """Heuristic: a file with a high ratio of null/replacement chars
+    is probably binary that survived ``errors='replace'`` decoding."""
+    if len(content) < 32:
+        return False
+    replacement = content.count("�")  # Unicode replacement char
+    nulls = content.count("\x00")
+    bad = replacement + nulls
+    # If more than 10% of the content is replacement/null chars, call it binary
+    return bad > len(content) * 0.10
