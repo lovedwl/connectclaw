@@ -24,6 +24,8 @@ from connectclaw.provider.types import Model
 
 from .tools.bash import BashGuard, create_bash_tool
 from .tools.dynamic import load_dynamic_tools
+from .tools.hash_edit import create_hash_edit_tool
+from .tools.hash_read import create_hash_read_tool
 from .tools.image_analyze import create_image_analyze_tool
 from .tools.read import create_read_tool
 from .tools.task import create_task_tool
@@ -58,6 +60,8 @@ class CodingAgent:
         # Create base tools (always available)
         self._read_tool = create_read_tool(config.agent.cwd)
         self._write_tool = create_write_tool(config.agent.cwd, self._read_tool)
+        self._hash_read_tool = create_hash_read_tool(config.agent.cwd)
+        self._hash_edit_tool = create_hash_edit_tool(config.agent.cwd)
         self._bash_guard = BashGuard()
         self._bash_tool = create_bash_tool(config.agent.cwd, self._bash_guard)
         self._web_search_tool = create_web_search_tool(
@@ -146,6 +150,8 @@ class CodingAgent:
         base = [
             self._read_tool,
             self._write_tool,
+            self._hash_read_tool,
+            self._hash_edit_tool,
             self._bash_tool,
             self._web_search_tool,
             self._web_fetch_tool,
