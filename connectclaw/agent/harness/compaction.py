@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from connectclaw.provider.types import Context, Model
+from connectclaw.provider.types import Context, Model, UserMessage
 from connectclaw.provider.stream import stream_simple
 
 from ..types import AgentMessage, ThinkingLevel
@@ -328,11 +328,10 @@ async def generate_summary(
 
     context = Context(
         system_prompt=SUMMARIZATION_SYSTEM_PROMPT,
-        messages=[{
-            "role": "user",
-            "content": [{"type": "text", "text": prompt_text}],
-            "timestamp": time.time() * 1000,
-        }],  # type: ignore[list-item]
+        messages=[UserMessage(
+            content=[{"type": "text", "text": prompt_text}],
+            timestamp=time.time() * 1000,
+        )],
     )
 
     reasoning = thinking_level if model.reasoning and thinking_level != "off" else None
@@ -363,11 +362,10 @@ async def _generate_turn_prefix_summary(
 
     context = Context(
         system_prompt=SUMMARIZATION_SYSTEM_PROMPT,
-        messages=[{
-            "role": "user",
-            "content": [{"type": "text", "text": prompt_text}],
-            "timestamp": time.time() * 1000,
-        }],  # type: ignore[list-item]
+        messages=[UserMessage(
+            content=[{"type": "text", "text": prompt_text}],
+            timestamp=time.time() * 1000,
+        )],
     )
 
     reasoning = thinking_level if model.reasoning and thinking_level != "off" else None

@@ -215,11 +215,20 @@ class AgentHarness:
         if not messages:
             return None
 
+        api_key = None
+        if self._get_api_key:
+            result = self._get_api_key(self._model.provider)
+            if asyncio.iscoroutine(result):
+                api_key = await result
+            else:
+                api_key = result
+
         result = await compact_conversation(
             messages,
             self._model,
             self._compaction_settings,
             self._model.context_window,
+            api_key=api_key,
             thinking_level=self._thinking_level,
         )
 
@@ -253,6 +262,15 @@ class AgentHarness:
             if result and "messages" in result:
                 messages = result["messages"]
 
+        # Resolve API key for compaction
+        compaction_api_key: str | None = None
+        if self._get_api_key:
+            key_result = self._get_api_key(self._model.provider)
+            if asyncio.iscoroutine(key_result):
+                compaction_api_key = await key_result
+            else:
+                compaction_api_key = key_result
+
         # Check if compaction is needed
         tokens = calculate_context_tokens(messages)
         if should_compact(tokens, self._model.context_window, self._compaction_settings):
@@ -261,6 +279,7 @@ class AgentHarness:
                 self._model,
                 self._compaction_settings,
                 self._model.context_window,
+                api_key=compaction_api_key,
                 thinking_level=self._thinking_level,
             )
             if result:
@@ -351,7 +370,7 @@ class AgentHarness:
         # Run the prompt
         await agent.prompt(text)
 
-        # Return last assistant message — reconstruct from dict or dataclass
+        # Return last assistant message
         for m in reversed(agent.state.messages):
             if m.role != "assistant":
                 continue

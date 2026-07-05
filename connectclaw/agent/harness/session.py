@@ -16,6 +16,7 @@ from typing import Any, Literal
 import aiofiles
 import aiofiles.os
 
+from connectclaw.agent.types import CompactionSummaryMessage
 from connectclaw.provider.types import Message, normalize_message
 
 
@@ -385,6 +386,13 @@ def build_session_context(entries: list[SessionEntry]) -> SessionContext:
         elif entry.type == "compaction":
             compaction_summary = entry.summary
             messages = []
+            # Inject summary so the agent remembers what happened before compaction.
+            # CompactionSummaryMessage is handled by convert_to_llm → <summary> tags.
+            messages.append(CompactionSummaryMessage(
+                summary=entry.summary,
+                tokens_before=entry.tokens_before,
+                timestamp=time.time() * 1000,
+            ))
         elif entry.type == "branch_summary":
             branch_summaries.append(entry.summary)
 
