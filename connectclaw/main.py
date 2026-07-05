@@ -60,6 +60,7 @@ async def main(argv: list[str] | None = None) -> None:
         return
 
     # Start bot
+    from connectclaw.commands import handle as handle_command
     from connectclaw.config import Config
     from connectclaw.coding.coding_agent import CodingAgent
 
@@ -82,9 +83,9 @@ async def main(argv: list[str] | None = None) -> None:
         logger.error("  or set LLM_API_KEY in .env")
         sys.exit(1)
 
-    # Create coding agent and channel
-    coding_agent = CodingAgent(config)
+    # Create channel first, then agent (agent needs channel for auth cards)
     channel = FeishuChannel(config.feishu)
+    coding_agent = CodingAgent(config, channel=channel)
 
     # Initialize RAG if enabled
     if config.rag.enabled:
@@ -92,6 +93,16 @@ async def main(argv: list[str] | None = None) -> None:
 
     async def on_message(conversation_key: str, text: str, live_card_callbacks: dict | None = None) -> str | None:
         logger.info("[%s] User: %s", conversation_key[:8], text[:100])
+
+        # Dispatch slash commands
+        command_result = await handle_command(
+            text,
+            conversation_key=conversation_key,
+            agent=coding_agent,
+        )
+        if command_result is not None:
+            return command_result
+
         try:
             response = await coding_agent.handle_message(conversation_key, text, live_card_callbacks)
             if response:

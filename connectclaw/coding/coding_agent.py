@@ -6,6 +6,7 @@ This is a general-purpose AI assistant. Coding is one capability among many.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from typing import Any
@@ -118,6 +119,8 @@ class CodingAgent:
 
         # Per-conversation harnesses
         self._conversations: dict[str, AgentHarness] = {}
+        # Track running tasks so /stop can cancel them
+        self._running_tasks: dict[str, asyncio.Task] = {}
 
     @property
     def tools(self) -> list[AgentTool]:
@@ -169,6 +172,29 @@ class CodingAgent:
         self, conversation_key: str, text: str, live_card_callbacks: dict[str, Any] | None = None
     ) -> str | None:
         """Handle an incoming message."""
+        # Track this task so /stop can cancel it
+        task = asyncio.current_task()
+        if task is not None:
+            # Cancel any previous task still running for this conversation
+            prev = self._running_tasks.get(conversation_key)
+            if prev is not None and not prev.done():
+                prev.cancel()
+            self._running_tasks[conversation_key] = task
+
+        try:
+            return await self._handle_message_impl(conversation_key, text, live_card_callbacks)
+        except asyncio.CancelledError:
+            logger.info("[%s] Task cancelled by /stop", conversation_key[:8])
+            return "⏹ Interrupted."
+        finally:
+            if task is not None and self._running_tasks.get(conversation_key) is task:
+                del self._running_tasks[conversation_key]
+
+    async def _handle_message_impl(
+        self, conversation_key: str, text: str, live_card_callbacks: dict[str, Any] | None = None
+    ) -> str | None:
+        """Internal message handling — separated so handle_message can wrap it
+        with task tracking and cancellation support."""
         # Refresh tools each turn (pick up newly written dynamic tools)
         tools = self._refresh_tools()
 
@@ -240,12 +266,25 @@ class CodingAgent:
     async def new_session(self, conversation_key: str) -> None:
         if conversation_key in self._conversations:
             del self._conversations[conversation_key]
+        await self._session_repo.forget_chat(conversation_key)
 
     async def compact_session(self, conversation_key: str) -> dict | None:
         harness = self._conversations.get(conversation_key)
         if harness:
             return await harness.compact()
         return None
+
+    def abort(self, conversation_key: str | None = None) -> None:
+        """Abort the current agent run by cancelling the underlying asyncio task.
+        Also sets the abort_event for graceful in-task shutdown as a fallback."""
+        keys = [conversation_key] if conversation_key else list(self._conversations.keys())
+        for key in keys:
+            harness = self._conversations.get(key)
+            if harness:
+                harness.abort()
+            task = self._running_tasks.get(key)
+            if task and not task.done():
+                task.cancel()
 
     async def close_conversation(self, conversation_key: str) -> None:
         self._conversations.pop(conversation_key, None)
@@ -276,7 +315,9 @@ class CodingAgent:
         if tools is None:
             tools = self._tools
         if key not in self._conversations:
-            session = await self._session_repo.create_session(self._config.agent.cwd)
+            # Load existing session for this chat, or create a new one.
+            # Uses chat_id → session_id mapping so context survives restarts.
+            session = await self._session_repo.get_or_create_for_chat(key, self._config.agent.cwd)
             harness = AgentHarness(
                 session=session,
                 model=self._model,
@@ -289,37 +330,69 @@ class CodingAgent:
 
             # ── Wire tool hooks ──────────────────────────
 
+            # Per-turn auth notes so the model sees which tools needed authorization
+            _auth_notes: dict[str, list[str]] = {}  # tool_call_id → notes
+
             async def on_before_tool(ctx: dict, signal=None) -> dict | None:
                 """Handle tool authorization: SUSPICIOUS bash, network escape, unsandboxed."""
                 tool_call = ctx.get("tool_call", {})
+                tc_id = tool_call.get("id", "")
                 tool_name = tool_call.get("name", "")
                 args = tool_call.get("arguments", {})
                 command = args.get("command", "")
+                notes: list[str] = []
+                _auth_notes[tc_id] = notes
 
                 # Bash tool hooks
                 if tool_name == "bash":
                     # 1. Safety check (SUSPICIOUS commands)
                     check = self._bash_guard.check(command)
                     if check == "SUSPICIOUS":
+                        notes.append("🔐 Bash authorization")
                         approved = await self._request_bash_auth(key, command)
                         if not approved:
+                            notes.append("  → ❌ Denied by user")
                             return {"block": True, "reason": "User denied command execution"}
+                        notes.append("  → ✅ Approved by user")
 
                     # 2. Network escape authorization
                     if args.get("allow_network"):
+                        notes.append("🌐 Network access authorization")
                         approved = await self.request_network_auth(key, command)
                         if not approved:
+                            notes.append("  → ❌ Denied by user")
                             return {"block": True, "reason": "User denied network access"}
+                        notes.append("  → ✅ Approved by user")
 
                     # 3. Full sandbox escape authorization
                     if args.get("unsandboxed"):
+                        notes.append("🚀 Sandbox escape authorization")
                         approved = await self.request_unsandboxed_auth(key, command)
                         if not approved:
+                            notes.append("  → ❌ Denied by user")
                             return {"block": True, "reason": "User denied sandbox escape"}
+                        notes.append("  → ✅ Approved by user")
 
                 return None
 
             harness.on("before_tool", on_before_tool)
+
+            async def on_after_tool(ctx: dict, signal=None) -> dict | None:
+                """Prepend authorization notes to tool results."""
+                tool_call = ctx.get("tool_call", {})
+                tc_id = tool_call.get("id", "")
+                notes = _auth_notes.pop(tc_id, None)
+                if not notes:
+                    return None
+                result = ctx.get("result")
+                if result is None:
+                    return None
+                prefix = "\n".join(notes) + "\n\n"
+                if result.content and result.content[0].get("type") == "text":
+                    result.content[0]["text"] = prefix + result.content[0]["text"]
+                return None
+
+            harness.on("after_tool", on_after_tool)
             self._conversations[key] = harness
 
         return self._conversations[key]

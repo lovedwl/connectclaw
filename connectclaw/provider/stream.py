@@ -2,7 +2,7 @@
 
 import asyncio
 import time
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from connectclaw.logging import get_logger
 
@@ -18,6 +18,11 @@ logger = get_logger(__name__)
 
 # Default provider instance
 _provider = DeepSeekProvider()
+
+# Client cache — reuse AsyncOpenAI clients across calls.
+# Key: (base_url, api_key_first_8), Value: AsyncOpenAI
+_client_cache: dict[tuple[str, str], Any] = {}
+_client_cache_lock = asyncio.Lock()
 
 
 async def stream_simple(
@@ -51,7 +56,18 @@ async def stream_simple(
                 case "error": ...
     """
     provider = _provider_instance or _provider
-    client = provider.build_client(api_key or "", base_url=base_url or model.base_url)
+    base = base_url or model.base_url
+    key = api_key or ""
+
+    # Reuse cached client — creating a new AsyncOpenAI per call leaks
+    # httpx.AsyncClient connection pools (each ~5-10 MB).
+    cache_key = (base, key[:8] if key else "")
+    async with _client_cache_lock:
+        if cache_key in _client_cache:
+            client = _client_cache[cache_key]
+        else:
+            client = provider.build_client(key, base_url=base)
+            _client_cache[cache_key] = client
 
     # Build the initial partial message
     partial = AssistantMessage(
