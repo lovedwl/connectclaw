@@ -1,8 +1,16 @@
-# ConnectClaw
+# 互联Claw · ConnectClaw
 
-通用 AI 助手，接入飞书 IM。DeepSeek 驱动，支持 RAG、网页搜索、图片分析。
+轻量级 AI 助手，接入飞书 IM。DeepSeek 驱动。
 
 核心设计：**主 agent 所见一切皆为工具**，可自行编写工具、生成子 agent、创建脚本。
+
+<p align="center">
+  <img src="assets/screenshot-1.jpg" width="30%" alt="实时思考卡片">
+  &nbsp;
+  <img src="assets/screenshot-2.jpg" width="30%" alt="工具调用">
+  &nbsp;
+  <img src="assets/screenshot-3.jpg" width="30%" alt="飞书卡片授权">
+</p>
 
 ## 快速开始
 

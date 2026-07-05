@@ -1,7 +1,7 @@
 [project]
 name = "connectclaw"
 version = "0.1.0"
-description = "AI coding agent connected to Feishu IM"
+description = "互联Claw · ConnectClaw — 轻量级 AI 助手，接入飞书 IM"
 requires-python = ">=3.14"
 readme = "README.md"
 license = { text = "AGPL-3.0-or-later" }
