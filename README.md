@@ -49,8 +49,9 @@ cp .env.template .env
 | Shell 执行 | bash（三级安全：危险拒绝 / 可疑授权 / 沙箱隔离） |
 | 网页搜索 | web_search + web_fetch（glyph 浏览器，Bing 引擎，免费） |
 | 图片分析 | image_analyze（通用视觉模型，OpenAI 兼容 API） |
-| 并行子 agent | task（DAG 并行分发，全部完成后聚合结果） |
-| 自创工具 | 写入 `~/.connectclaw/tools/*.tool.json`，下一轮立即可用 |
+| 子 agent 编队 | task（DAG 依赖调度：`depends_on` 拓扑分层，前驱产出注入后继；独立编队卡实时反馈每个子 agent） |
+| 自创 agent | `create_agent` 写 `~/.connectclaw/agents/*.md`（自然语言定义），下一轮即注册为可调用工具，也可在 task 里用 `agent:` 编排 |
+| 自创工具 | 写入 `~/.connectclaw/tools/*.tool.json`（shell 快捷方式，向后兼容），下一轮立即可用 |
 | Markdown 回复 | 支持表格、加粗、代码块等 GFM 格式 |
 | RAG | BGE-M3 嵌入 + LanceDB + BGE-Reranker 重排序（可选） |
 | 分层记忆 | 三层记忆自动提取、跨会话持久；BGE-M3 语义检索（自动用 GPU），`/memory` 查看 |
@@ -83,7 +84,7 @@ connectclaw/
 ├── agent/        Agent 框架 + 双循环引擎
 │   └── harness/  编排器 · 会话 · 压缩 · RAG · Prompt
 ├── coding/       应用层
-│   ├── tools/     所有工具（read/write/bash/web_search/web_fetch/image_analyze/task/dynamic）
+│   ├── tools/     所有工具（read/write/bash/web_search/web_fetch/image_analyze/task/create_agent/named_agents/subagent/dynamic）
 │   └── safety/    三层沙箱
 ├── channel/      飞书 IM 接入
 ├── memory/       分层记忆（SQLite，可选，无感提取/检索/做梦）

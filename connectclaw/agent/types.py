@@ -33,7 +33,7 @@ class AgentToolResult:
     terminate: bool = False  # hint to stop after this tool batch
 
 
-AgentToolUpdateCallback = Callable[["AgentToolResult"], None]
+AgentToolUpdateCallback = Callable[["AgentToolResult"], Awaitable[None]]
 
 
 class AgentTool:
@@ -163,3 +163,6 @@ class AgentLoopConfig:
     on_tool_result: Callable[..., Awaitable[None]] | None = None
     on_text_delta: Callable[[str], Awaitable[None]] | None = None
     on_text_done: Callable[[], Awaitable[None]] | None = None
+    # Mid-execution tool update (e.g. task tool bubbling live fleet status).
+    # Called as on_tool_update(tool_call_id, tool_name, AgentToolResult).
+    on_tool_update: Callable[..., Awaitable[None]] | None = None
