@@ -72,10 +72,10 @@ class RAGSubsystem:
 
         # Lazy import heavy ML dependencies
         try:
-            from connectclaw.provider.embedding import EmbeddingProvider
+            from connectclaw.provider.embedding import get_shared_embedding_provider
             from connectclaw.provider.rerank import RerankerProvider
 
-            self._embedding_provider = EmbeddingProvider()
+            self._embedding_provider = get_shared_embedding_provider()
             self._reranker_provider = RerankerProvider()
 
             db_path = os.path.expanduser(self._config.db_path)

@@ -20,6 +20,8 @@ from connectclaw.agent.harness.session import SessionRepo
 from connectclaw.agent.types import AgentTool
 from connectclaw.channel.feishu import FeishuChannel
 from connectclaw.config import Config
+from connectclaw.memory import MemorySubsystem
+from connectclaw.memory.subsystem import MemoryConfig as MemCfg
 from connectclaw.provider.types import Model
 
 from .tools.bash import BashGuard, create_bash_tool
@@ -110,6 +112,23 @@ class CodingAgent:
             )
         )
 
+        # Memory subsystem (lazy init, all no-ops if disabled)
+        self._memory = MemorySubsystem(
+            MemCfg(
+                enabled=config.memory.enabled,
+                db_path=config.memory.db_path,
+                extract_after_turn=config.memory.extract_after_turn,
+                extract_min_turns=config.memory.extract_min_turns,
+                extract_interval_turns=config.memory.extract_interval_turns,
+                max_context_tokens=config.memory.max_context_tokens,
+                recency_threshold_days=config.memory.recency_threshold_days,
+                use_embeddings=config.memory.use_embeddings,
+                dream_interval_hours=config.memory.dream_interval_hours,
+                decay_halflife_days=config.memory.decay_halflife_days,
+                consolidation_enabled=config.memory.consolidation_enabled,
+            )
+        )
+
         # Session repository
         sessions_dir = os.path.expanduser(config.session.dir)
         self._session_repo = SessionRepo(sessions_dir)
@@ -133,6 +152,10 @@ class CodingAgent:
     @property
     def rag(self) -> RAGSubsystem:
         return self._rag
+
+    @property
+    def memory(self) -> MemorySubsystem:
+        return self._memory
 
     @property
     def prompt_builder(self) -> PromptBuilder:
@@ -168,9 +191,16 @@ class CodingAgent:
 
     # ── System Prompt ───────────────────────────────────────
 
-    def build_system_prompt(self, rag_context: str = "") -> str:
-        """Build the full system prompt with tools, skills, RAG, and env info."""
-        return self._prompt_builder.build(rag_context=rag_context)
+    def build_system_prompt(self) -> str:
+        """Build the STABLE system prompt (env + skills only).
+
+        Deliberately takes NO per-turn data. The system prompt must stay
+        byte-identical across turns so the provider's prefix cache keeps
+        hitting — a single changed token invalidates the whole cache from
+        position 0. All volatile context (memory, and RAG once it lands)
+        is injected into the user message instead; see _handle_message_impl.
+        """
+        return self._prompt_builder.build()
 
     # ── Conversation Management ─────────────────────────────
 
@@ -213,11 +243,22 @@ class CodingAgent:
         if live_card_callbacks:
             await harness.set_live_card_callbacks(**live_card_callbacks)
 
-        # Get RAG context for this turn
+        # Per-turn dynamic context: RAG (technical docs) + memory (personal).
+        # BOTH are injected into the USER MESSAGE, never the system prompt.
+        #
+        # Why: DeepSeek / OpenAI-compatible providers cache by request *prefix*.
+        # Any change to the system prompt invalidates the cache from token 0,
+        # so every turn would pay full (uncached) input price. By keeping the
+        # system prompt byte-stable and appending the volatile context to the
+        # user message — which then persists into history as a fixed prefix for
+        # the next turn — the cached prefix keeps growing and keeps hitting.
         rag_context = await self._rag.search(text)
+        memory_context = await self._memory.recall(
+            text, conversation_key=conversation_key
+        )
 
-        # Build system prompt with fresh data
-        system_prompt = self.build_system_prompt(rag_context)
+        # System prompt stays STABLE (no per-turn data) to preserve prefix cache.
+        system_prompt = self.build_system_prompt()
         await harness.set_system_prompt(system_prompt)
 
         try:
@@ -225,7 +266,15 @@ class CodingAgent:
             key = self._config.llm.api_key
             logger.debug("[CODING] api_key=%s model=%s", "***" if key else "MISSING", self._model.id)
 
-            result = await harness.prompt(text)
+            # Prepend dynamic context to the user message (memory first — more
+            # personal; RAG next — more technical), keeping the system prompt
+            # cached. Empty blocks are skipped so plain turns stay clean.
+            context_blocks = [c for c in (memory_context, rag_context) if c]
+            prompt_text = text
+            if context_blocks:
+                prompt_text = "\n\n".join(context_blocks) + "\n\n" + text
+
+            result = await harness.prompt(prompt_text)
             if result is None:
                 return "No response generated."
 
@@ -262,6 +311,29 @@ class CodingAgent:
                 resp = "(empty response)"
 
             logger.debug("[CODING] response: %s", resp[:200])
+
+            # Extract memories in background (non-blocking, throttled inside)
+            if self._memory.enabled:
+                try:
+                    entries = await harness.session.get_path_to_root()
+                    recent_messages = [
+                        e.message
+                        for e in entries[-20:]
+                        if hasattr(e, "type") and e.type == "message"
+                    ]
+                    if recent_messages:
+                        asyncio.create_task(
+                            self._memory.learn(
+                                recent_messages,
+                                self._model,
+                                api_key=self._config.llm.api_key or None,
+                                conversation_key=conversation_key,
+                                session_id=harness.session.session_id,
+                            )
+                        )
+                except Exception as e:
+                    logger.debug("Memory extraction trigger failed: %s", e)
+
             return resp
 
         except RuntimeError as e:

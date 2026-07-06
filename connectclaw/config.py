@@ -134,6 +134,21 @@ class CompactionConfig:
 
 
 @dataclass
+class MemoryConfig:
+    enabled: bool = True
+    db_path: str = "~/.connectclaw/memory.db"
+    extract_after_turn: bool = True
+    extract_min_turns: int = 3
+    extract_interval_turns: int = 5
+    max_context_tokens: int = 2000
+    recency_threshold_days: int = 7
+    use_embeddings: bool = True
+    dream_interval_hours: float = 24.0
+    decay_halflife_days: float = 30.0
+    consolidation_enabled: bool = True
+
+
+@dataclass
 class Config:
     """Top-level ConnectClaw configuration."""
 
@@ -145,6 +160,7 @@ class Config:
     rag: RAGConfig = field(default_factory=RAGConfig)
     web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
     compaction: CompactionConfig = field(default_factory=CompactionConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
 
     @classmethod
     def load(cls, path: str | None = None) -> Config:
@@ -259,6 +275,24 @@ class Config:
             keep_recent_tokens=int(co.get("keep_recent_tokens", 20000)),
         )
 
+        # Memory
+        me = raw.get("memory", {})
+        memory = MemoryConfig(
+            enabled=os.environ.get("CONNECTCLAW_MEMORY_ENABLED", "") != "0"
+            and me.get("enabled", True),
+            db_path=os.environ.get("CONNECTCLAW_MEMORY_DB_PATH")
+            or me.get("db_path", "~/.connectclaw/memory.db"),
+            extract_after_turn=me.get("extract_after_turn", True),
+            extract_min_turns=int(me.get("extract_min_turns", 3)),
+            extract_interval_turns=int(me.get("extract_interval_turns", 5)),
+            max_context_tokens=int(me.get("max_context_tokens", 2000)),
+            recency_threshold_days=int(me.get("recency_threshold_days", 7)),
+            use_embeddings=me.get("use_embeddings", True),
+            dream_interval_hours=float(me.get("dream_interval_hours", 24.0)),
+            decay_halflife_days=float(me.get("decay_halflife_days", 30.0)),
+            consolidation_enabled=me.get("consolidation_enabled", True),
+        )
+
         return cls(
             llm=llm,
             feishu=feishu,
@@ -268,4 +302,5 @@ class Config:
             rag=rag,
             web_search=web_search,
             compaction=compaction,
+            memory=memory,
         )
