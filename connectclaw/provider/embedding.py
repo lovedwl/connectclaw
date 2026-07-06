@@ -5,6 +5,18 @@ from __future__ import annotations
 import asyncio
 
 
+def _resolve_device() -> str:
+    """Pick 'cuda' when a GPU is available, else 'cpu'."""
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return "cuda"
+    except Exception:
+        pass
+    return "cpu"
+
+
 class EmbeddingProvider:
     """Lazy-loaded BGE-M3 embedding model.
 
@@ -15,11 +27,13 @@ class EmbeddingProvider:
     def __init__(
         self,
         model_name: str = "BAAI/bge-m3",
-        device: str = "cpu",
+        device: str | None = None,
     ):
         self._model = None
         self._model_name = model_name
-        self._device = device
+        # Auto-pick GPU when available — BGE-M3 on CPU is ~10x slower per query,
+        # and query embedding sits on the per-turn recall path.
+        self._device = device or _resolve_device()
 
     async def ensure_loaded(self) -> None:
         """Lazy load the model. Called before first embed()."""
@@ -51,3 +65,23 @@ class EmbeddingProvider:
         """Generate embedding for a single query."""
         results = await self.embed([text])
         return results[0] if results else []
+
+
+# ── Shared instance ────────────────────────────────────────────
+
+_shared_provider: EmbeddingProvider | None = None
+
+
+def get_shared_embedding_provider(
+    model_name: str = "BAAI/bge-m3", device: str | None = None
+) -> EmbeddingProvider:
+    """Return a process-wide shared EmbeddingProvider.
+
+    RAG and the memory subsystem both need BGE-M3. Sharing one instance
+    avoids loading the ~2GB model into memory twice. Device is auto-detected
+    (GPU if available) unless explicitly given.
+    """
+    global _shared_provider
+    if _shared_provider is None:
+        _shared_provider = EmbeddingProvider(model_name=model_name, device=device)
+    return _shared_provider

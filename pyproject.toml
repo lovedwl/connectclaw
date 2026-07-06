@@ -16,6 +16,8 @@ dependencies = [
     "lark-oapi>=1.7.0",
     "lark-channel-sdk>=1.1.0",
     "xxhash>=3.0.0",
+    "numpy>=2.5.0",
+    "torch>=2.12.1",
 ]
 
 [project.optional-dependencies]

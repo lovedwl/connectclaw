@@ -61,3 +61,29 @@ enabled = true
 reserve_tokens = 16384
 # Tokens to keep in recent context after compaction
 keep_recent_tokens = 20000
+
+[memory]
+# Layered memory: auto-extract facts/events/patterns from conversations,
+# persist across sessions, inject into the USER MESSAGE (never system prompt,
+# to keep DeepSeek's prefix cache hitting). View with /memory in Feishu.
+enabled = true
+# SQLite single-file store (zero external deps)
+db_path = "~/.connectclaw/memory.db"
+# Extract only every N turns to save API cost (and only after this many turns)
+extract_min_turns = 3
+extract_interval_turns = 5
+# Token budget for recalled memories injected per turn
+max_context_tokens = 2000
+# Memories newer than this many days count as "recent" (shown in full detail)
+recency_threshold_days = 7
+# Use embeddings (BGE-M3) for semantic retrieval — auto-uses GPU if available.
+# Needs `sentence-transformers` (in the [rag] optional group). Falls back to
+# keyword search if unavailable, but keyword recall is poor for Chinese (no
+# word segmentation), so embeddings are strongly recommended.
+use_embeddings = true
+# Background consolidation ("dreaming") interval, hours; also via /dream
+dream_interval_hours = 24.0
+# Strength half-life for time-based decay, days
+decay_halflife_days = 30.0
+# Enable episodic→semantic consolidation during dreaming
+consolidation_enabled = true

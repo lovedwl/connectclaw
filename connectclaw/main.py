@@ -144,6 +144,7 @@ async def main(argv: list[str] | None = None) -> None:
     logger.info("  CWD: %s", config.agent.cwd)
     logger.info("  Sessions: %s", config.session.dir)
     logger.info("  RAG: %s", "enabled" if config.rag.enabled else "disabled")
+    logger.info("  Memory: %s", "enabled" if config.memory.enabled else "disabled")
     glyph_available = shutil.which(config.web_search.glyph_bin) is not None or os.path.isfile(
         os.path.expanduser("~/.cargo/bin/glyph")
     )
@@ -160,9 +161,27 @@ async def main(argv: list[str] | None = None) -> None:
     channel = FeishuChannel(config.feishu)
     coding_agent = CodingAgent(config, channel=channel)
 
+    # China-friendly HuggingFace mirror. BGE-M3 (memory/RAG embeddings) is
+    # pulled from HuggingFace; without a mirror the first load can hang for a
+    # long time trying to reach huggingface.co. Only set when the user hasn't
+    # overridden it. Must be set before sentence-transformers is imported
+    # (which happens lazily on first embed), so here at startup is fine.
+    # After the model is cached, export HF_HUB_OFFLINE=1 to skip update checks.
+    if config.memory.enabled or config.rag.enabled:
+        os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+        logger.info("  HF endpoint: %s", os.environ["HF_ENDPOINT"])
+
     # Initialize RAG if enabled
     if config.rag.enabled:
         await coding_agent.initialize_rag()
+
+    # Initialize memory if enabled
+    if config.memory.enabled:
+        await coding_agent.memory.initialize()
+        await coding_agent.memory.schedule_dreaming(
+            coding_agent._model,
+            api_key=config.llm.api_key or None,
+        )
 
     async def on_message(
         conversation_key: str,
@@ -231,6 +250,8 @@ async def main(argv: list[str] | None = None) -> None:
         logger.info("Shutting down...")
     finally:
         loop.remove_signal_handler(signal.SIGINT)
+        if config.memory.enabled:
+            await coding_agent.memory.close()
         await channel.close()
 
 
