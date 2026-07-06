@@ -24,14 +24,12 @@ from connectclaw.memory import MemorySubsystem
 from connectclaw.memory.subsystem import MemoryConfig as MemCfg
 from connectclaw.provider.types import Model
 
+from .tools.agents import create_agents_tool
 from .tools.bash import BashGuard, create_bash_tool
-from .tools.dynamic import load_dynamic_tools
 from .tools.hash_edit import create_hash_edit_tool
 from .tools.hash_read import create_hash_read_tool
 from .tools.image_analyze import create_image_analyze_tool
-from .tools.named_agents import create_create_agent_tool, load_named_agents
 from .tools.read import create_read_tool
-from .tools.task import create_task_tool
 from .tools.web_search import create_web_fetch_tool, create_web_search_tool
 from .tools.write import create_write_tool
 
@@ -91,14 +89,31 @@ class CodingAgent:
         # Named agents directory (.md agents — the primary "agent makes agent" path)
         self._agents_dir = os.path.expanduser("~/.connectclaw/agents")
         os.makedirs(self._agents_dir, exist_ok=True)
-        self._create_agent_tool = create_create_agent_tool(self._agents_dir)
 
-        # Task tool (needs all_tools, refreshed each turn)
-        self._task_tool = create_task_tool(
+        # Registry of base primitives, keyed by tool name. The main agent's
+        # exposed set is a whitelist over this (config.agent.tools); the meta-tool
+        # may grant ANY of these to a sub-agent — even ones the main agent lacks.
+        self._tool_registry: dict[str, AgentTool] = {
+            t.name: t
+            for t in [
+                self._read_tool, self._write_tool, self._hash_read_tool,
+                self._hash_edit_tool, self._bash_tool, self._web_search_tool,
+                self._web_fetch_tool, self._image_tool,
+            ]
+        }
+
+        # The single `agents` meta-tool: list / describe / run / create. Every
+        # sub-agent is reached through it, resolved at CALL TIME (so an agent
+        # created mid-turn is runnable the same turn). Absorbs the old `task`
+        # and `create_agent` tools.
+        self._agents_tool = create_agents_tool(
             self._model,
+            agents_dir=self._agents_dir,
+            tools_dir=self._tools_dir,
+            base_tools=list(self._tool_registry.values()),
+            cwd=config.agent.cwd,
             api_key=config.llm.api_key or None,
             thinking_level=config.agent.thinking_level,  # type: ignore[arg-type]
-            all_tools=[],  # will be updated in _refresh_tools()
         )
 
         # Current tool set
@@ -170,41 +185,29 @@ class CodingAgent:
     # ── Dynamic Tool Refresh ────────────────────────────────
 
     def _refresh_tools(self) -> list[AgentTool]:
-        """Rebuild tool list: base + task + create_agent + dynamic + named agents.
+        """Rebuild the main agent's tools: whitelisted base primitives + the
+        single `agents` meta-tool.
 
-        Called each turn so agent-created tools AND named agents appear
-        immediately. The agent roster is NEVER written into the system prompt —
-        it lives only in this tools array (like dynamic tools), keeping the
-        system prompt byte-stable for the provider's prefix cache.
+        Named agents and dynamic tools are deliberately NOT here — they are
+        reached through the meta-tool, which resolves them at CALL TIME. Two
+        consequences: (1) the tools array stays byte-stable across turns (it
+        changes only when config changes), extending the system-prompt prefix
+        cache discipline to the tools array; (2) an agent created mid-turn is
+        runnable the same turn, since the meta-tool re-scans on each `run`.
         """
-        dynamic = load_dynamic_tools(self._tools_dir, self._config.agent.cwd)
+        registry = self._tool_registry
+        exposed: list[AgentTool] = []
+        for n in self._config.agent.tools:
+            tool = registry.get(n)
+            if tool is None:
+                logger.warning("Unknown tool in [agent].tools whitelist: %r (skipped)", n)
+                continue
+            exposed.append(tool)
+        if not exposed:
+            logger.error("[agent].tools resolved to empty; falling back to ['read','bash']")
+            exposed = [registry["read"], registry["bash"]]
 
-        base = [
-            self._read_tool,
-            self._write_tool,
-            self._hash_read_tool,
-            self._hash_edit_tool,
-            self._bash_tool,
-            self._web_search_tool,
-            self._web_fetch_tool,
-            self._image_tool,
-        ]
-
-        # Named agents (.md files) — their referenced tools resolve from base +
-        # dynamic only (no recursion into other named agents).
-        api_key = self._config.llm.api_key or None
-        named = load_named_agents(
-            self._agents_dir,
-            base + dynamic,
-            self._model,
-            api_key=api_key,
-            thinking_level=self._config.agent.thinking_level,  # type: ignore[arg-type]
-        )
-
-        # Task tool can orchestrate ad-hoc tools AND named agents in a DAG.
-        self._task_tool._all_tools = base + dynamic + named
-
-        tools = base + [self._task_tool, self._create_agent_tool] + dynamic + named
+        tools = exposed + [self._agents_tool]
         self._tools = tools
         return tools
 
@@ -286,9 +289,12 @@ class CodingAgent:
             logger.debug("[CODING] api_key=%s model=%s", "***" if key else "MISSING", self._model.id)
 
             # Prepend dynamic context to the user message (memory first — more
-            # personal; RAG next — more technical), keeping the system prompt
-            # cached. Empty blocks are skipped so plain turns stay clean.
-            context_blocks = [c for c in (memory_context, rag_context) if c]
+            # personal; RAG next — more technical; agent/tool catalog last), all
+            # kept OUT of the system prompt to preserve the prefix cache. The
+            # catalog is volatile (changes when agents are created), so like
+            # memory/RAG it rides in the user message.
+            agents_catalog = self._agents_tool.build_catalog()
+            context_blocks = [c for c in (memory_context, rag_context, agents_catalog) if c]
             prompt_text = text
             if context_blocks:
                 prompt_text = "\n\n".join(context_blocks) + "\n\n" + text
