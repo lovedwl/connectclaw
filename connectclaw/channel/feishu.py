@@ -306,6 +306,32 @@ class FeishuChannel(Channel):
         async def on_text_done() -> None:
             pass
 
+        # ── Fleet card (separate card for task sub-agents) ──
+        # Kept apart from the thinking card: one card per task tool_call_id,
+        # one row per sub-agent. Throttling is already done upstream by the
+        # task tool's flusher (~1/s + a final frame), so we push each frame.
+        fleet_state: dict[str, dict] = {}  # tc_id → {"message_id": ...}
+        fleet_lock = asyncio.Lock()
+
+        async def on_tool_update(tc_id: str, name: str, update: Any) -> None:
+            details = getattr(update, "details", None)
+            if not isinstance(details, dict) or "fleet" not in details:
+                return
+            card = _build_fleet_card(details["fleet"])
+            async with fleet_lock:
+                fs = fleet_state.setdefault(tc_id, {"message_id": None})
+                if fs["message_id"] is None:
+                    result = await sdk.send(chat_id, {"card": card})
+                    if result.ok and result.message_id:
+                        fs["message_id"] = result.message_id
+                else:
+                    try:
+                        await sdk.update_card(fs["message_id"], card)
+                    except Exception as e:
+                        logger.debug("fleet update_card failed, re-sending: %s", e)
+                        fs["message_id"] = None
+                        await sdk.send(chat_id, {"card": card})
+
         return {
             "on_thinking_delta": on_thinking_delta,
             "on_thinking_done": on_thinking_done,
@@ -313,6 +339,7 @@ class FeishuChannel(Channel):
             "on_tool_result": on_tool_result,
             "on_text_delta": on_text_delta,
             "on_text_done": on_text_done,
+            "on_tool_update": on_tool_update,
         }
 
     async def send_error(self, conversation_key: str, error: str) -> str:
@@ -547,6 +574,60 @@ def _build_sections_card(sections: list[dict]) -> dict:
         "schema": "2.0",
         "config": {"wide_screen_mode": True},
         "body": {"elements": elements},
+    }
+
+
+_FLEET_ICONS = {"waiting": "⏸", "running": "🟢", "done": "✅", "error": "❌"}
+
+
+def _build_fleet_card(agents: list[dict]) -> dict:
+    """Build the fleet card: one collapsible panel per sub-agent.
+
+    agent dict = {name, status, step, action, trace}. status ∈
+    waiting/running/done/error. Each panel's header is a one-line overview;
+    expanding it reveals that agent's 💭 thinking + 🔧 tool trace. Panels are
+    collapsed by default, so N agents stay at N rows until you drill in — the
+    detail is there on demand without flooding the card.
+    """
+    total = len(agents)
+    done = sum(1 for a in agents if a.get("status") in ("done", "error"))
+    panels: list[dict] = []
+    for a in agents:
+        status = a.get("status", "")
+        icon = _FLEET_ICONS.get(status, "•")
+        head = f"{icon} {a.get('name', 'agent')}"
+        action = a.get("action") or ""
+        if action and status not in ("done", "error"):
+            head += f" · {action}"
+        step = a.get("step") or 0
+        if step:
+            head += f" · {step}步"
+        trace = (a.get("trace") or "").strip()
+        if len(trace) > 1500:
+            trace = "…" + trace[-1500:]  # keep the most recent steps
+        panels.append({
+            "tag": "collapsible_panel",
+            "expanded": False,
+            "background_color": "grey",
+            "padding": "8px 8px 8px 8px",
+            "margin": "4px 0px 4px 0px",
+            "border": {"color": "grey", "corner_radius": "6px"},
+            "header": {
+                "title": {"tag": "plain_text", "content": head},
+                "background_color": "grey",
+            },
+            "elements": [{"tag": "markdown", "content": trace or "_（启动中…）_"}],
+        })
+    if not panels:
+        panels.append({"tag": "markdown", "content": "（暂无子 agent）"})
+    return {
+        "schema": "2.0",
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": f"🚀 子 agent 编队 · {done}/{total} 完成"},
+            "template": "blue",
+        },
+        "body": {"elements": panels},
     }
 
 

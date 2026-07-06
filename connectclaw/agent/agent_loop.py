@@ -512,7 +512,10 @@ async def _execute_parallel(
     # Phase 2: Execute prepared tools concurrently
     async def run_one(tc: dict, tool: AgentTool, args: dict) -> AgentToolResult:
         try:
-            result = await tool.execute(tc["id"], args, signal=signal)
+            result = await tool.execute(
+                tc["id"], args, signal=signal,
+                on_update=_make_tool_update(config, tc),
+            )
             return result
         except Exception as e:
             return AgentToolResult(
@@ -627,7 +630,7 @@ async def _execute_single_tool(
     tool, validated_args = await _prepare_tool_call(
         current_context, tc, config, signal
     )
-    result, is_error = await _execute_prepared_tool(tc, tool, validated_args, signal)
+    result, is_error = await _execute_prepared_tool(tc, tool, validated_args, signal, config)
 
     if config.after_tool_call:
         hook_result = await config.after_tool_call(
@@ -696,15 +699,29 @@ async def _prepare_tool_call(
     return tool, args
 
 
+def _make_tool_update(config: AgentLoopConfig, tc: dict[str, Any]):
+    """Build an on_update callback forwarding mid-execution tool updates to the
+    live card via config.on_tool_update. Returns None when no sink is set."""
+    if not config.on_tool_update:
+        return None
+
+    async def _on_update(update: AgentToolResult) -> None:
+        await config.on_tool_update(tc["id"], tc["name"], update)
+
+    return _on_update
+
+
 async def _execute_prepared_tool(
     tc: dict[str, Any],
     tool: AgentTool,
     args: dict[str, Any],
     signal: asyncio.Event | None,
+    config: AgentLoopConfig | None = None,
 ) -> tuple[AgentToolResult, bool]:
     """Execute a prepared tool call."""
     try:
-        result = await tool.execute(tc["id"], args, signal=signal)
+        on_update = _make_tool_update(config, tc) if config else None
+        result = await tool.execute(tc["id"], args, signal=signal, on_update=on_update)
         return result, False
     except Exception as e:
         return (

@@ -338,6 +338,7 @@ class Agent:
             on_tool_result=lc.get("on_tool_result"),
             on_text_delta=lc.get("on_text_delta"),
             on_text_done=lc.get("on_text_done"),
+            on_tool_update=lc.get("on_tool_update"),
         )
 
     async def _emit_event(self, event: AgentEvent) -> None:

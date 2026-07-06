@@ -29,6 +29,7 @@ from .tools.dynamic import load_dynamic_tools
 from .tools.hash_edit import create_hash_edit_tool
 from .tools.hash_read import create_hash_read_tool
 from .tools.image_analyze import create_image_analyze_tool
+from .tools.named_agents import create_create_agent_tool, load_named_agents
 from .tools.read import create_read_tool
 from .tools.task import create_task_tool
 from .tools.web_search import create_web_fetch_tool, create_web_search_tool
@@ -83,9 +84,14 @@ class CodingAgent:
             cwd=config.agent.cwd,
         )
 
-        # Dynamic tools directory
+        # Dynamic tools directory (legacy .tool.json shell shortcuts)
         self._tools_dir = os.path.expanduser("~/.connectclaw/tools")
         os.makedirs(self._tools_dir, exist_ok=True)
+
+        # Named agents directory (.md agents — the primary "agent makes agent" path)
+        self._agents_dir = os.path.expanduser("~/.connectclaw/agents")
+        os.makedirs(self._agents_dir, exist_ok=True)
+        self._create_agent_tool = create_create_agent_tool(self._agents_dir)
 
         # Task tool (needs all_tools, refreshed each turn)
         self._task_tool = create_task_tool(
@@ -164,9 +170,12 @@ class CodingAgent:
     # ── Dynamic Tool Refresh ────────────────────────────────
 
     def _refresh_tools(self) -> list[AgentTool]:
-        """Rebuild tool list: base tools + task + dynamic tools.
+        """Rebuild tool list: base + task + create_agent + dynamic + named agents.
 
-        Called each turn so agent-created tools appear immediately.
+        Called each turn so agent-created tools AND named agents appear
+        immediately. The agent roster is NEVER written into the system prompt —
+        it lives only in this tools array (like dynamic tools), keeping the
+        system prompt byte-stable for the provider's prefix cache.
         """
         dynamic = load_dynamic_tools(self._tools_dir, self._config.agent.cwd)
 
@@ -181,11 +190,21 @@ class CodingAgent:
             self._image_tool,
         ]
 
-        # Update task tool's all_tools reference so it can resolve sub-agent tool names
-        all_available = base + dynamic
-        self._task_tool._all_tools = all_available
+        # Named agents (.md files) — their referenced tools resolve from base +
+        # dynamic only (no recursion into other named agents).
+        api_key = self._config.llm.api_key or None
+        named = load_named_agents(
+            self._agents_dir,
+            base + dynamic,
+            self._model,
+            api_key=api_key,
+            thinking_level=self._config.agent.thinking_level,  # type: ignore[arg-type]
+        )
 
-        tools = base + [self._task_tool] + dynamic
+        # Task tool can orchestrate ad-hoc tools AND named agents in a DAG.
+        self._task_tool._all_tools = base + dynamic + named
+
+        tools = base + [self._task_tool, self._create_agent_tool] + dynamic + named
         self._tools = tools
         return tools
 
