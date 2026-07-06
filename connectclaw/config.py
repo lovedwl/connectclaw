@@ -103,6 +103,17 @@ class AgentConfig:
     cwd: str = field(default_factory=os.getcwd)
     thinking_level: str = "off"
     max_images: int = 5
+    # Which base primitives are exposed DIRECTLY to the main agent (a whitelist
+    # from the tool registry). Named agents + dynamic tools are NOT here — they
+    # are reached through the single `agents` meta-tool. Default = all base
+    # primitives (current behaviour). Unknown names are dropped with a warning;
+    # an empty resolved set falls back to ['read','bash'].
+    tools: list[str] = field(
+        default_factory=lambda: [
+            "read", "write", "hash_read", "hash_edit",
+            "bash", "web_search", "web_fetch", "image_analyze",
+        ]
+    )
 
 
 @dataclass
@@ -231,6 +242,11 @@ class Config:
                 or ag.get("thinking_level", "off"),
             max_images=int(ag.get("max_images", 5)),
         )
+        # Exposed-tool whitelist: only override the default when config gives a
+        # non-empty list; otherwise keep AgentConfig's default (all primitives).
+        ag_tools = ag.get("tools")
+        if isinstance(ag_tools, list) and ag_tools:
+            agent.tools = [str(x) for x in ag_tools]
 
         # Session
         se = raw.get("session", {})

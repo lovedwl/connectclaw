@@ -13,12 +13,13 @@ Each `~/.connectclaw/agents/<name>.md` defines a reusable sub-agent:
 
 The frontmatter is minimal structure (name / desc / tools); the body is the
 system prompt in natural language — the part a language model is actually good
-at writing and reading. Each file auto-registers as a tool named `<name>`:
-calling it spawns that agent once. Files are re-scanned every turn, so a newly
-created agent is callable next turn.
+at writing and reading. `load_named_agents` re-scans this dir; the `agents`
+meta-tool resolves an agent from a FRESH scan at call time — so an agent is NOT
+a top-level tool. It is reached via `agents(action="run", agent="<name>")` and
+is runnable the same turn it is created.
 
-`create_agent` is the first-class way for the agent (or user) to author one —
-its core parameter is `instructions` (natural language), not a shell template.
+Authoring goes through the `agents` meta-tool's `create` action — its core
+parameter is `instructions` (natural language), not a shell template.
 """
 
 from __future__ import annotations
@@ -196,7 +197,7 @@ def load_named_agents(
     return out
 
 
-# ── CreateAgentTool ─────────────────────────────────────────────
+# ── Rendering (used by the `agents` meta-tool's create) ─────────────────────────────────────────────
 
 
 def render_agent_md(name: str, desc: str, tools: list[str], instructions: str) -> str:
@@ -207,81 +208,3 @@ def render_agent_md(name: str, desc: str, tools: list[str], instructions: str) -
         sort_keys=False,
     ).strip()
     return f"---\n{fm}\n---\n{instructions.strip()}\n"
-
-
-class CreateAgentTool(AgentTool):
-    """Create or update a named agent by writing `<name>.md`."""
-
-    name = "create_agent"
-    label = "create_agent"
-    description = (
-        "Create or update a reusable named agent. Writes "
-        "~/.connectclaw/agents/<name>.md and becomes callable next turn (as a "
-        "tool named <name>, or via task's `agent` field). The agent's identity "
-        "lives in `instructions` (natural language) — no JSON/shell templates."
-    )
-    parameters = {
-        "type": "object",
-        "properties": {
-            "name": {
-                "type": "string",
-                "description": "agent 名(字母/数字/_/-,无空格),也是调用它的工具名",
-            },
-            "desc": {"type": "string", "description": "一句话描述这个 agent 干什么"},
-            "tools": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "该 agent 可用的工具名,如 ['read','bash']",
-            },
-            "instructions": {
-                "type": "string",
-                "description": "该 agent 的 system prompt:它是谁、职责、输出要求(自然语言)",
-            },
-        },
-        "required": ["name", "instructions"],
-    }
-
-    def __init__(self, agents_dir: str):
-        self._agents_dir = agents_dir
-
-    async def execute(
-        self,
-        tool_call_id: str,
-        params: dict[str, Any],
-        signal: asyncio.Event | None = None,
-        on_update: Any = None,
-    ) -> AgentToolResult:
-        name = (params.get("name") or "").strip()
-        if not name or not _NAME_RE.match(name):
-            return AgentToolResult(content=[{
-                "type": "text",
-                "text": "Invalid agent name. Use letters, digits, '_' or '-' only.",
-            }])
-        desc = params.get("desc", "") or ""
-        tools = params.get("tools") or []
-        if isinstance(tools, str):
-            tools = [tools]
-        instructions = params.get("instructions", "") or ""
-        if not instructions.strip():
-            return AgentToolResult(content=[{
-                "type": "text", "text": "instructions is required (the agent's system prompt).",
-            }])
-
-        content = render_agent_md(name, desc, [str(t) for t in tools], instructions)
-        try:
-            Path(self._agents_dir).mkdir(parents=True, exist_ok=True)
-            (Path(self._agents_dir) / f"{name}.md").write_text(content, encoding="utf-8")
-        except OSError as e:
-            return AgentToolResult(content=[{"type": "text", "text": f"Failed to write agent: {e}"}])
-
-        return AgentToolResult(content=[{
-            "type": "text",
-            "text": (
-                f"✅ 已创建 agent `{name}`(下一轮生效)。"
-                f"可直接作为工具 `{name}(prompt=...)` 调用,或在 task 里用 `agent: \"{name}\"`。"
-            ),
-        }])
-
-
-def create_create_agent_tool(agents_dir: str) -> CreateAgentTool:
-    return CreateAgentTool(agents_dir)

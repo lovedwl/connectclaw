@@ -28,6 +28,12 @@ model_id = ""
 cwd = "."
 # Thinking/reasoning level: off, minimal, low, medium, high, xhigh
 thinking_level = "off"
+# Base primitives exposed DIRECTLY to the main agent (a whitelist). Named agents
+# and dynamic tools are NOT listed here — they are reached through the single
+# `agents` meta-tool, so a newly created agent is usable the same turn and the
+# tools array stays byte-stable (prefix cache). Omit this line to expose all.
+# Unknown names are dropped (warning); empty resolves to ["read","bash"].
+tools = ["read", "write", "hash_read", "hash_edit", "bash", "web_search", "web_fetch", "image_analyze"]
 
 [session]
 # Session storage directory
