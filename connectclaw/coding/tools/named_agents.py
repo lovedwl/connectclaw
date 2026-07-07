@@ -111,6 +111,8 @@ class NamedAgentTool(AgentTool):
         *,
         api_key: str | None = None,
         thinking_level: ThinkingLevel = "off",
+        session_repo: Any = None,
+        cwd: str = "",
     ):
         self.name = name
         self.label = name
@@ -128,6 +130,8 @@ class NamedAgentTool(AgentTool):
         self._model = model
         self._api_key = api_key
         self._thinking_level = thinking_level
+        self._session_repo = session_repo
+        self._cwd = cwd
 
     async def execute(
         self,
@@ -148,6 +152,9 @@ class NamedAgentTool(AgentTool):
             api_key=self._api_key,
             thinking_level=self._thinking_level,
             signal=signal,
+            subagent_id=self.name,
+            session_repo=self._session_repo,
+            cwd=self._cwd,
         )
         if res.get("error"):
             return AgentToolResult(
@@ -167,6 +174,8 @@ def load_named_agents(
     *,
     api_key: str | None = None,
     thinking_level: ThinkingLevel = "off",
+    session_repo: Any = None,
+    cwd: str = "",
 ) -> list[AgentTool]:
     """Scan agents_dir for `*.md` and build a NamedAgentTool for each.
 
@@ -193,6 +202,8 @@ def load_named_agents(
             model=model,
             api_key=api_key,
             thinking_level=thinking_level,
+            session_repo=session_repo,
+            cwd=cwd,
         ))
     return out
 

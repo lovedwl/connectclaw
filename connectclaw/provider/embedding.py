@@ -40,6 +40,18 @@ class EmbeddingProvider:
         if self._model is not None:
             return
 
+        # Hard-cap torch CPU threads (belt-and-braces over OMP_NUM_THREADS):
+        # some paths ignore the env var. On CPU, BGE-M3 single-query embedding
+        # does not benefit from all cores and an unbounded pool spikes RSS.
+        try:
+            import os as _os
+            import torch
+
+            n = int(_os.environ.get("CONNECTCLAW_ML_THREADS", "4"))
+            torch.set_num_threads(max(1, n))
+        except Exception:
+            pass
+
         from sentence_transformers import SentenceTransformer
 
         self._model = await asyncio.to_thread(

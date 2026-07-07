@@ -34,6 +34,8 @@ thinking_level = "off"
 # tools array stays byte-stable (prefix cache). Omit this line to expose all.
 # Unknown names are dropped (warning); empty resolves to ["read","bash"].
 tools = ["read", "write", "hash_read", "hash_edit", "bash", "web_search", "web_fetch", "image_analyze"]
+# Idle seconds before a stateful scripted-tool session (e.g. the browser) is reaped.
+tool_session_idle_timeout = 300
 
 [session]
 # Session storage directory
@@ -52,13 +54,16 @@ top_k = 20
 top_n = 5
 
 [web_search]
-# Path to glyph binary (free TUI browser, Bing engine, no API key needed)
-# Install: git clone https://github.com/k1y0miiii/glyph.git && cd glyph && cargo install --locked --path crates/app
-glyph_bin = "glyph"
+# Web search/fetch run on the bundled Lightpanda headless browser (lightpanda-py,
+# binary included): Bing for search, a real DOM session (replaces the old glyph).
+# For login / multi-step interaction, the agent uses the stateful `browser` tool.
 # Max characters in search/fetch response
 max_chars = 8000
 # Timeout in seconds
 timeout = 30
+# Parallel browser engines for web_search/web_fetch (each ~tens of MB). Higher =
+# more concurrent searches (e.g. a fleet of search sub-agents), at more memory.
+pool_size = 3
 
 [compaction]
 # Enable automatic context compaction

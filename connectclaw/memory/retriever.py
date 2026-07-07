@@ -33,6 +33,12 @@ class RetrievalConfig:
     # is irrelevant regardless of recency/importance/strength. Measured on
     # BGE-M3 (zh): relevant hits land 0.50–0.73, unrelated queries peak <0.45.
     min_similarity: float = 0.45
+    # Persona injection: high-importance semantic memories (how to address the
+    # user, tone, standing preferences) are injected EVERY turn, bypassing the
+    # similarity gate — so identity is present from the first "hi", not only when
+    # the user's message happens to match it.
+    persona_min_importance: float = 0.7
+    persona_top_k: int = 8
 
 
 class MemoryRetriever:
@@ -71,12 +77,37 @@ class MemoryRetriever:
         to preserve prompt cache), or "" if nothing relevant.
         """
         results = await self.retrieve(query, query_embedding=query_embedding)
+
+        # Always-on persona block, merged ahead of per-query hits (deduped by id).
+        persona = self._retrieve_persona()
+        if persona:
+            seen = {r.entry.id for r in persona}
+            results = persona + [r for r in results if r.entry.id not in seen]
+
         if not results:
             return ""
 
         return self._format_for_prompt(results)
 
     # ── Internal ──────────────────────────────────────────
+
+    def _retrieve_persona(self) -> list[SearchResult]:
+        """Unconditional high-importance semantic memories (identity/persona).
+
+        Shown at full detail and ranked first — these are the standing facts the
+        assistant should always honor (how to address the user, tone).
+        """
+        entries = self._store.list_persona(
+            min_importance=self._config.persona_min_importance,
+            limit=self._config.persona_top_k,
+        )
+        out: list[SearchResult] = []
+        for entry in entries:
+            self._store.touch(entry.id)
+            out.append(
+                SearchResult(entry=entry, score=1.0, detail_level="full")
+            )
+        return out
 
     async def _retrieve_by_embedding(
         self, query_embedding: list[float]
