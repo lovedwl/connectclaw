@@ -170,6 +170,26 @@ class MemoryStore:
         rows = conn.execute(query, params).fetchall()
         return [self._row_to_entry(r) for r in rows]
 
+    def list_persona(
+        self, *, min_importance: float = 0.7, min_strength: float = 0.1, limit: int = 10
+    ) -> list[MemoryEntry]:
+        """Stable identity facts to inject EVERY turn, regardless of query.
+
+        These are the high-importance semantic memories — how to address the
+        user, tone/persona, standing preferences. They must ride in the context
+        from the very first "hi", not wait until the user's message happens to
+        be semantically similar (a greeting never matches "what should you call
+        me?" above the cosine gate). Treated like a resident persona block.
+        """
+        conn = self._connect()
+        rows = conn.execute(
+            """SELECT * FROM memories
+               WHERE type = ? AND importance >= ? AND strength >= ?
+               ORDER BY importance DESC, last_accessed DESC LIMIT ?""",
+            (MemoryType.SEMANTIC.value, min_importance, min_strength, limit),
+        ).fetchall()
+        return [self._row_to_entry(r) for r in rows]
+
     def search_by_embedding(
         self,
         query_embedding: list[float],

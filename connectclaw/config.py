@@ -114,6 +114,8 @@ class AgentConfig:
             "bash", "web_search", "web_fetch", "image_analyze",
         ]
     )
+    # Idle seconds before a stateful scripted-tool session process is reaped.
+    tool_session_idle_timeout: int = 300
 
 
 @dataclass
@@ -132,9 +134,12 @@ class RAGConfig:
 
 @dataclass
 class WebSearchConfig:
-    glyph_bin: str = "glyph"
     max_chars: int = 8000
     timeout: int = 30
+    # Max concurrent browser sessions for web_search/web_fetch. One shared
+    # Lightpanda `serve` process hosts them all (multi-client model), so this is
+    # a session cap, not a process count — no per-session subprocess.
+    pool_size: int = 16
 
 
 @dataclass
@@ -247,6 +252,9 @@ class Config:
         ag_tools = ag.get("tools")
         if isinstance(ag_tools, list) and ag_tools:
             agent.tools = [str(x) for x in ag_tools]
+        agent.tool_session_idle_timeout = int(
+            ag.get("tool_session_idle_timeout", agent.tool_session_idle_timeout)
+        )
 
         # Session
         se = raw.get("session", {})
@@ -271,8 +279,6 @@ class Config:
         # Web Search
         ws = raw.get("web_search", {})
         web_search = WebSearchConfig(
-            glyph_bin=os.environ.get("GLYPH_BIN")
-                or ws.get("glyph_bin", "glyph"),
             max_chars=int(
                 os.environ.get("WEB_SEARCH_MAX_CHARS", "")
                 or ws.get("max_chars", 8000)
@@ -281,6 +287,7 @@ class Config:
                 os.environ.get("WEB_SEARCH_TIMEOUT", "")
                 or ws.get("timeout", 30)
             ),
+            pool_size=int(ws.get("pool_size", 16)),
         )
 
         # Compaction

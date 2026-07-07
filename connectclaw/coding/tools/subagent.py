@@ -21,9 +21,44 @@ import asyncio
 from typing import Any, Callable
 
 from connectclaw.agent.agent import Agent
+from connectclaw.agent.harness.agent_harness import _serialize_message
 from connectclaw.agent.harness.messages import convert_to_llm
+from connectclaw.agent.harness.session import SessionRepo
 from connectclaw.agent.types import AgentTool, ThinkingLevel
+from connectclaw.coding.tools.tool_context import current_subagent
+from connectclaw.logging import get_logger
 from connectclaw.provider.types import Model
+
+logger = get_logger(__name__)
+
+
+async def _persist_subagent_session(
+    session_repo: SessionRepo,
+    *,
+    cwd: str,
+    parent_session_id: str | None,
+    subagent_id: str,
+    name: str,
+    prompt: str,
+    messages: list[Any],
+) -> None:
+    """Write a sub-agent's transcript to its own jsonl session (best-effort).
+
+    Sub-agents previously left no trace on disk — a fleet run vanished after it
+    returned. Each sub-agent now gets a standalone session file so the run is
+    reviewable in ~/.connectclaw/sessions/, keyed by parent + sub-agent id.
+    """
+    try:
+        pid = (parent_session_id or "root")[:12]
+        tid = (subagent_id or name or "sub")[:16]
+        sid = f"sub-{pid}-{tid}"
+        storage = await session_repo.create_session(cwd, session_id=sid)
+        # Lead with the task prompt so the file is self-explanatory.
+        await storage.append_message({"role": "user", "content": [{"type": "text", "text": prompt}]})
+        for msg in messages:
+            await storage.append_message(_serialize_message(msg))
+    except Exception as e:  # noqa: BLE001
+        logger.debug("subagent session persist failed: %s", e)
 
 # on_progress(name, status, step, action, trace)
 #   status ∈ {"waiting", "running", "done", "error"}
@@ -130,6 +165,10 @@ async def run_subagent(
     thinking_level: ThinkingLevel = "off",
     on_progress: ProgressCallback | None = None,
     signal: asyncio.Event | None = None,
+    subagent_id: str = "",
+    session_repo: SessionRepo | None = None,
+    cwd: str = "",
+    parent_session_id: str | None = None,
 ) -> dict[str, Any]:
     """Spawn a single child agent from `spec` and return its result.
 
@@ -142,7 +181,14 @@ async def run_subagent(
 
     Returns {"name", "output", "error", "steps"}.
     Never raises — errors are captured into the returned dict.
+
+    If `session_repo` is given, the child's transcript is persisted to its own
+    jsonl session (best-effort) so fleet runs are reviewable on disk.
     """
+    # Bind this sub-agent so its stateful tool calls get their OWN session
+    # (e.g. its own browser) — fleet members run in parallel, not contending.
+    if subagent_id:
+        current_subagent.set(subagent_id)
     name = spec.get("name", "agent")
     tools: list[AgentTool] = spec.get("tools") or []
     system_prompt = spec.get("system_prompt") or ""
@@ -207,3 +253,14 @@ async def run_subagent(
     finally:
         if abort_watcher is not None:
             abort_watcher.cancel()
+        # Persist the child's transcript to its own session file (best-effort).
+        if session_repo is not None:
+            await _persist_subagent_session(
+                session_repo,
+                cwd=cwd,
+                parent_session_id=parent_session_id,
+                subagent_id=subagent_id,
+                name=name,
+                prompt=prompt,
+                messages=list(agent.state.messages),
+            )

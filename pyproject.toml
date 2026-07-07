@@ -18,6 +18,9 @@ dependencies = [
     "xxhash>=3.0.0",
     "numpy>=2.5.0",
     "torch>=2.12.1",
+    "websockets>=15.0.1",
+    "httpx>=0.28.1",
+    "lightpanda-py>=0.2.8",
 ]
 
 [project.optional-dependencies]
@@ -35,6 +38,10 @@ dev = [
 
 [project.scripts]
 connectclaw = "connectclaw.main:cli"
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
 
 [build-system]
 requires = ["hatchling"]

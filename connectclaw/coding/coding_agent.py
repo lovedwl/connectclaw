@@ -29,7 +29,9 @@ from .tools.bash import BashGuard, create_bash_tool
 from .tools.hash_edit import create_hash_edit_tool
 from .tools.hash_read import create_hash_read_tool
 from .tools.image_analyze import create_image_analyze_tool
+from .tools import lightpanda
 from .tools.read import create_read_tool
+from .tools.scripted_tools import SessionRuntime, current_conversation
 from .tools.web_search import create_web_fetch_tool, create_web_search_tool
 from .tools.write import create_write_tool
 
@@ -65,13 +67,13 @@ class CodingAgent:
         self._hash_edit_tool = create_hash_edit_tool(config.agent.cwd)
         self._bash_guard = BashGuard()
         self._bash_tool = create_bash_tool(config.agent.cwd, self._bash_guard)
+        # Size the stateless browser-engine pool (parallel web_search/web_fetch).
+        lightpanda.configure_pool(config.web_search.pool_size)
         self._web_search_tool = create_web_search_tool(
-            glyph_bin=config.web_search.glyph_bin,
             max_chars=config.web_search.max_chars,
             timeout=config.web_search.timeout,
         )
         self._web_fetch_tool = create_web_fetch_tool(
-            glyph_bin=config.web_search.glyph_bin,
             max_chars=config.web_search.max_chars,
             timeout=config.web_search.timeout,
         )
@@ -90,6 +92,13 @@ class CodingAgent:
         self._agents_dir = os.path.expanduser("~/.connectclaw/agents")
         os.makedirs(self._agents_dir, exist_ok=True)
 
+        # Builtin scripted-tools dir (ships with the package: browser.tool.md, …)
+        # + the runtime that keeps stateful tool sessions alive, per conversation.
+        self._builtin_tools_dir = os.path.join(os.path.dirname(__file__), "tools", "builtin")
+        self._session_runtime = SessionRuntime(
+            idle_timeout=config.agent.tool_session_idle_timeout
+        )
+
         # Registry of base primitives, keyed by tool name. The main agent's
         # exposed set is a whitelist over this (config.agent.tools); the meta-tool
         # may grant ANY of these to a sub-agent — even ones the main agent lacks.
@@ -106,14 +115,22 @@ class CodingAgent:
         # sub-agent is reached through it, resolved at CALL TIME (so an agent
         # created mid-turn is runnable the same turn). Absorbs the old `task`
         # and `create_agent` tools.
+        # Session repository (created before the agents tool so sub-agent
+        # transcripts can be persisted through it).
+        sessions_dir = os.path.expanduser(config.session.dir)
+        self._session_repo = SessionRepo(sessions_dir)
+
         self._agents_tool = create_agents_tool(
             self._model,
             agents_dir=self._agents_dir,
             tools_dir=self._tools_dir,
+            builtin_dir=self._builtin_tools_dir,
             base_tools=list(self._tool_registry.values()),
+            session_runtime=self._session_runtime,
             cwd=config.agent.cwd,
             api_key=config.llm.api_key or None,
             thinking_level=config.agent.thinking_level,  # type: ignore[arg-type]
+            session_repo=self._session_repo,
         )
 
         # Current tool set
@@ -149,10 +166,6 @@ class CodingAgent:
                 consolidation_enabled=config.memory.consolidation_enabled,
             )
         )
-
-        # Session repository
-        sessions_dir = os.path.expanduser(config.session.dir)
-        self._session_repo = SessionRepo(sessions_dir)
 
         # Compaction settings
         self._compaction_settings = CompactionSettings(
@@ -253,6 +266,10 @@ class CodingAgent:
     ) -> str | None:
         """Internal message handling — separated so handle_message can wrap it
         with task tracking and cancellation support."""
+        # Bind this turn's conversation so stateful scripted-tool sessions are
+        # isolated per chat (execute() has no conversation arg — pass via contextvar).
+        current_conversation.set(conversation_key)
+
         # Refresh tools each turn (pick up newly written dynamic tools)
         tools = self._refresh_tools()
 
@@ -369,6 +386,7 @@ class CodingAgent:
     async def new_session(self, conversation_key: str) -> None:
         if conversation_key in self._conversations:
             del self._conversations[conversation_key]
+        await self._session_runtime.shutdown(conversation_key)
         await self._session_repo.forget_chat(conversation_key)
 
     async def compact_session(self, conversation_key: str) -> dict | None:
@@ -391,6 +409,7 @@ class CodingAgent:
 
     async def close_conversation(self, conversation_key: str) -> None:
         self._conversations.pop(conversation_key, None)
+        await self._session_runtime.shutdown(conversation_key)
 
     async def list_sessions(self) -> list[dict[str, Any]]:
         return await self._session_repo.list_sessions()

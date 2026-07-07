@@ -145,10 +145,12 @@ async def main(argv: list[str] | None = None) -> None:
     logger.info("  Sessions: %s", config.session.dir)
     logger.info("  RAG: %s", "enabled" if config.rag.enabled else "disabled")
     logger.info("  Memory: %s", "enabled" if config.memory.enabled else "disabled")
-    glyph_available = shutil.which(config.web_search.glyph_bin) is not None or os.path.isfile(
-        os.path.expanduser("~/.cargo/bin/glyph")
-    )
-    logger.info("  Web Search: %s", "available (glyph)" if glyph_available else "glyph not found — git clone https://github.com/k1y0miiii/glyph.git && cd glyph && cargo install --locked --path crates/app")
+    try:
+        import lightpanda  # noqa: F401
+        browser_ok = True
+    except Exception:
+        browser_ok = False
+    logger.info("  Web/Browser: %s", "Lightpanda ready" if browser_ok else "lightpanda-py missing — uv add lightpanda-py")
     logger.info("  Vision: %s", "configured" if config.vision.api_key else "not configured")
 
     if not config.llm.api_key:
@@ -170,6 +172,19 @@ async def main(argv: list[str] | None = None) -> None:
     if config.memory.enabled or config.rag.enabled:
         os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
         logger.info("  HF endpoint: %s", os.environ["HF_ENDPOINT"])
+
+        # Cap ML thread/process fan-out. On a 24-core box, torch's intra-op
+        # pool and joblib/loky each default to one worker PER CORE — BGE-M3
+        # runs on the per-turn recall path, so an unbounded fan-out spikes CPU
+        # and RSS (and leaks loky semaphores at shutdown). A small fixed cap is
+        # plenty for single-query embedding and keeps the baseline flat. Must be
+        # set before torch / sentence-transformers import (lazy, on first embed).
+        _ml_threads = os.environ.setdefault("CONNECTCLAW_ML_THREADS", "4")
+        os.environ.setdefault("OMP_NUM_THREADS", _ml_threads)
+        os.environ.setdefault("MKL_NUM_THREADS", _ml_threads)
+        os.environ.setdefault("LOKY_MAX_CPU_COUNT", _ml_threads)
+        os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+        logger.info("  ML threads capped at %s", _ml_threads)
 
     # Initialize RAG if enabled
     if config.rag.enabled:
