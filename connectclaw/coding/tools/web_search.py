@@ -4,9 +4,9 @@ Web search & fetch — backed by the Lightpanda browser engine (see lightpanda.p
 Replaces the old glyph TUI scrape: a real (headless) browser session, Bing for
 search, DOM→text extraction, crash-recovering. No HTML/JS/ads → token-efficient.
 
-For login / multi-step interaction, use the stateful `browser` tool instead;
-these two are the stateless, main-agent-facing shortcuts. Both share the same
-Lightpanda engine under the hood.
+These two are the stateless, main-agent-facing shortcuts, sharing one Lightpanda
+engine under the hood. (A stateful `browser` tool once existed for login /
+multi-step interaction but has been retired.)
 """
 
 from __future__ import annotations
@@ -39,8 +39,7 @@ class WebSearchTool(AgentTool):
     description = (
         "Search the web and get PLAIN TEXT results via a real headless browser "
         "session (Bing). Token-efficient: clean text, no HTML/ads. "
-        "For fetching a specific URL use web_fetch; for login or multi-step "
-        "interaction use the `browser` tool."
+        "For fetching a specific URL use web_fetch."
     )
     parameters = {
         "type": "object",
@@ -88,8 +87,7 @@ class WebFetchTool(AgentTool):
     description = (
         "Fetch a URL as PLAIN TEXT via a real headless browser session. "
         "Strips HTML/JS/ads — token-efficient. Best for articles, docs, blogs. "
-        "Very heavy SPAs may fail (engine is lightweight); use the `browser` "
-        "tool for interactive/JS-heavy pages."
+        "Very heavy SPAs may fail (engine is lightweight)."
     )
     parameters = {
         "type": "object",

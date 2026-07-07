@@ -42,7 +42,6 @@ from connectclaw.coding.tools.named_agents import (
     parse_agent_file,
     render_agent_md,
 )
-from connectclaw.coding.tools.scripted_tools import SessionRuntime, load_scripted_tools
 from connectclaw.coding.tools.subagent import run_subagent
 from connectclaw.provider.types import Model
 
@@ -152,10 +151,7 @@ class AgentsTool(AgentTool):
         model: Model,
         *,
         agents_dir: str,
-        tools_dir: str,
-        builtin_dir: str,
         base_tools: list[AgentTool],
-        session_runtime: SessionRuntime,
         cwd: str,
         api_key: str | None = None,
         thinking_level: ThinkingLevel = "off",
@@ -163,10 +159,7 @@ class AgentsTool(AgentTool):
     ):
         self._model = model
         self._agents_dir = agents_dir
-        self._tools_dir = tools_dir
-        self._builtin_dir = builtin_dir
         self._base_tools = list(base_tools)  # the fixed primitive instances
-        self._session_runtime = session_runtime
         self._cwd = cwd
         self._api_key = api_key
         self._thinking_level = thinking_level
@@ -175,16 +168,12 @@ class AgentsTool(AgentTool):
     # ── Live re-scan (the immediacy mechanism) ──────────────
 
     def _grantable(self) -> list[AgentTool]:
-        """The pool a sub-agent may be granted: base primitives + scripted tools
-        (builtin + user `*.tool.md` and `.tool.json`).
+        """The pool a sub-agent may be granted: the base primitives.
 
-        Re-scanned every call so tools created this turn are grantable now.
         Deliberately NOT limited by the main agent's exposed-tool whitelist —
         a sub-agent can be granted tools the main agent itself doesn't hold.
         """
-        return self._base_tools + load_scripted_tools(
-            [self._builtin_dir, self._tools_dir], self._session_runtime, self._cwd
-        )
+        return list(self._base_tools)
 
     def _named(self, grantable: list[AgentTool]) -> list[AgentTool]:
         """Re-scan named agents at call time (immediacy: create → run same turn)."""
@@ -555,10 +544,7 @@ def create_agents_tool(
     model: Model,
     *,
     agents_dir: str,
-    tools_dir: str,
-    builtin_dir: str,
     base_tools: list[AgentTool],
-    session_runtime: SessionRuntime,
     cwd: str,
     api_key: str | None = None,
     thinking_level: ThinkingLevel = "off",
@@ -567,10 +553,7 @@ def create_agents_tool(
     return AgentsTool(
         model,
         agents_dir=agents_dir,
-        tools_dir=tools_dir,
-        builtin_dir=builtin_dir,
         base_tools=base_tools,
-        session_runtime=session_runtime,
         cwd=cwd,
         api_key=api_key,
         thinking_level=thinking_level,

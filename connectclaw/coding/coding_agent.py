@@ -31,7 +31,6 @@ from .tools.hash_read import create_hash_read_tool
 from .tools.image_analyze import create_image_analyze_tool
 from .tools import lightpanda
 from .tools.read import create_read_tool
-from .tools.scripted_tools import SessionRuntime, current_conversation
 from .tools.web_search import create_web_fetch_tool, create_web_search_tool
 from .tools.write import create_write_tool
 
@@ -84,20 +83,9 @@ class CodingAgent:
             cwd=config.agent.cwd,
         )
 
-        # Dynamic tools directory (legacy .tool.json shell shortcuts)
-        self._tools_dir = os.path.expanduser("~/.connectclaw/tools")
-        os.makedirs(self._tools_dir, exist_ok=True)
-
         # Named agents directory (.md agents — the primary "agent makes agent" path)
         self._agents_dir = os.path.expanduser("~/.connectclaw/agents")
         os.makedirs(self._agents_dir, exist_ok=True)
-
-        # Builtin scripted-tools dir (ships with the package: browser.tool.md, …)
-        # + the runtime that keeps stateful tool sessions alive, per conversation.
-        self._builtin_tools_dir = os.path.join(os.path.dirname(__file__), "tools", "builtin")
-        self._session_runtime = SessionRuntime(
-            idle_timeout=config.agent.tool_session_idle_timeout
-        )
 
         # Registry of base primitives, keyed by tool name. The main agent's
         # exposed set is a whitelist over this (config.agent.tools); the meta-tool
@@ -123,10 +111,7 @@ class CodingAgent:
         self._agents_tool = create_agents_tool(
             self._model,
             agents_dir=self._agents_dir,
-            tools_dir=self._tools_dir,
-            builtin_dir=self._builtin_tools_dir,
             base_tools=list(self._tool_registry.values()),
-            session_runtime=self._session_runtime,
             cwd=config.agent.cwd,
             api_key=config.llm.api_key or None,
             thinking_level=config.agent.thinking_level,  # type: ignore[arg-type]
@@ -266,16 +251,12 @@ class CodingAgent:
     ) -> str | None:
         """Internal message handling — separated so handle_message can wrap it
         with task tracking and cancellation support."""
-        # Bind this turn's conversation so stateful scripted-tool sessions are
-        # isolated per chat (execute() has no conversation arg — pass via contextvar).
-        current_conversation.set(conversation_key)
-
-        # Refresh tools each turn (pick up newly written dynamic tools)
+        # Refresh tools each turn.
         tools = self._refresh_tools()
 
         harness = await self._get_or_create_harness(conversation_key, tools)
 
-        # Refresh harness tools (pick up newly created dynamic tools)
+        # Refresh harness tools (pick up newly created .tool.md scripts)
         await harness.set_tools(tools)
 
         # Set live card callbacks for real-time Feishu display
@@ -386,7 +367,6 @@ class CodingAgent:
     async def new_session(self, conversation_key: str) -> None:
         if conversation_key in self._conversations:
             del self._conversations[conversation_key]
-        await self._session_runtime.shutdown(conversation_key)
         await self._session_repo.forget_chat(conversation_key)
 
     async def compact_session(self, conversation_key: str) -> dict | None:
@@ -409,7 +389,6 @@ class CodingAgent:
 
     async def close_conversation(self, conversation_key: str) -> None:
         self._conversations.pop(conversation_key, None)
-        await self._session_runtime.shutdown(conversation_key)
 
     async def list_sessions(self) -> list[dict[str, Any]]:
         return await self._session_repo.list_sessions()

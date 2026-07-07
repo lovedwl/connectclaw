@@ -25,7 +25,6 @@ from connectclaw.agent.harness.agent_harness import _serialize_message
 from connectclaw.agent.harness.messages import convert_to_llm
 from connectclaw.agent.harness.session import SessionRepo
 from connectclaw.agent.types import AgentTool, ThinkingLevel
-from connectclaw.coding.tools.tool_context import current_subagent
 from connectclaw.logging import get_logger
 from connectclaw.provider.types import Model
 
@@ -185,10 +184,6 @@ async def run_subagent(
     If `session_repo` is given, the child's transcript is persisted to its own
     jsonl session (best-effort) so fleet runs are reviewable on disk.
     """
-    # Bind this sub-agent so its stateful tool calls get their OWN session
-    # (e.g. its own browser) — fleet members run in parallel, not contending.
-    if subagent_id:
-        current_subagent.set(subagent_id)
     name = spec.get("name", "agent")
     tools: list[AgentTool] = spec.get("tools") or []
     system_prompt = spec.get("system_prompt") or ""

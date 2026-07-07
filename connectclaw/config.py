@@ -104,7 +104,7 @@ class AgentConfig:
     thinking_level: str = "off"
     max_images: int = 5
     # Which base primitives are exposed DIRECTLY to the main agent (a whitelist
-    # from the tool registry). Named agents + dynamic tools are NOT here — they
+    # from the tool registry). Named agents + scripted tools are NOT here — they
     # are reached through the single `agents` meta-tool. Default = all base
     # primitives (current behaviour). Unknown names are dropped with a warning;
     # an empty resolved set falls back to ['read','bash'].
@@ -114,8 +114,6 @@ class AgentConfig:
             "bash", "web_search", "web_fetch", "image_analyze",
         ]
     )
-    # Idle seconds before a stateful scripted-tool session process is reaped.
-    tool_session_idle_timeout: int = 300
 
 
 @dataclass
@@ -252,9 +250,6 @@ class Config:
         ag_tools = ag.get("tools")
         if isinstance(ag_tools, list) and ag_tools:
             agent.tools = [str(x) for x in ag_tools]
-        agent.tool_session_idle_timeout = int(
-            ag.get("tool_session_idle_timeout", agent.tool_session_idle_timeout)
-        )
 
         # Session
         se = raw.get("session", {})
