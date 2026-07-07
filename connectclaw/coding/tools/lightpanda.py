@@ -23,6 +23,7 @@ import atexit
 import contextlib
 import json
 import os
+import re
 import urllib.parse
 from typing import Any
 
@@ -231,6 +232,25 @@ class LightpandaEngine:
             await asyncio.sleep(0.2)
 
     async def read_markdown(self, sid: str) -> str:
+        """Page content as Markdown.
+
+        Prefers Lightpanda's native `LP.getMarkdown` CDP command — it walks the
+        rendered DOM into structured Markdown (headings, links, list items), so
+        e.g. Bing results come back as `## [title](url)\\n snippet` instead of one
+        flattened innerText blob. Falls back to raw innerText if the command is
+        unavailable (older engine) or errors on a page.
+        """
+        try:
+            r = await self._rpc("LP.getMarkdown", {}, sid=sid)
+            md = r.get("markdown")
+            if isinstance(md, str) and md.strip():
+                # Already structured Markdown — keep its newlines (collapse only
+                # runs of 3+ blank lines), don't flatten like innerText. Strip
+                # image syntax first (token bloat + breaks Feishu cards).
+                return _squeeze_blanklines(_strip_images(md).strip())
+        except LightpandaError:
+            pass  # command missing / page too heavy — fall back below
+
         raw = await self._eval(sid, _EXTRACT_JS)
         try:
             data = json.loads(raw) if isinstance(raw, str) else (raw or {})
@@ -258,6 +278,69 @@ def _collapse(text: str) -> str:
         if ln.strip():
             blank = 0
             out.append(ln)
+        else:
+            blank += 1
+            if blank <= 1:
+                out.append("")
+    return "\n".join(out).strip()
+
+
+# Markdown image syntax: ![alt](url). LP.getMarkdown emits these for every page
+# image — tracking pixels, avatars, and huge base64 data: URIs. They are useless
+# to a text agent AND poison Feishu cards: the card renderer treats `![](url)` as
+# an image element needing a valid Feishu image_key, so an external/bing URL
+# fails the whole card patch with "card contains invalid image keys". Strip them.
+_IMG_MD_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+# Empty-text links `[](url)` are nav-icon artifacts — drop the link, they render
+# as bare "()" noise. Keep links that have visible text.
+_EMPTY_LINK_RE = re.compile(r"\[\s*\]\([^)]*\)")
+
+
+def _strip_images(text: str) -> str:
+    text = _IMG_MD_RE.sub("", text)
+    text = _EMPTY_LINK_RE.sub("", text)
+    # Tidy up the "()" / " ." leftovers a removed inline element can leave behind.
+    text = re.sub(r"\(\s*\)", "", text)
+    return text
+
+
+# Bing chrome markers. The real results sit between "约 N 个结果 / N results" and
+# the legal disclaimer / pager / footer. Trimming to that window drops the header
+# nav (国内版/图片/视频…) and the footer noise, leaving just the result list.
+_BING_HEAD_RE = re.compile(r"约\s*[\d,，]+\s*个?\s*结果|[\d,]+\s+[Rr]esults")
+# The footer starts at the legal disclaimer ("为回应符合本地法律…") which Bing
+# appends right after the last result; the pager and ICP filing follow it.
+_BING_TAIL_RE = re.compile(
+    r"为回应符合本地法律|部分搜索结果未予显示|分页\s*\d|相关搜索|Related searches|"
+    r"©\s*\d{4}\s*Microsoft|增值电信业务|隐私条款"
+)
+
+
+def _trim_bing_chrome(text: str) -> str:
+    """Cut Bing's header nav and footer, keeping just the result list."""
+    m = _BING_HEAD_RE.search(text)
+    if m:
+        # Keep from just after the "约 N 个结果" marker (skip its line).
+        nl = text.find("\n", m.end())
+        text = text[nl + 1:] if nl != -1 else text[m.end():]
+    t = _BING_TAIL_RE.search(text)
+    if t:
+        text = text[: t.start()]
+        # The disclaimer often follows the last result's serial number ("11."),
+        # leaving a dangling "11." — strip a trailing orphan number.
+        text = re.sub(r"\n\s*\d+\.\s*$", "", text).rstrip()
+    return text.strip()
+
+
+def _squeeze_blanklines(text: str) -> str:
+    """Collapse runs of 3+ blank lines to one, but keep single blanks and
+    indentation — structured Markdown (headings, lists, links) must survive."""
+    out: list[str] = []
+    blank = 0
+    for ln in text.replace("\r", "").split("\n"):
+        if ln.strip():
+            blank = 0
+            out.append(ln.rstrip())
         else:
             blank += 1
             if blank <= 1:
@@ -412,6 +495,8 @@ async def search_once(query: str, max_chars: int = 8000) -> str:
 
     async def _do(eng: LightpandaEngine, sid: str) -> str:
         await eng.navigate(sid, url)
-        return _cap(await eng.read_markdown(sid), max_chars)
+        md = await eng.read_markdown(sid)
+        # Drop Bing's header nav and footer; keep just the result list.
+        return _cap(_trim_bing_chrome(md), max_chars)
 
     return await _run_stateless(_do)
