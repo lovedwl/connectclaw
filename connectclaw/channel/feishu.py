@@ -140,6 +140,11 @@ class FeishuChannel(Channel):
     async def close(self) -> None:
         self.close_safe()
         if self._sdk is not None:
+            # 先收尾 SDK 后台任务，再 disconnect。disconnect()/stop() 只会
+            # ws_loop.stop()，不取消 ping_loop / ExpiringCache cron，留下
+            # pending task 在解释器退出时嚷「Task was destroyed but it is
+            # pending」。
+            self._silence_sdk_bg_tasks()
             try:
                 await asyncio.wait_for(self._sdk.disconnect(), timeout=3)
             except asyncio.TimeoutError:
@@ -147,6 +152,67 @@ class FeishuChannel(Channel):
             except Exception as e:
                 logger.debug("Disconnect error (non-critical): %s", e)
             self._sdk = None
+
+    def _silence_sdk_bg_tasks(self) -> None:
+        """取消 lark_channel SDK 遗留的后台 task，让进程能安静退出。
+
+        两个噪音源（见日志）：
+          1. ``Client._ping_loop`` —— 跑在模块级 ``lark_channel.ws.client.loop``
+             （由 executor 线程 ``run_until_complete(_select())`` 驱动），
+             disconnect 只 stop loop 不取消该 task。
+          2. ``ExpiringCache._start_clear_cron`` —— ``Client.__init__`` 在
+             executor 线程里 ``get_event_loop()`` 失败后新建了一个从不 run
+             的 loop，cron task 永远不会被 await，
+             "was never awaited" + pending 警告都来自这里。
+        """
+        sdk = self._sdk
+        if sdk is None:
+            return
+        ws = getattr(sdk, "_ws_client", None)
+        if ws is None:
+            return
+
+        # 1) WS loop 上的 ping_loop（以及残留的 receive/handler task）。
+        #    不动 _select() —— 它是 run_until_complete 的根，取消了会让
+        #    loop 立刻退出，我们自己的清理协程反而跑不完。
+        ws_loop = getattr(ws, "_loop", None)
+        if ws_loop is not None and ws_loop.is_running():
+            async def _cancel_bg():
+                me = asyncio.current_task()
+                targets = []
+                for t in asyncio.all_tasks():
+                    if t is me or t.done():
+                        continue
+                    qn = getattr(t.get_coro(), "__qualname__", "") or ""
+                    if qn.endswith("._ping_loop") or qn.endswith("._receive_message_loop") \
+                       or qn.endswith("._handle_message_with_limit") \
+                       or qn.endswith("._handle_message") \
+                       or qn.endswith("._disconnect_and_reconnect"):
+                        targets.append(t)
+                        t.cancel()
+                if targets:
+                    await asyncio.gather(*targets, return_exceptions=True)
+            try:
+                fut = asyncio.run_coroutine_threadsafe(_cancel_bg(), ws_loop)
+                fut.result(timeout=2.0)
+            except Exception as e:  # pragma: no cover - best-effort cleanup
+                logger.debug("WS loop bg task cleanup: %s", e)
+
+        # 2) ExpiringCache cron —— 驱动它的 loop 一次，让 cancel 真正落地。
+        cache = getattr(ws, "_cache", None)
+        cron = getattr(cache, "_cron", None)
+        if cron is not None and not cron.done():
+            try:
+                cron_loop = cron.get_loop()
+                cron.cancel()
+                if cron_loop.is_running():
+                    fut = asyncio.run_coroutine_threadsafe(asyncio.sleep(0.05), cron_loop)
+                    fut.result(timeout=1.0)
+                elif not cron_loop.is_closed():
+                    # 从未被任何线程驱动过，直接在当前线程跑一拍是安全的。
+                    cron_loop.run_until_complete(asyncio.sleep(0.05))
+            except Exception as e:  # pragma: no cover - best-effort cleanup
+                logger.debug("ExpiringCache cron cleanup: %s", e)
 
     # ── Sending ─────────────────────────────────────────────
 
