@@ -14,3 +14,15 @@ sessions/
 
 # uv
 /uv.lock
+
+# 本地不纳入版本控制的目录（个人材料、工具运行目录等）
+.private/
+.claude/
+.pi-subagents/
+
+# 本地依赖源码副本与二进制
+lightpanda
+channel-sdk-python/
+oapi-sdk-python/
+pi-hashline-edit/
+demo/
