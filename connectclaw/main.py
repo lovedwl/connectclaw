@@ -11,6 +11,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import shutil
 import signal
@@ -163,6 +164,31 @@ async def main(argv: list[str] | None = None) -> None:
     channel = FeishuChannel(config.feishu)
     coding_agent = CodingAgent(config, channel=channel)
 
+    # ── Restart event（供 /restart 命令触发进程重启）──
+    # 监控协程只负责「打信号 + 让 channel 主循环退出」，绝不自己调
+    # sys.exit —— 子任务里的 SystemExit 会被 asyncio 吞成 task 异常，
+    # 退出码传不出去，守护进程也就不会拉起。真正的 SystemExit(42)
+    # 由根协程在清理完毕后抛出。
+    restart_event = asyncio.Event()
+    coding_agent._restart_event = restart_event
+    restart_requested = False
+
+    async def _restart_monitor():
+        nonlocal restart_requested
+        try:
+            await restart_event.wait()
+        except asyncio.CancelledError:
+            return
+        logger.info("♻️ 重启信号已收到，等待回复发送完毕…")
+        # 给飞书一点时间把回复推送给用户
+        await asyncio.sleep(2)
+        restart_requested = True
+        # 只做一件事：让 channel.start() 的 keep-alive 循环退出，
+        # 主流程落到 finally 做统一清理。
+        channel.close_safe()
+
+    restart_task = asyncio.create_task(_restart_monitor())
+
     # China-friendly HuggingFace mirror. BGE-M3 (memory/RAG embeddings) is
     # pulled from HuggingFace; without a mirror the first load can hang for a
     # long time trying to reach huggingface.co. Only set when the user hasn't
@@ -265,9 +291,18 @@ async def main(argv: list[str] | None = None) -> None:
         logger.info("Shutting down...")
     finally:
         loop.remove_signal_handler(signal.SIGINT)
+        restart_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await restart_task
         if config.memory.enabled:
             await coding_agent.memory.close()
         await channel.close()
+
+    # 根协程抛出 → asyncio.run 会把它传播成进程退出码。
+    # 守护进程（systemd 等）据此判定「请拉起」。
+    if restart_requested:
+        logger.info("♻️ 进程退出（code 42），等待守护进程拉起…")
+        raise SystemExit(42)
 
 
 def cli() -> None:

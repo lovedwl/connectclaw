@@ -204,6 +204,15 @@ async def _forget(conversation_key: str, agent: Any, args: str = "") -> str:
     return f"已清空 {count} 条记忆。"
 
 
+@register("/restart", "重启 ConnectClaw 进程（优雅退出，由守护进程自动拉起）")
+async def _restart(conversation_key: str, agent: Any, args: str = "") -> str:
+    """设置重启事件，main.py 检测到后执行优雅关闭。"""
+    if hasattr(agent, '_restart_event') and agent._restart_event:
+        agent._restart_event.set()
+        return "♻️ 正在重启 ConnectClaw 进程，请稍候…"
+    return "❌ 重启功能未启用（_restart_event 未设置）"
+
+
 # ── Memory formatting helpers ──────────────────────────────────
 
 
