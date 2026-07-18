@@ -800,6 +800,22 @@ def _strip_orphan_tool_calls(messages: list) -> list:
             "missing tool results — session was interrupted mid-turn)",
             len(tool_blocks),
         )
+
+        # Some LLM APIs (e.g. DeepSeek) require assistant.content to be
+        # a non-empty string — thinking-only blocks are NOT accepted as
+        # content.  If stripping left us with only thinking blocks, promote
+        # the last thinking block's text into a text block so the API doesn't
+        # reject the message with 400.
+        if not any(b.get("type") == "text" for b in non_tool_blocks):
+            thinking_texts = [
+                b.get("thinking", "") for b in non_tool_blocks
+                if b.get("type") == "thinking"
+            ]
+            if thinking_texts:
+                non_tool_blocks = list(non_tool_blocks) + [
+                    {"type": "text", "text": thinking_texts[-1]}
+                ]
+
         stripped = type(m)(
             role="assistant",
             content=non_tool_blocks,
