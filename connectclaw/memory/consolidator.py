@@ -116,6 +116,63 @@ class MemoryConsolidator:
         """Apply time-based decay without LLM calls. Lightweight maintenance."""
         return self._apply_decay()
 
+    # ── Clustering-based dedup (procedural / semantic merge) ──
+
+    def cluster_memories(
+        self, entries: list[MemoryEntry], k: int
+    ) -> list[list[MemoryEntry]]:
+        """Group ``entries`` into ``k`` clusters by embedding similarity.
+
+        Memories without an embedding are returned as singletons appended at
+        the end. Uses the deterministic numpy KMeans in :mod:`clustering` so the
+        result is stable and testable without an LLM.
+        """
+        from .clustering import kmeans
+
+        with_vec = [e for e in entries if e.embedding]
+        singletons = [e for e in entries if not e.embedding]
+
+        if len(with_vec) <= k:
+            return [[e] for e in with_vec] + [[e] for e in singletons]
+
+        import numpy as np
+
+        matrix = np.array([e.embedding for e in with_vec], dtype=np.float32)
+        labels = kmeans(matrix, k)
+
+        buckets: list[list[MemoryEntry]] = [[] for _ in range(int(labels.max()) + 1)]
+        for entry, label in zip(with_vec, labels):
+            buckets[int(label)].append(entry)
+        return [b for b in buckets if b] + [[e] for e in singletons]
+
+    def consolidate_by_clustering(
+        self, entries: list[MemoryEntry], k: int
+    ) -> int:
+        """Cluster then merge within each cluster. Returns count merged away.
+
+        Deterministic (no LLM): keeps the first entry of each cluster, folds the
+        others' content into it, and deletes them. This is the fallback / test
+        path; production can replace the in-cluster merge with an LLM call that
+        rewrites a single consolidated memory from the cluster.
+        """
+        clusters = self.cluster_memories(entries, k)
+        merged = 0
+        now = time.time()
+        for cluster in clusters:
+            if len(cluster) < 2:
+                continue
+            keep, rest = cluster[0], cluster[1:]
+            extras = "; ".join(r.content for r in rest if r.content)
+            if extras:
+                keep.content = f"{keep.content} | {extras}" if keep.content else extras
+            keep.strength = min(1.0, keep.strength + 0.05 * len(rest))
+            keep.last_accessed = now
+            self._store.update(keep)
+            for r in rest:
+                self._store.delete(r.id)
+                merged += 1
+        return merged
+
     # ── Internal ──────────────────────────────────────────
 
     def _apply_decay(self) -> int:
