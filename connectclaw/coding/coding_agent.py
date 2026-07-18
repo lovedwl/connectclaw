@@ -163,6 +163,8 @@ class CodingAgent:
         self._conversations: dict[str, AgentHarness] = {}
         # Track running tasks so /stop can cancel them
         self._running_tasks: dict[str, asyncio.Task] = {}
+        # Restart event, set by /restart command, consumed by main.py
+        self._restart_event: asyncio.Event | None = None
 
     @property
     def tools(self) -> list[AgentTool]:
@@ -443,6 +445,26 @@ class CodingAgent:
                 command = args.get("command", "")
                 notes: list[str] = []
                 _auth_notes[tc_id] = notes
+
+                # Write tool hooks — auto-detect path outside cwd
+                if tool_name == "write":
+                    file_path = args.get("file_path", "")
+                    if file_path:
+                        import os
+                        abs_path = os.path.abspath(file_path)
+                        cwd_abs = os.path.abspath(self._cwd)
+                        if not abs_path.startswith(cwd_abs + os.sep) and abs_path != cwd_abs:
+                            notes.append("🚀 Write sandbox escape authorization")
+                            approved = await self.request_unsandboxed_auth(
+                                key, f"Write to {file_path}"
+                            )
+                            if not approved:
+                                notes.append("  → ❌ Denied by user")
+                                return {"block": True, "reason": "User denied sandbox escape"}
+                            notes.append("  → ✅ Approved by user")
+                            # Mark args so write tool knows it's approved
+                            args["_unsandboxed_retry"] = True
+                            tool_call["arguments"] = args
 
                 # Bash tool hooks
                 if tool_name == "bash":
