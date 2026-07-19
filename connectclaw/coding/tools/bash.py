@@ -53,11 +53,24 @@ class BashGuard:
         r"\bpip\s+uninstall\b",  # pip uninstall
     ]
 
+    def __init__(
+        self,
+        *,
+        extra_dangerous: list[str] | None = None,
+        extra_suspicious: list[str] | None = None,
+    ):
+        # Per-instance extension so deployments can tighten the risk profile
+        # (e.g. block ``docker system prune`` as DANGEROUS) without forking the
+        # class. Never persists to a whitelist — high-risk commands are always
+        # gated, the user just decides which ones are in each tier at startup.
+        self._extra_dangerous = extra_dangerous or []
+        self._extra_suspicious = extra_suspicious or []
+
     def check(self, command: str) -> Literal["SAFE", "SUSPICIOUS", "DANGEROUS"]:
-        for pattern in self.DANGEROUS_PATTERNS:
+        for pattern in [*self._extra_dangerous, *self.DANGEROUS_PATTERNS]:
             if re.search(pattern, command, re.IGNORECASE):
                 return "DANGEROUS"
-        for pattern in self.SUSPICIOUS_PATTERNS:
+        for pattern in [*self._extra_suspicious, *self.SUSPICIOUS_PATTERNS]:
             if re.search(pattern, command, re.IGNORECASE):
                 return "SUSPICIOUS"
         return "SAFE"
