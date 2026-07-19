@@ -18,6 +18,29 @@ from .types import MemoryEntry, MemoryType, SearchResult
 logger = get_logger(__name__)
 
 
+def _content_referenced(content: str, reply_lower: str, *, min_chars: int = 4) -> bool:
+    """True if a distinctive substring of ``content`` appears in the reply.
+
+    Normalizes by stripping whitespace and lowercasing, then checks whether any
+    ``min_chars``-length contiguous slice of the content survives in the reply.
+    Whitespace-stripping lets Chinese (no word boundaries) match on character
+    runs, while latin identifiers still match as whole tokens. ``min_chars``
+    avoids spurious boosts from tiny common fragments.
+    """
+    import re as _re
+
+    norm_content = _re.sub(r"\s+", "", content).lower()
+    norm_reply = _re.sub(r"\s+", "", reply_lower)
+    if not norm_content:
+        return False
+    if len(norm_content) <= min_chars:
+        return norm_content in norm_reply
+    for i in range(len(norm_content) - min_chars + 1):
+        if norm_content[i : i + min_chars] in norm_reply:
+            return True
+    return False
+
+
 @dataclass
 class RetrievalConfig:
     max_context_tokens: int = 2000
@@ -54,27 +77,56 @@ class MemoryRetriever:
         *,
         query_embedding: list[float] | None = None,
     ) -> list[SearchResult]:
-        """Retrieve relevant memories with appropriate detail levels."""
+        """Retrieve relevant memories with appropriate detail levels.
+
+        Does NOT touch access stats — recall is not usage. Call
+        :meth:`confirm_usage` after the assistant's reply is produced so that
+        only memories actually reflected in the response get strengthened.
+        """
         if query_embedding:
-            results = await self._retrieve_by_embedding(query_embedding)
+            results = await self._retrieve_by_embedding(
+                query_embedding, query=query
+            )
         else:
             results = await self._retrieve_by_keywords(query)
-
-        for r in results:
-            self._store.touch(r.entry.id)
-
         return results
+
+    def confirm_usage(self, reply_text: str, results: list[SearchResult]) -> int:
+        """Mark memories actually used in the reply as accessed.
+
+        A memory counts as "used" if a distinctive fragment of its content
+        appears in the reply. We match on the longest content token-run so a
+        one-word hit doesn't count (avoid spurious boosts on common words),
+        and persona memories (always injected) are confirmed too — they were
+        honored simply by the reply existing. Returns the count confirmed.
+        """
+        if not reply_text or not results:
+            return 0
+        reply_lower = reply_text.lower()
+        confirmed = 0
+        for r in results:
+            content = (r.entry.content or "").strip()
+            if not content:
+                continue
+            # persona block (score==1.0) is always-injected; count it as used.
+            if r.score >= 1.0 or _content_referenced(content, reply_lower):
+                self._store.touch(r.entry.id)
+                confirmed += 1
+        return confirmed
 
     async def retrieve_formatted(
         self,
         query: str,
         *,
         query_embedding: list[float] | None = None,
-    ) -> str:
+    ) -> tuple[str, list[SearchResult]]:
         """Retrieve and format memories for context injection.
 
-        Returns a string for user message injection (NOT system prompt,
-        to preserve prompt cache), or "" if nothing relevant.
+        Returns ``(formatted_text, results)``. The text is for user-message
+        injection (NOT system prompt, to preserve prompt cache); ``results``
+        is the list of recalled memories the caller should pass to
+        :meth:`confirm_usage` after the reply is produced. Empty text if
+        nothing relevant.
         """
         results = await self.retrieve(query, query_embedding=query_embedding)
 
@@ -85,9 +137,9 @@ class MemoryRetriever:
             results = persona + [r for r in results if r.entry.id not in seen]
 
         if not results:
-            return ""
+            return "", []
 
-        return self._format_for_prompt(results)
+        return self._format_for_prompt(results), results
 
     # ── Internal ──────────────────────────────────────────
 
@@ -103,21 +155,36 @@ class MemoryRetriever:
         )
         out: list[SearchResult] = []
         for entry in entries:
-            self._store.touch(entry.id)
+            # score=1.0 marks persona — confirm_usage treats it as always-used.
+            # Do NOT touch here; usage confirmation is centralized.
             out.append(
                 SearchResult(entry=entry, score=1.0, detail_level="full")
             )
         return out
 
     async def _retrieve_by_embedding(
-        self, query_embedding: list[float]
+        self, query_embedding: list[float], *, query: str = ""
     ) -> list[SearchResult]:
         raw = self._store.search_by_embedding(
             query_embedding,
             top_k=self._config.recent_detail_top_k
-            + self._config.distant_summary_top_k
-            + 10,
+                + self._config.distant_summary_top_k
+                + 10,
         )
+
+        # BM25 fusion: add a keyword signal so exact-term matches (names, IDs,
+        # paths, error codes) surface even when embedding similarity is modest.
+        bm25_scores: dict[str, float] = {}
+        if query:
+            try:
+                from .bm25 import BM25Index
+
+                corpus = [e.content or "" for e, _ in raw]
+                idx = BM25Index(corpus)
+                scores = idx.score(query)
+                bm25_scores = {raw[i][0].id: scores[i] for i in range(len(raw))}
+            except Exception:
+                bm25_scores = {}
 
         now = time.time()
         results: list[SearchResult] = []
@@ -126,7 +193,13 @@ class MemoryRetriever:
             if similarity < self._config.min_similarity:
                 continue
 
-            score = self._compute_score(entry, similarity, now)
+            bm = bm25_scores.get(entry.id, 0.0)
+            # Normalize bm25 into [0,1] against the max in this batch so it
+            # can be folded into the weighted score alongside similarity.
+            max_bm = max(bm25_scores.values()) if bm25_scores else 0.0
+            bm_norm = (bm / max_bm) if max_bm > 0 else 0.0
+
+            score = self._compute_score(entry, similarity, now, bm25=bm_norm)
             if score < self._config.min_score:
                 continue
 
@@ -140,6 +213,7 @@ class MemoryRetriever:
             )
 
         results.sort(key=lambda r: r.score, reverse=True)
+        results = self._apply_type_quota(results)
         return self._apply_budget(results)
 
     async def _retrieve_by_keywords(self, query: str) -> list[SearchResult]:
@@ -167,19 +241,61 @@ class MemoryRetriever:
             )
 
         results.sort(key=lambda r: r.score, reverse=True)
+        results = self._apply_type_quota(results)
         return self._apply_budget(results)
 
+    # Per-type floor so one memory class can't monopolize the TopK
+    # (e.g. a query that matches lots of procedural memories shouldn't
+    # crowd out semantic ones). Guarantees each type a minimum number of
+    # slots before filling the rest by score.
+    _TYPE_QUOTA_FLOOR = {
+        MemoryType.SEMANTIC: 2,
+        MemoryType.EPISODIC: 1,
+        MemoryType.PROCEDURAL: 1,
+    }
+
+    def _apply_type_quota(self, results: list[SearchResult]) -> list[SearchResult]:
+        if not results:
+            return results
+        total = self._config.recent_detail_top_k + self._config.distant_summary_top_k
+        floors = self._TYPE_QUOTA_FLOOR
+        kept: list[SearchResult] = []
+        seen_by_type: dict[MemoryType, int] = {t: 0 for t in floors}
+
+        # Pass 1: fill each type's floor from the score-sorted list.
+        remaining = []
+        for r in results:
+            t = r.entry.type
+            if t in floors and seen_by_type.get(t, 0) < floors[t]:
+                kept.append(r)
+                seen_by_type[t] = seen_by_type.get(t, 0) + 1
+            else:
+                remaining.append(r)
+
+        # Pass 2: fill the rest by score until we reach the total budget.
+        for r in remaining:
+            if len(kept) >= total:
+                break
+            kept.append(r)
+
+        kept.sort(key=lambda r: r.score, reverse=True)
+        return kept
+
     def _compute_score(
-        self, entry: MemoryEntry, similarity: float, now: float
+        self, entry: MemoryEntry, similarity: float, now: float,
+        *, bm25: float = 0.0,
     ) -> float:
-        """Multi-signal scoring: similarity + recency + importance + strength."""
+        """Multi-signal scoring: similarity + bm25 + recency + importance + strength."""
         c = self._config
 
         age_days = (now - entry.last_accessed) / 86400
         recency = 1.0 / (1.0 + age_days / 30)
 
+        # Embedding similarity and BM25 together carry the same "relevance"
+        # budget; split it so a hit on either signal can surface the memory.
+        relevance = max(similarity, bm25)
         score = (
-            c.semantic_weight * similarity
+            c.semantic_weight * relevance
             + c.recency_weight * recency
             + c.importance_weight * entry.importance
             + c.strength_weight * entry.strength
