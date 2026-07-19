@@ -275,7 +275,7 @@ class CodingAgent:
         # user message — which then persists into history as a fixed prefix for
         # the next turn — the cached prefix keeps growing and keeps hitting.
         rag_context = await self._rag.search(text)
-        memory_context = await self._memory.recall(
+        memory_context, recalled_memories = await self._memory.recall(
             text, conversation_key=conversation_key
         )
 
@@ -336,6 +336,14 @@ class CodingAgent:
                 resp = "(empty response)"
 
             logger.debug("[CODING] response: %s", resp[:200])
+
+            # Only now do we know which recalled memories were actually used:
+            # strengthen those that appear in the reply. Recall alone is not usage.
+            if recalled_memories:
+                try:
+                    self._memory.confirm_usage(resp, recalled_memories)
+                except Exception as e:
+                    logger.debug("[CODING] memory confirm_usage failed: %s", e)
 
             # Extract memories in background (non-blocking, throttled inside)
             if self._memory.enabled:

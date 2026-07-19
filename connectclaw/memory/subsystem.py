@@ -110,16 +110,19 @@ class MemorySubsystem:
         query: str,
         *,
         conversation_key: str = "",
-    ) -> str:
+    ) -> tuple[str, list]:
         """Retrieve relevant memories for the current conversation.
 
-        Returns formatted text to prepend to user message (cache-friendly),
-        or "" if nothing relevant.
+        Returns ``(formatted_text, recalled_results)``. The text is meant to
+        prepend to the user message (cache-friendly); ``recalled_results``
+        should be passed back to :meth:`confirm_usage` after the reply is
+        produced so only actually-used memories are strengthened. Empty text
+        and empty list if nothing relevant.
         """
         if not self._initialized:
             await self.initialize()
         if not self._retriever:
-            return ""
+            return "", []
 
         query_embedding = None
         if self._embedding_provider:
@@ -135,7 +138,24 @@ class MemorySubsystem:
             )
         except Exception as e:
             logger.debug("Memory: recall failed: %s", e)
-            return ""
+            return "", []
+
+    def confirm_usage(self, reply_text: str, recalled_results: list) -> int:
+        """Mark memories actually reflected in ``reply_text`` as accessed.
+
+        Call this AFTER the assistant reply is produced, passing the
+        ``recalled_results`` from :meth:`recall`. Memories whose content is
+        referenced in the reply (plus always-on persona) get their access
+        stats bumped, so strengthening tracks real usage, not mere recall.
+        Best-effort; never raises.
+        """
+        if not self._initialized or not self._retriever or not recalled_results:
+            return 0
+        try:
+            return self._retriever.confirm_usage(reply_text, recalled_results)
+        except Exception as e:
+            logger.debug("Memory: confirm_usage failed: %s", e)
+            return 0
 
     # ── Extraction (called after each turn) ───────────────
 
