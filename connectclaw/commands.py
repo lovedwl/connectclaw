@@ -198,10 +198,53 @@ async def _dream(conversation_key: str, agent: Any, args: str = "") -> str:
     return "💤 开始整合记忆（做梦）……完成后会告诉你。"
 
 
-@register("/forget", "clear all memories")
+@register(
+    "/forget",
+    "删除记忆：/forget 全部 · /forget <词> 按词 · /forget id <id> 按ID · /forget type <类型>",
+)
 async def _forget(conversation_key: str, agent: Any, args: str = "") -> str:
-    count = await agent.memory.clear_all()
-    return f"已清空 {count} 条记忆。"
+    if not agent.memory.enabled:
+        return "记忆系统未启用。"
+    args = args.strip()
+
+    # /forget  →  clear all
+    if not args:
+        count = await agent.memory.clear_all()
+        return f"已清空 {count} 条记忆。"
+
+    parts = args.split(maxsplit=1)
+    head = parts[0].lower()
+    tail = parts[1].strip() if len(parts) > 1 else ""
+
+    # /forget id <id>  →  delete one by id (bypasses persona protection)
+    if head == "id" and tail:
+        ok = await agent.memory.forget_by_id(tail)
+        return (
+            f"已删除记忆 `{tail}`。" if ok
+            else f"未找到 id 为 `{tail}` 的记忆。"
+        )
+
+    # /forget type <semantic|episodic|procedural>
+    if head == "type" and tail:
+        count = await agent.memory.forget_by_type(tail)
+        if count == 0:
+            return f"没有「{tail}」类型的可删除记忆（可能不存在，或被 persona 保护）。"
+        return (
+            f"已删除 {count} 条「{tail}」记忆。"
+            "（persona 级高重要度记忆已跳过，需用 `/forget id <id>` 单独删）"
+        )
+
+    # /forget <keyword>  →  delete by keyword match
+    count = await agent.memory.forget_by_keyword(args)
+    if count == 0:
+        return (
+            f"没有匹配「{args}」的可删除记忆（可能不存在，或被 persona 保护，"
+            "用 `/memory {args}` 先查看）。"
+        )
+    return (
+        f"已删除 {count} 条匹配「{args}」的记忆。"
+        "（persona 级高重要度记忆已跳过，需用 `/forget id <id>` 单独删）"
+    )
 
 
 @register("/restart", "重启 ConnectClaw 进程（优雅退出，由守护进程自动拉起）")
@@ -225,7 +268,7 @@ def _fmt_memory(m: Any, *, show_detail: bool = False) -> str:
     emoji = _TYPE_EMOJI.get(tval, "•")
     age = _relative_age(getattr(m, "last_accessed", 0.0))
     line = (
-        f"- {emoji} {m.content}  "
+        f"- {emoji} `{m.id}` {m.content}  "
         f"_(重要 {m.importance:.1f} · 强度 {m.strength:.1f} · {age}前)_"
     )
     if show_detail and getattr(m, "detail", None):

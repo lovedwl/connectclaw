@@ -24,6 +24,11 @@ from .retriever import MemoryRetriever, RetrievalConfig
 from .store import MemoryStore
 from .types import MemoryEntry, MemoryType
 
+# Memories at or above this importance are persona-grade (identity, tone,
+# standing preferences) and are protected from bulk / agent-initiated removal
+# — only an explicit forget-by-id clears them.
+PERSONA_IMPORTANCE_FLOOR = 0.7
+
 logger = get_logger(__name__)
 
 
@@ -338,6 +343,94 @@ class MemorySubsystem:
         for entry in entries:
             self._store.delete(entry.id)
         return len(entries)
+
+    async def forget_by_keyword(self, keyword: str) -> int:
+        """Hard-delete memories whose content mentions ``keyword``.
+
+        Persona-grade memories are never deleted this way — those are identity
+        facts the user set deliberately and must be removed explicitly by id.
+        """
+        if not self._store or not keyword.strip():
+            return 0
+        candidates = self._find_by_keyword(keyword)
+        return self._hard_delete(candidates, protect_persona=True)
+
+    async def forget_by_id(self, memory_id: str) -> bool:
+        """Hard-delete one memory by id. Bypasses persona protection —
+        an explicit id is an explicit decision.
+        """
+        if not self._store or not memory_id:
+            return False
+        return self._store.delete(memory_id)
+
+    async def forget_by_type(self, memory_type: str) -> int:
+        """Hard-delete all memories of one type. Persona protection applies."""
+        if not self._store:
+            return 0
+        try:
+            mt = MemoryType(memory_type)
+        except ValueError:
+            return 0
+        entries = self._store.list_all(
+            memory_type=mt, min_strength=0.0, limit=1_000_000
+        )
+        return self._hard_delete(entries, protect_persona=True)
+
+    async def soften_by_keyword(self, keyword: str) -> int:
+        """Soft-forget: zero out strength so memories drop out of recall and
+        get cleaned up on the next dream cycle. Reversible until cleanup runs.
+        Used by the agent-facing memory tool so the model can mark stale
+        memories without irrevocably deleting user data.
+        """
+        if not self._store or not keyword.strip():
+            return 0
+        candidates = self._find_by_keyword(keyword)
+        return self._soften(candidates, protect_persona=True)
+
+    # ── forget helpers ────────────────────────────────────
+
+    def _find_by_keyword(self, keyword: str) -> list[MemoryEntry]:
+        assert self._store is not None
+        kw = {w.lower() for w in keyword.split() if w}
+        if not kw:
+            return []
+        pairs = self._store.search_by_keywords(kw, min_strength=0.0, top_k=200)
+        return [e for e, _ in pairs]
+
+    def _is_persona(self, entry: MemoryEntry) -> bool:
+        floor = (
+            self._retriever._config.persona_min_importance
+            if self._retriever
+            else PERSONA_IMPORTANCE_FLOOR
+        )
+        return entry.type == MemoryType.SEMANTIC and entry.importance >= floor
+
+    def _hard_delete(
+        self, entries: list[MemoryEntry], *, protect_persona: bool
+    ) -> int:
+        assert self._store is not None
+        n = 0
+        for e in entries:
+            if protect_persona and self._is_persona(e):
+                continue
+            if self._store.delete(e.id):
+                n += 1
+        return n
+
+    def _soften(
+        self, entries: list[MemoryEntry], *, protect_persona: bool
+    ) -> int:
+        assert self._store is not None
+        n = 0
+        for e in entries:
+            if protect_persona and self._is_persona(e):
+                continue
+            if e.strength <= 0.0:
+                continue
+            e.strength = 0.0
+            self._store.update(e)
+            n += 1
+        return n
 
     async def close(self) -> None:
         if self._dream_task and not self._dream_task.done():
