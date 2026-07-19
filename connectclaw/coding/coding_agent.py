@@ -82,7 +82,6 @@ class CodingAgent:
             model_id=config.vision.model_id,
             cwd=config.agent.cwd,
         )
-
         # Named agents directory (.md agents — the primary "agent makes agent" path)
         self._agents_dir = os.path.expanduser("~/.connectclaw/agents")
         os.makedirs(self._agents_dir, exist_ok=True)
@@ -95,10 +94,9 @@ class CodingAgent:
             for t in [
                 self._read_tool, self._write_tool, self._hash_read_tool,
                 self._hash_edit_tool, self._bash_tool, self._web_search_tool,
-                self._web_fetch_tool, self._image_tool,
+                self._web_fetch_tool, self._image_tool, self._memory_tool,
             ]
         }
-
         # The single `agents` meta-tool: list / describe / run / create. Every
         # sub-agent is reached through it, resolved at CALL TIME (so an agent
         # created mid-turn is runnable the same turn). Absorbs the old `task`
@@ -151,6 +149,11 @@ class CodingAgent:
                 consolidation_enabled=config.memory.consolidation_enabled,
             )
         )
+        # Agent-facing memory tool: lets the model search its own memories and
+        # soft-retire stale ones (strength→0, reclaimed by the next dream
+        # cycle). Persona-grade memories are protected — see MemoryTool.
+        from connectclaw.coding.tools.memory import MemoryTool
+        self._memory_tool = MemoryTool(self._memory)
 
         # Compaction settings
         self._compaction_settings = CompactionSettings(
@@ -206,6 +209,13 @@ class CodingAgent:
         if not exposed:
             logger.error("[agent].tools resolved to empty; falling back to ['read','bash']")
             exposed = [registry["read"], registry["bash"]]
+
+        # The memory tool rides along whenever memory is enabled — it's not a
+        # base primitive the user opts into via the tools whitelist, it follows
+        # the memory subsystem. Exposed unconditionally (disabled subsystem
+        # self-no-ops inside the tool).
+        if self._memory.enabled and "memory" in registry:
+            exposed = exposed + [registry["memory"]]
 
         tools = exposed + [self._agents_tool]
         self._tools = tools
