@@ -246,7 +246,6 @@ class RlimitSandbox(Sandbox):
                 preexec_fn=lambda: _set_rlimits(
                     self.max_memory_mb,
                     self.max_cpu_seconds,
-                    self.max_processes,
                 ),
             )
 
@@ -287,8 +286,11 @@ class RlimitSandbox(Sandbox):
 # ── Helpers ────────────────────────────────────────────────────
 
 
-def _set_rlimits(mem_mb: int, cpu_sec: int, nproc: int) -> None:
-    """Set resource limits for the child process."""
+def _set_rlimits(mem_mb: int, cpu_sec: int) -> None:
+    """Set resource limits for the child process.
+    Skips RLIMIT_NPROC — the system default applies, and hard-coding
+    it too low breaks commands that fork (e.g. git commit).
+    """
     try:
         resource.setrlimit(resource.RLIMIT_AS, (mem_mb * 1024 * 1024, mem_mb * 1024 * 1024))
     except (ValueError, OSError):
@@ -297,11 +299,6 @@ def _set_rlimits(mem_mb: int, cpu_sec: int, nproc: int) -> None:
         resource.setrlimit(resource.RLIMIT_CPU, (cpu_sec, cpu_sec))
     except (ValueError, OSError):
         pass
-    try:
-        resource.setrlimit(resource.RLIMIT_NPROC, (nproc, nproc))
-    except (ValueError, OSError):
-        pass
-
 
 async def _run_command(
     cmd_args: list[str],
