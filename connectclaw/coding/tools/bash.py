@@ -172,7 +172,7 @@ class BashTool(AgentTool):
             unsandboxed=unsandboxed,
             max_memory_mb=512,
             max_cpu_seconds=timeout,
-            max_processes=50,
+            max_processes=300,
         )
 
         result = await sandbox.execute(command, timeout=timeout)
