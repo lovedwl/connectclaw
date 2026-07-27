@@ -254,13 +254,15 @@ BashGuard.check(command):
 
 与 pi-mono 保持一致：
 
+- **异步管道**: 全异步调用链——`prepare_compaction()`（纯索引，不阻塞）→ `entry_based_compact()`（async LLM 总结）→ `session.append_compaction()`（async I/O 持久化）
+- **`first_kept_entry_id`**: 压缩时记录保留的起始消息 ID，`build_session_context()` 在该 ID 之前的消息替换为摘要、之后的消息保留原样。避免旧版暴力清空丢失多层 CompactionSummaryMessage。
+- **`before_compact` hook**: 压缩前触发，用于强制记忆提取（`force_learn()`），在原始对话细节被总结覆盖前捕获。钩子支持 async handler。
 - **Token 估算**: provider usage 作为锚点 + trailing 消息估算（比纯 chars/4 精确得多）
 - **合法切分点**: user 消息、branch summary、compaction（不切 toolResult 和 mid-turn）
 - **Split-turn**: 超过预算的单轮拆分为前缀摘要 + 保留后缀
 - **增量摘要**: `UPDATE_SUMMARIZATION_PROMPT` 合并进已有摘要
 - **文件追踪**: `_extract_file_ops()` 记录 readFiles / modifiedFiles 注入摘要
 - **结构化格式**: Goal / Progress (Done / In Progress) / Key Decisions / Next Steps / Critical Context
-- **完整流水线**: `prepare_compaction()` → `compact()` → 持久化 `CompactionEntry`
 
 ## 十、会话持久化
 
@@ -330,9 +332,11 @@ JSONL 树形结构，每行一个 JSON 对象：
 ### 数据流
 
 ```
-recall  每轮对话前：query → (embedding | 关键词) → 打分 → 分级细节 → 注入 user message
-learn   每轮对话后：后台 asyncio.create_task 提取，每 N 轮节流一次（省 API 成本）
-dream   定时 / 手动：衰减 → 强化 → 情景→语义整合 → 合并 → 清理
+recall   每轮对话前：query → (embedding | 关键词 + BM25) → 打分+新鲜度加成 → 分级细节 → 注入 user message
+learn    每轮对话后：后台 asyncio.create_task 提取，每 N 轮节流一次（省 API 成本）
+force_learn  压缩前触发：跳过 learn 的节流，确保原始对话细节在压缩前被提取（hook 于 before_compact）
+confirm  回复产生后：扫描回复内容匹配已召回记忆 → 命中则 touch() + importance += 0.02
+dream    定时 / 手动：衰减 → 强化 → 情景→语义整合 → 聚类合并 → 清理
 ```
 
 ### 缓存友好设计（关键）
@@ -354,9 +358,15 @@ DeepSeek / OpenAI-compatible provider 按**请求前缀**缓存：system prompt 
 
 **相关性硬门槛**：cosine similarity < `min_similarity`（默认 0.45）直接判为不相关丢弃。实测 BGE-M3 中文——相关命中 0.50–0.73，不相关 query 峰值 <0.45。没有这道门槛时，新记忆靠 recency/importance/strength 就能凑够综合分，导致无关 query 也召回记忆。
 
-### 检索：模糊记忆
+### 检索：模糊记忆 + 新鲜度保障
 
 距离近的清晰、远的模糊。近期（<7 天）且重要/强 → 展开 `detail`（full）；否则只给一行摘要（summary）。通过门槛后按综合分排序 = 相似度×0.5 + 时效×0.25 + 重要×0.15 + 强度×0.1，并受 token 预算约束（超预算时 full 降级 summary）。
+
+**新鲜度加成**：创建 7 天内的记忆获得最高 +30% 分数加成，随天数线性衰减。解决新记忆 embedding 冷启动无法被召回的死锁问题。
+
+**自动 importance 提升**：`confirm_usage()` 扫描回复内容，被引用的记忆 importance 每次 +0.02（上限 0.8）。累计达 0.7（persona 阈值）后自动变为常备上下文，每轮无条件注入。全程零用户干预。
+
+**压缩前强制提取**：`force_learn()` 跳过 learn 的节流逻辑，注册在 `before_compact` hook 上。上下文压缩前调用，确保原始对话细节被提取到记忆库后再被压缩丢弃。
 
 ### 查看与管理（飞书斜杠命令）
 
