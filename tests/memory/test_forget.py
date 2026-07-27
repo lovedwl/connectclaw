@@ -76,7 +76,7 @@ def test_forget_by_keyword_empty(mem):
 def test_forget_by_id_deletes(mem):
     e = _add(mem, "一些过时的事实")
     ok = asyncio.run(mem.forget_by_id(e.id))
-    assert ok is True
+    assert ok == e.id
     assert mem._store.get(e.id) is None
 
 
@@ -84,12 +84,12 @@ def test_forget_by_id_bypasses_persona_protection(mem):
     # explicit id is an explicit decision — persona protection does NOT apply
     e = _add(mem, "请叫我老板", importance=0.9)
     ok = asyncio.run(mem.forget_by_id(e.id))
-    assert ok is True
+    assert ok == e.id
     assert mem._store.get(e.id) is None
 
 
 def test_forget_by_id_missing(mem):
-    assert asyncio.run(mem.forget_by_id("nonexistent")) is False
+    assert asyncio.run(mem.forget_by_id("nonexistent")) is None
 
 
 # ── forget by type ───────────────────────────────────────────
