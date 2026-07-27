@@ -9,9 +9,12 @@ Output ONLY valid JSON. Do not add commentary."""
 EXTRACTION_PROMPT = """Analyze this conversation and extract memorable information.
 
 For each memory, output:
-- type: "semantic" (stable facts/preferences/knowledge), "episodic" (specific events/decisions), or "procedural" (learned patterns/workflows)
+- type: one of "semantic", "episodic", "procedural"
+  - "semantic" — stable facts, preferences, knowledge (e.g. "项目目录在 ~/project")
+  - "episodic" — specific events, decisions, conversations (e.g. "用户昨天问了GRPO的padding问题")
+  - "procedural" — learned patterns, workflows, habits (e.g. "用户习惯先看文档再改代码")
 - content: concise one-line summary (this is what gets shown in context)
-- detail: full detail (optional, for episodic memories with important specifics)
+- detail: full detail (optional, for episodic and procedural memories with important specifics)
 - category: one of [user_pref, project, technical, decision, event, error, pattern, environment]
 - importance: 0.0 to 1.0 (how likely this will be needed in future conversations)
 
@@ -36,7 +39,8 @@ IGNORE:
 {conversation}
 </conversation>
 
-Output format (JSON array):
+Output format (JSON array) — include AT LEAST ONE example of each type if the
+conversation contains a mix of facts, events, and patterns:
 [
   {{
     "type": "semantic",
@@ -44,9 +48,22 @@ Output format (JSON array):
     "detail": null,
     "category": "user_pref",
     "importance": 0.7
+  }},
+  {{
+    "type": "episodic",
+    "content": "用户指出了飞书SDK消息处理的时序冲突问题",
+    "detail": "feishu.py第103行每条消息独立创建task并发处理，/forget命令和后续消息可能因调度顺序导致读取旧数据",
+    "category": "technical",
+    "importance": 0.8
+  }},
+  {{
+    "type": "procedural",
+    "content": "用户习惯先查看项目结构再修改代码",
+    "detail": null,
+    "category": "pattern",
+    "importance": 0.6
   }}
 ]
-
 If nothing memorable, output: []"""
 
 CONSOLIDATION_SYSTEM_PROMPT = """You are a memory consolidation assistant.

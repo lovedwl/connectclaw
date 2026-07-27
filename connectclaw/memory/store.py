@@ -139,6 +139,17 @@ class MemoryStore:
         )
         conn.commit()
 
+    def update_importance(self, memory_id: str, importance: float) -> None:
+        """Update the importance of a memory entry."""
+        conn = self._connect()
+        conn.execute(
+            """UPDATE memories
+               SET importance = ?
+               WHERE id = ?""",
+            (max(0.0, min(1.0, importance)), memory_id),
+        )
+        conn.commit()
+
     # ── Queries ───────────────────────────────────────────
 
     def list_all(
@@ -296,6 +307,17 @@ class MemoryStore:
             strength=row[12],
             metadata=json.loads(row[13]) if row[13] else {},
         )
+
+    def search_ids_by_prefix(self, prefix: str) -> list[str]:
+        """Find memory IDs that start with the given prefix.
+        Used by forget_by_id to support short-ID prefix matching.
+        """
+        conn = self._connect()
+        rows = conn.execute(
+            "SELECT id FROM memories WHERE id LIKE ?",
+            (f"{prefix}%",),
+        ).fetchall()
+        return [r[0] for r in rows]
 
     def close(self) -> None:
         if self._conn:

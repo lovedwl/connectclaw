@@ -225,6 +225,57 @@ class MemorySubsystem:
             logger.debug("Memory: learn failed: %s", e)
             return 0
 
+
+    async def force_learn(
+        self,
+        messages: list[dict[str, Any]],
+        model: Model,
+        *,
+        api_key: str | None = None,
+        conversation_key: str = "",
+        session_id: str | None = None,
+    ) -> int:
+        """Force memory extraction — skips throttling.
+
+        Used before compaction to capture raw conversation detail
+        before it gets summarized away.
+        """
+        if not self._initialized:
+            await self.initialize()
+        if not self._store:
+            return 0
+
+        # Skip throttling — always extract
+        try:
+            existing = self._store.list_all(limit=100)
+            new_entries = await extract_memories(
+                messages,
+                model,
+                api_key=api_key,
+                existing_memories=existing,
+                source_session=session_id,
+            )
+
+            for entry in new_entries:
+                if self._embedding_provider and not entry.embedding:
+                    try:
+                        emb = await self._embedding_provider.embed_query(entry.content)
+                        entry.embedding = emb
+                    except Exception as e:
+                        logger.debug("Memory: force_learn embed failed: %s", e)
+                self._store.add(entry)
+
+            if new_entries:
+                logger.info(
+                    "Memory: force-learn stored %d new memories from session %s",
+                    len(new_entries),
+                    session_id or "?",
+                )
+            return len(new_entries)
+        except Exception as e:
+            logger.debug("Memory: force_learn failed: %s", e)
+            return 0
+
     # ── Consolidation / Dreaming ──────────────────────────
 
     async def dream(
@@ -358,10 +409,27 @@ class MemorySubsystem:
     async def forget_by_id(self, memory_id: str) -> bool:
         """Hard-delete one memory by id. Bypasses persona protection —
         an explicit id is an explicit decision.
+
+        Supports prefix matching: if the given id doesn't match exactly,
+        tries to find a unique memory whose id starts with the given string.
         """
         if not self._store or not memory_id:
             return False
-        return self._store.delete(memory_id)
+
+        # Exact match first
+        if self._store.delete(memory_id):
+            return True
+
+        # Prefix match — find IDs that start with the given prefix
+        candidates = self._store.search_ids_by_prefix(memory_id)
+        if len(candidates) == 1:
+            return self._store.delete(candidates[0])
+        elif len(candidates) > 1:
+            logger.warning(
+                "Prefix %r matches %d memories: %s — need more chars",
+                memory_id, len(candidates), candidates,
+            )
+        return False
 
     async def forget_by_type(self, memory_type: str) -> int:
         """Hard-delete all memories of one type. Persona protection applies."""
