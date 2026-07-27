@@ -67,7 +67,7 @@ class Sandbox:
         unsandboxed: bool = False,
         max_memory_mb: int = 512,
         max_cpu_seconds: int = 60,
-        max_processes: int = 50,
+        max_processes: int = 300,
         max_output_bytes: int = 100_000,
     ):
         self.cwd = os.path.abspath(cwd)
