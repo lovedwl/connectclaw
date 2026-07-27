@@ -109,7 +109,7 @@ class MemoryRetriever:
             if not content:
                 continue
             # persona block (score==1.0) is always-injected; count it as used.
-            if r.score >= 1.0 or _content_referenced(content, reply_lower):
+            if r.score == 1.0 or _content_referenced(content, reply_lower):
                 self._store.touch(r.entry.id)
                 # Auto-boost importance: memories confirmed as useful gradually
                 # climb toward the persona threshold (0.7), becoming always-on.
