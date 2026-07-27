@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import subprocess
 from typing import Any, Literal
 
 from connectclaw.agent.types import AgentTool, AgentToolResult
@@ -112,6 +113,25 @@ class BashTool(AgentTool):
         self._cwd = cwd
         self._guard = guard or BashGuard()
         self._sandbox_cls = detect_best_sandbox()
+        # Auto-detect git root for read-write bind in sandbox
+        self._git_root = self._find_git_root()
+
+    def _find_git_root(self) -> str | None:
+        """Walk up from cwd to find the nearest git repository root."""
+        try:
+            result = subprocess.run(
+                ["git", "-C", self._cwd, "rev-parse", "--show-toplevel"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                root = result.stdout.strip()
+                if root and root != self._cwd and root.startswith('/'):
+                    return root
+        except (subprocess.SubprocessError, FileNotFoundError, OSError):
+            pass
+        return None
 
     async def execute(
         self,
@@ -140,8 +160,14 @@ class BashTool(AgentTool):
         allow_network = params.get("allow_network", False)
         unsandboxed = params.get("unsandboxed", False)
 
+        # Build allowed paths: cwd + git root (for git operations)
+        allowed_paths = [self._cwd]
+        if self._git_root:
+            allowed_paths.append(self._git_root)
+
         sandbox = self._sandbox_cls(
             cwd=self._cwd,
+            allowed_paths=allowed_paths,
             allow_network=allow_network,
             unsandboxed=unsandboxed,
             max_memory_mb=512,
@@ -151,10 +177,25 @@ class BashTool(AgentTool):
 
         result = await sandbox.execute(command, timeout=timeout)
 
-        # Format output
-        output = result.stdout
+        # ── Build output visible to LLM ────────────────────────
+        parts = []
+
+        # Timeout header
         if result.timed_out:
-            output = f"Command timed out after {timeout}s: `{command}`\n\nPartial output:\n{output}"
+            parts.append(f"Command timed out after {timeout}s: `{command}`")
+
+        # stdout (always include, even if empty — avoids confusion)
+        if result.stdout:
+            parts.append(result.stdout.rstrip())
+
+        # stderr (the error details the LLM needs to see!)
+        if result.stderr:
+            parts.append("[stderr]\n" + result.stderr.rstrip())
+
+        # Exit code summary
+        parts.append(f"[exit code: {result.exit_code}]")
+
+        output = "\n\n".join(parts)
 
         details = {
             "exit_code": result.exit_code,
@@ -165,7 +206,7 @@ class BashTool(AgentTool):
         }
 
         return AgentToolResult(
-            content=[{"type": "text", "text": output or "(no output)"}],
+            content=[{"type": "text", "text": output}],
             details=details,
         )
 

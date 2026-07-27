@@ -129,7 +129,7 @@ class HashEditTool(AgentTool):
             normalized = normalize_edit_request({"path": raw_path, "edits": raw_edits})
         except ValueError as e:
             return AgentToolResult(
-                content=[{"type": "text", "text": str(e)}],
+                content=[{"type": "text", "text": f"Error: {e}"}],
                 details={"error": str(e)},
             )
 
@@ -185,7 +185,7 @@ class HashEditTool(AgentTool):
             parsed_edits = resolve_edit_anchors(edits_raw)
         except ValueError as e:
             return AgentToolResult(
-                content=[{"type": "text", "text": str(e)}],
+                content=[{"type": "text", "text": f"Error: {e}"}],
             )
 
         # ── Duplicate-edit guard ──────────────────────────
@@ -213,7 +213,7 @@ class HashEditTool(AgentTool):
             )
         except ValueError as e:
             return AgentToolResult(
-                content=[{"type": "text", "text": str(e)}],
+                content=[{"type": "text", "text": f"Error: {e}"}],
                 details={"error": str(e)},
             )
 
@@ -302,7 +302,7 @@ class HashEditTool(AgentTool):
             anchors_text = "Anchors omitted; use hash_read for subsequent edits."
 
         warning_block = "\n\nWarnings:\n" + "\n".join(warnings) if warnings else ""
-        response_text = f"{anchors_text}{warning_block}"
+        response_text = f"Edit applied successfully to {path}.\n\n{anchors_text}{warning_block}"
 
         return AgentToolResult(
             content=[{"type": "text", "text": response_text}],
