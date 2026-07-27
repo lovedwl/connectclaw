@@ -218,9 +218,9 @@ async def _forget(conversation_key: str, agent: Any, args: str = "") -> str:
 
     # /forget id <id>  →  delete one by id (bypasses persona protection)
     if head == "id" and tail:
-        ok = await agent.memory.forget_by_id(tail)
+        full_id = await agent.memory.forget_by_id(tail)
         return (
-            f"已删除记忆 `{tail}`。" if ok
+            f"已删除记忆 `{full_id}`。" if full_id
             else f"未找到 id 为 `{tail}` 的记忆。"
         )
 
