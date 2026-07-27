@@ -11,6 +11,7 @@ import asyncio
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from dataclasses import asdict
 from typing import Any, Literal
 
 from connectclaw.agent.agent import Agent
@@ -33,9 +34,9 @@ logger = get_logger(__name__)
 from .compaction import (
     CompactionSettings,
     calculate_context_tokens,
-    compact_conversation,
-    estimate_tokens,
     should_compact,
+    prepare_compaction,
+    compact as entry_based_compact,
 )
 from .messages import convert_to_llm
 from .session import (
@@ -68,6 +69,9 @@ class AgentHarnessHooks:
         Callable[[dict[str, Any]], dict[str, Any] | None]
     ] = field(default_factory=list)
     context: list[
+        Callable[[dict[str, Any]], None]
+    ] = field(default_factory=list)
+    before_compact: list[
         Callable[[dict[str, Any]], None]
     ] = field(default_factory=list)
 
@@ -141,7 +145,7 @@ class AgentHarness:
 
     def on(
         self,
-        event: Literal["before_agent_start", "before_llm_call", "before_tool", "after_tool", "context"],
+        event: Literal["before_agent_start", "before_llm_call", "before_tool", "after_tool", "context", "before_compact"],
         handler: Callable,
     ) -> Callable[[], None]:
         hook_list = getattr(self._hooks, event, None)
@@ -207,12 +211,12 @@ class AgentHarness:
             self._agent.set_system_prompt(prompt)
 
     async def compact(self, custom_instructions: str | None = None) -> dict[str, Any] | None:
-        """Trigger manual compaction."""
+        """Trigger manual compaction using entry-based pipeline."""
         if not self._agent:
             return None
 
-        messages = list(self._agent.state.messages)
-        if not messages:
+        entries = await self._session.get_path_to_root()
+        if not entries:
             return None
 
         api_key = None
@@ -223,12 +227,15 @@ class AgentHarness:
             else:
                 api_key = result
 
-        result = await compact_conversation(
-            messages,
-            self._model,
-            self._compaction_settings,
-            self._model.context_window,
+        entries_dicts = [asdict(e) for e in entries]
+        prep = prepare_compaction(entries_dicts, self._compaction_settings)
+        if not prep:
+            return {"summary": None, "tokens_before": 0}
+
+        result = await entry_based_compact(
+            prep, self._model,
             api_key=api_key,
+            custom_instructions=custom_instructions,
             thinking_level=self._thinking_level,
         )
 
@@ -274,22 +281,33 @@ class AgentHarness:
         # Check if compaction is needed
         tokens = calculate_context_tokens(messages)
         if should_compact(tokens, self._model.context_window, self._compaction_settings):
-            result = await compact_conversation(
-                messages,
-                self._model,
-                self._compaction_settings,
-                self._model.context_window,
-                api_key=compaction_api_key,
-                thinking_level=self._thinking_level,
-            )
-            if result:
-                await self._session.append_compaction(
-                    result.summary, result.first_kept_entry_id, result.tokens_before
+            # Fire before_compact hook so memory extraction can happen
+            # while raw conversation detail is still available.
+            for hook in self._hooks.before_compact:
+                result = hook({
+                    "tokens": tokens,
+                    "messages": messages,
+                })
+                if asyncio.iscoroutine(result):
+                    await result
+
+            # Use entry-based pipeline so first_kept_entry_id is properly set
+            entries_dicts = [asdict(e) for e in entries]
+            prep = prepare_compaction(entries_dicts, self._compaction_settings)
+            if prep:
+                result = await entry_based_compact(
+                    prep, self._model,
+                    api_key=compaction_api_key,
+                    thinking_level=self._thinking_level,
                 )
-                # Rebuild context after compaction
-                entries = await self._session.get_path_to_root()
-                ctx = build_session_context(entries)
-                messages = list(ctx.messages)
+                if result:
+                    await self._session.append_compaction(
+                        result.summary, result.first_kept_entry_id, result.tokens_before
+                    )
+                    # Rebuild context after compaction
+                    entries = await self._session.get_path_to_root()
+                    ctx = build_session_context(entries)
+                    messages = list(ctx.messages)
 
         # Wrap harness hooks into callables for the agent loop
         _before_tool_hooks = list(self._hooks.before_tool)
