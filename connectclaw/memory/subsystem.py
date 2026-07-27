@@ -406,30 +406,34 @@ class MemorySubsystem:
         candidates = self._find_by_keyword(keyword)
         return self._hard_delete(candidates, protect_persona=True)
 
-    async def forget_by_id(self, memory_id: str) -> bool:
+    async def forget_by_id(self, memory_id: str) -> str | None:
         """Hard-delete one memory by id. Bypasses persona protection —
         an explicit id is an explicit decision.
 
         Supports prefix matching: if the given id doesn't match exactly,
         tries to find a unique memory whose id starts with the given string.
+
+        Returns:
+            The full id of the deleted memory, or None if not found.
         """
         if not self._store or not memory_id:
-            return False
+            return None
 
         # Exact match first
         if self._store.delete(memory_id):
-            return True
+            return memory_id
 
         # Prefix match — find IDs that start with the given prefix
         candidates = self._store.search_ids_by_prefix(memory_id)
         if len(candidates) == 1:
-            return self._store.delete(candidates[0])
+            full_id = candidates[0]
+            return full_id if self._store.delete(full_id) else None
         elif len(candidates) > 1:
             logger.warning(
                 "Prefix %r matches %d memories: %s — need more chars",
                 memory_id, len(candidates), candidates,
             )
-        return False
+        return None
 
     async def forget_by_type(self, memory_type: str) -> int:
         """Hard-delete all memories of one type. Persona protection applies."""
