@@ -374,25 +374,49 @@ def _entry_to_dict(entry: SessionEntry) -> dict:
 
 
 def build_session_context(entries: list[SessionEntry]) -> SessionContext:
-    """Walk path-to-root and reconstruct message list with compaction."""
+    """Walk path-to-root and reconstruct message list with compaction.
+
+    Uses `first_kept_entry_id` on compaction entries to preserve recent
+    messages that were intentionally kept, instead of clearing all
+    pre-compaction messages (the legacy behavior).
+    """
     messages: list[Message] = []
     compaction_summary: str | None = None
     branch_summaries: list[str] = []
+    entry_to_idx: dict[str, int] = {}  # entry_id → index in messages
 
     for entry in entries:
         if entry.type == "message":
+            entry_to_idx[entry.id] = len(messages)
             msg = normalize_message(entry.message)
             messages.append(msg)
         elif entry.type == "compaction":
             compaction_summary = entry.summary
-            messages = []
-            # Inject summary so the agent remembers what happened before compaction.
-            # CompactionSummaryMessage is handled by convert_to_llm → <summary> tags.
-            messages.append(CompactionSummaryMessage(
-                summary=entry.summary,
-                tokens_before=entry.tokens_before,
-                timestamp=time.time() * 1000,
-            ))
+            if entry.first_kept_entry_id:
+                # New-style: keep messages from first_kept_entry onwards,
+                # replace everything before that with the summary
+                kept_idx = entry_to_idx.get(entry.first_kept_entry_id, len(messages))
+                kept = messages[kept_idx:]
+                messages = [CompactionSummaryMessage(
+                    summary=entry.summary,
+                    tokens_before=entry.tokens_before,
+                    timestamp=time.time() * 1000,
+                )] + kept
+                # Rebuild index map since indices shifted
+                new_map: dict[str, int] = {}
+                for eid, idx in entry_to_idx.items():
+                    if idx >= kept_idx:
+                        new_map[eid] = idx - kept_idx + 1
+                entry_to_idx = new_map
+            else:
+                # Legacy compaction without first_kept_entry_id — clear all
+                messages = []
+                messages.append(CompactionSummaryMessage(
+                    summary=entry.summary,
+                    tokens_before=entry.tokens_before,
+                    timestamp=time.time() * 1000,
+                ))
+                entry_to_idx = {}
         elif entry.type == "branch_summary":
             branch_summaries.append(entry.summary)
 

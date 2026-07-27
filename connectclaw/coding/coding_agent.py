@@ -82,6 +82,40 @@ class CodingAgent:
             model_id=config.vision.model_id,
             cwd=config.agent.cwd,
         )
+
+        # RAG subsystem (optional, lazy init)
+        self._rag = RAGSubsystem(
+            RAGConfig(
+                enabled=config.rag.enabled,
+                docs_dir=config.rag.docs_dir,
+                db_path=config.rag.db_path,
+                top_k=config.rag.top_k,
+                top_n=config.rag.top_n,
+            )
+        )
+
+        # Memory subsystem (lazy init, all no-ops if disabled)
+        self._memory = MemorySubsystem(
+            MemCfg(
+                enabled=config.memory.enabled,
+                db_path=config.memory.db_path,
+                extract_after_turn=config.memory.extract_after_turn,
+                extract_min_turns=config.memory.extract_min_turns,
+                extract_interval_turns=config.memory.extract_interval_turns,
+                max_context_tokens=config.memory.max_context_tokens,
+                recency_threshold_days=config.memory.recency_threshold_days,
+                use_embeddings=config.memory.use_embeddings,
+                dream_interval_hours=config.memory.dream_interval_hours,
+                decay_halflife_days=config.memory.decay_halflife_days,
+                consolidation_enabled=config.memory.consolidation_enabled,
+            )
+        )
+        # Agent-facing memory tool: lets the model search its own memories and
+        # soft-retire stale ones (strength→0, reclaimed by the next dream
+        # cycle). Persona-grade memories are protected — see MemoryTool.
+        from connectclaw.coding.tools.memory import MemoryTool
+        self._memory_tool = MemoryTool(self._memory)
+
         # Named agents directory (.md agents — the primary "agent makes agent" path)
         self._agents_dir = os.path.expanduser("~/.connectclaw/agents")
         os.makedirs(self._agents_dir, exist_ok=True)
@@ -121,39 +155,6 @@ class CodingAgent:
 
         # Prompt builder — loads template from ~/.connectclaw/prompts/system.md
         self._prompt_builder = PromptBuilder(cwd=config.agent.cwd)
-
-        # RAG subsystem (optional, lazy init)
-        self._rag = RAGSubsystem(
-            RAGConfig(
-                enabled=config.rag.enabled,
-                docs_dir=config.rag.docs_dir,
-                db_path=config.rag.db_path,
-                top_k=config.rag.top_k,
-                top_n=config.rag.top_n,
-            )
-        )
-
-        # Memory subsystem (lazy init, all no-ops if disabled)
-        self._memory = MemorySubsystem(
-            MemCfg(
-                enabled=config.memory.enabled,
-                db_path=config.memory.db_path,
-                extract_after_turn=config.memory.extract_after_turn,
-                extract_min_turns=config.memory.extract_min_turns,
-                extract_interval_turns=config.memory.extract_interval_turns,
-                max_context_tokens=config.memory.max_context_tokens,
-                recency_threshold_days=config.memory.recency_threshold_days,
-                use_embeddings=config.memory.use_embeddings,
-                dream_interval_hours=config.memory.dream_interval_hours,
-                decay_halflife_days=config.memory.decay_halflife_days,
-                consolidation_enabled=config.memory.consolidation_enabled,
-            )
-        )
-        # Agent-facing memory tool: lets the model search its own memories and
-        # soft-retire stale ones (strength→0, reclaimed by the next dream
-        # cycle). Persona-grade memories are protected — see MemoryTool.
-        from connectclaw.coding.tools.memory import MemoryTool
-        self._memory_tool = MemoryTool(self._memory)
 
         # Compaction settings
         self._compaction_settings = CompactionSettings(
@@ -534,6 +535,31 @@ class CodingAgent:
                 return None
 
             harness.on("after_tool", on_after_tool)
+
+            # ── Pre-compaction memory extraction ───────────
+            # Force-extract memories before compaction so raw conversation
+            # detail is captured before it gets summarized away.
+            if self._memory.enabled:
+                async def _on_before_compact(ctx: dict) -> None:
+                    try:
+                        entries = await harness.session.get_path_to_root()
+                        recent_messages = [
+                            e.message
+                            for e in entries[-20:]
+                            if hasattr(e, "type") and e.type == "message"
+                        ]
+                        if recent_messages:
+                            await self._memory.force_learn(
+                                recent_messages,
+                                self._model,
+                                api_key=self._config.llm.api_key or None,
+                                conversation_key=key,
+                                session_id=harness.session.session_id,
+                            )
+                    except Exception as e:
+                        logger.debug("Pre-compaction memory extraction failed: %s", e)
+
+                harness.on("before_compact", _on_before_compact)
             self._conversations[key] = harness
 
         return self._conversations[key]
