@@ -111,6 +111,13 @@ class MemoryRetriever:
             # persona block (score==1.0) is always-injected; count it as used.
             if r.score >= 1.0 or _content_referenced(content, reply_lower):
                 self._store.touch(r.entry.id)
+                # Auto-boost importance: memories confirmed as useful gradually
+                # climb toward the persona threshold (0.7), becoming always-on.
+                if r.score < 1.0:  # skip persona (already trusted)
+                    new_imp = min(0.8, r.entry.importance + 0.02)
+                    if new_imp > r.entry.importance:
+                        self._store.update_importance(r.entry.id, new_imp)
+                        r.entry.importance = new_imp
                 confirmed += 1
         return confirmed
 
@@ -285,11 +292,14 @@ class MemoryRetriever:
         self, entry: MemoryEntry, similarity: float, now: float,
         *, bm25: float = 0.0,
     ) -> float:
-        """Multi-signal scoring: similarity + bm25 + recency + importance + strength."""
+        """Multi-signal scoring: similarity + bm25 + recency + importance + strength.
+        Newer memories get a temporary freshness boost so they have a chance
+        to be seen and confirmed before fading.
+        """
         c = self._config
 
-        age_days = (now - entry.last_accessed) / 86400
-        recency = 1.0 / (1.0 + age_days / 30)
+        age_days_recency = (now - entry.last_accessed) / 86400
+        recency = 1.0 / (1.0 + age_days_recency / 30)
 
         # Embedding similarity and BM25 together carry the same "relevance"
         # budget; split it so a hit on either signal can surface the memory.
@@ -300,6 +310,14 @@ class MemoryRetriever:
             + c.importance_weight * entry.importance
             + c.strength_weight * entry.strength
         )
+
+        # Freshness boost: memories < 7 days old get up to +30% lift
+        # so newly extracted info has a chance to be recalled and confirmed.
+        age_days_created = (now - entry.created_at) / 86400
+        if age_days_created < 7:
+            boost = 1.0 + (7.0 - age_days_created) / 7.0 * 0.3
+            score *= boost
+
         return score
 
     def _decide_detail_level(self, entry: MemoryEntry, now: float) -> str:
