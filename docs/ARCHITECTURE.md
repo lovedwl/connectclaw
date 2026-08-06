@@ -1,6 +1,16 @@
 # ConnectClaw 架构文档
 
-> 40 个 Python 源文件 | Python 3.14 + asyncio | DeepSeek + 飞书 Lark | CardKit 流式输出
+> 59 个 Python 源文件 | Python 3.14 + asyncio | DeepSeek + 飞书 Lark | CardKit 流式输出
+
+## 〇、变更历史
+
+- 新增 **hashline 哈希锚定编辑协议**（`hashline/` 12 文件 + `tools/hash_read.py` / `hash_edit.py`）
+- 新增 **记忆混合检索**（`memory/bm25.py` BM25 + BGE-M3 语义，召回与使用分离 `confirm_usage`）
+- 新增 **记忆去重**（`memory/clustering.py` 纯 numpy KMeans + 簇内合并）
+- Agent 自带记忆管理工具 `tools/memory.py`（search / soft-forget）
+- 配置去 vendor：`[llm]/[vision]` 替代 `[deepseek]/[mimo]`（§十三）
+- 压缩管道改为 entry-based + `before_compact` hook（§九）
+- 记忆检索加入新鲜度加成 + 自动 importance 提升 + `force_learn`（§十四）
 
 ## 一、项目定位
 
@@ -26,6 +36,9 @@ ConnectClaw 是一个**通用 AI 助手**，通过飞书 IM 交互。代码能�
 ├────────────────────────────────────────────┤
 │          Provider 层 (provider/)            │
 │    DeepSeek API · Embedding · Rerank        │
+├────────────────────────────────────────────┤
+│          Hashline 层 (hashline/)            │
+│   哈希锚定编辑协议 (hash_read / hash_edit)  │
 └────────────────────────────────────────────┘
 ```
 
@@ -45,6 +58,17 @@ connectclaw/
 │   ├── stream.py              # stream_simple() 异步流式生成器
 │   ├── embedding.py           # BGE-M3 嵌入 (懒加载)
 │   └── rerank.py              # BGE-Reranker-v2-m3 重排序 (懒加载)
+│
+├── hashline/                  # 哈希锚定编辑协议 (自 pi-hashline-edit, MIT)
+│   ├── hash.py                # xxHash32 逐行内容哈希
+│   ├── parse.py               # 锚点解析 / 编辑请求规范化 / 校验
+│   ├── apply.py               # 编辑执行引擎 (锚点验证 + 区间解析 + 组装)
+│   ├── snapshot.py            # 读快照 LRU 存储 (过期锚点恢复)
+│   ├── guard.py               # 幂等去重 / noop loop guard
+│   ├── diff_util.py           # diff 生成 / 行尾处理
+│   ├── format.py              # 哈希锚定区域渲染
+│   ├── merge.py               # 三方合并 (过期锚点恢复)
+│   └── config.py              # 轻量配置 (env 驱动)
 │
 ├── agent/                     # Agent 框架层
 │   ├── types.py               # AgentMessage / AgentTool / AgentEvent / AgentState
@@ -70,9 +94,12 @@ connectclaw/
 │   ├── tools/                 # 工具集 (一切皆为工具)
 │   │   ├── read.py            # 文件读取 (带行号 + recently_read 记录)
 │   │   ├── write.py           # 文件写入 (已存在必须先 read + 原子写入)
-│   │   ├── bash.py            # Shell 执行 (BashGuard + 三层沙箱)
+│   │   ├── hash_read.py       # 哈希锚定读 (带 LINE#HASH 锚点, hash_edit 的唯一寻址方式)
+│   │   ├── hash_edit.py       # 哈希锚定改 (replace/append/prepend/replace_text, 读快照校验)
+│   │   ├── bash.py            # Shell 执行 (BashGuard 三级 + 三层沙箱)
 │   │   ├── web_search.py      # Lightpanda 无头浏览器，Bing 引擎，免费
 │   │   ├── image_analyze.py   # 子agent: Mimo 视觉分析
+│   │   ├── memory.py          # agent 可用记忆工具 (search / soften 软遗忘, persona 受保护)
 │   │   ├── agents.py          # agents 元工具 (list/describe/run/create) — 子 agent 编队 + DAG
 │   │   ├── named_agents.py    # 命名 agent 加载 (~/.connectclaw/agents/*.md)
 │   │   ├── subagent.py        # 子 agent 执行引擎
@@ -88,11 +115,13 @@ connectclaw/
 ├── memory/                    # 分层记忆子系统 (可选，SQLite 单文件，无感)
 │   ├── types.py               # MemoryEntry / MemoryType (semantic/episodic/procedural)
 │   ├── store.py               # SQLite 存储 + numpy 余弦相似度检索
-│   ├── extractor.py           # 对话后自动提取记忆 (LLM，节流)
-│   ├── retriever.py           # 分级检索 (近期清晰 / 久远模糊)
-│   ├── consolidator.py        # "做梦" 整合 (衰减 / 合并 / 遗忘)
+│   ├── retriever.py           # 混合检索 (embedding+BM25 融合) + 分级细节 + confirm_usage
+│   ├── bm25.py                # BM25 关键词检索 (补 embedding 在术语/路径/错误码上的盲区)
+│   ├── clustering.py          # 纯 numpy KMeans (余弦距离, 定种子, 无 sklearn) — 做梦去重
+│   ├── extractor.py           # 对话后自动提取记忆 (LLM，节流，带已有记忆去重)
+│   ├── consolidator.py        # "做梦" 整合 (衰减 / 增强 / 聚类合并 / 情景→语义 / 清理)
 │   ├── prompts.py             # 提取 / 整合 prompt 模板
-│   └── subsystem.py           # 总装 (MemoryConfig + MemorySubsystem)
+│   └── subsystem.py           # 总装 (MemoryConfig + MemorySubsystem + force_learn)
 │
 └── utils/                     # 预留
 ```
@@ -186,11 +215,14 @@ outer: while (有 follow-up 消息):
 | 工具 | 能力 | 安全机制 |
 |------|------|---------|
 | `read` | 读取文件，带行号，支持 offset/limit | 仅读，记录 recently_read |
-| `write` | 写入文件，原子操作 (tmp → rename) | 已存在文件必须先 read |
-| `bash` | 执行 shell 命令 | BashGuard 两级 + 三层沙箱 |
+| `write` | 写入文件，原子操作 (tmp → rename) | 已存在文件必须先 read；超出 cwd 需飞书卡片授权 |
+| `hash_read` | 哈希锚定读，输出 LINE#HASH 锚点 | 记录读快照 (篡改检测基准) |
+| `hash_edit` | 哈希锚定改 (replace/append/prepend/replace_text) | 锚点哈希预检 + 幂等去重 + 读快照校验 |
+| `bash` | 执行 shell 命令 | BashGuard 三级 + 三层沙箱 |
 | `web_search` | Lightpanda 无头浏览器 + Bing 引擎搜索 | 免费，无需 API key |
 | `web_fetch`  | Lightpanda 无头浏览器抓取 URL 纯文本 | 免费，无需 API key |
 | `image_analyze` | Mimo 视觉模型分析图片 | API key 可选 |
+| `memory` | agent 自动作记忆 (search / forget 软遗忘) | persona 级记忆受保护，只能 /forget id 显式删 |
 
 ### 6.2 编排工具
 
@@ -204,18 +236,39 @@ agents(action="run", tasks=[
 → 独立任务并发、有依赖的拓扑分层 → 前驱产出注入后继 → 聚合结果
 ```
 
-`action="create"` 写 `~/.connectclaw/agents/*.md` 定义命名 agent（自然语言 system prompt），当轮即可 `run`。子 agent 用受限工具集，通过 `asyncio.gather` 并行。
+`action="create"` 写 `~/.connectclaw/agents/*.md` 定义命名 agent（自然语言 system prompt），当轮即可 `run`（每次调用实时 re-scan，不是启动时冻结）。子 agent 用受限工具集，通过 `asyncio.gather` 并行。
 
 ### 6.3 工具刷新流程
 
 ```
 每次 handle_message():
   _refresh_tools()
-    → base: [read, write, bash, web_search, web_fetch, image_analyze]
+    → base: [read, write, hash_read, hash_edit, bash, web_search, web_fetch, image_analyze, memory]
     → agents: 元工具 (list/describe/run/create)，单实例常驻
-    → 返回完整列表
+    → 返回完整列表 (可在 config.agent.tools 白名单裁剪，缺省暴露全部)
     → harness.set_tools(最新列表)
 ```
+
+### 6.4 hashline 哈希锚定编辑协议（关键）
+
+根除 LLM 编辑中的**行号漂移与幻觉修改**。来源为 pi-hashline-edit（MIT），移植到纯 Python。
+
+**核心思想**：不用行号或原始文本锚定，而是**每行算内容哈希**——编辑指令携带 `LINE#HASH` 锚点，编辑器先验证当前行哈希是否匹配，匹配才执行：
+
+```
+hash_read  → 输出带 LINE#HASH 锚点的行视图（记录读快照）
+hash_edit  → 编辑指令携带锚点 → 预检哈希 → 底向上应用 → 输出新锚点
+```
+
+**三层防护（针对行号漂移的完整方案）**：
+
+1. **锚点哈希预检**：编辑前验证每一行哈希，不匹配直接拦截，不碰文件（不像行号方案会错误改到别的行）
+2. **幂等去重**：`guard.py` 的 noop loop guard + 重复 payload 检测——同一条编辑不会执行两次，模型在重复轮次上不浪费
+3. **读快照校验**：`snapshot.py` 记录 hash_read 时的多版本快照，过期锚点通过三方合并（`merge.py`）恢复，而不是粗暴失败
+
+**与 `write` 的互补（重要）**：hash_edit 处理精准局部修改；当 JSON 编辑失败或需要大段重写时，模型退到 `write` 全文原子写入。两路都通，不让模型在单个编辑通道上死磕。实际使用中 hash_edit 的精确编辑 + write 的全文降级配合良好。
+
+**实现位置**：`hashline/`（hash/parse/apply/snapshot/guard/diff_util/format/merge/config）+ 工具 `hash_read.py` / `hash_edit.py`。
 
 ## 七、沙箱系统
 
@@ -237,7 +290,7 @@ agents(action="run", tasks=[
 
 ## 八、Bash 安全
 
-两级检测 + 沙箱：
+三级分类 + 三层沙箱（BashGuard 可配置，`config.toml` 可追加自定义档位）：
 
 ```
 BashGuard.check(command):
@@ -249,6 +302,8 @@ BashGuard.check(command):
 
   SAFE:         → 进入沙箱执行
 ```
+
+> 保持无状态、不做持久白名单——高风险命令每次强制授权，用户随时可反悔。可配置性通过 BashGuard 风险分级清单实现（如把 `docker system prune` 提为 DANGEROUS）而不必 fork 类。
 
 ## 九、上下文压缩
 
@@ -304,15 +359,17 @@ JSONL 树形结构，每行一个 JSON 对象：
 优先级: 环境变量 > config.toml > 默认值
 
 ~/.connectclaw/config.toml:
-  [deepseek]     api_key / base_url / model_id
+  [llm]          api_key / base_url / model_id        # 替代旧 [deepseek]
   [feishu]       app_id / app_secret
-  [mimo]         api_key / base_url / model_id
-  [agent]        cwd / thinking_level
+  [vision]       api_key / base_url / model_id        # 替代旧 [mimo]
+  [agent]        cwd / thinking_level / tools(白名单) / tool_session_idle_timeout
   [session]      dir
   [rag]          enabled / docs_dir / db_path / top_k / top_n
   [web_search]   max_chars / timeout / pool_size
   [compaction]   enabled / reserve_tokens / keep_recent_tokens
-  [memory]       enabled / db_path / extract_interval_turns / use_embeddings / dream_interval_hours
+  [memory]       enabled / db_path / extract_min_turns / extract_interval_turns
+                 / max_context_tokens / recency_threshold_days / use_embeddings
+                 / dream_interval_hours / decay_halflife_days / consolidation_enabled
 ```
 
 ## 十四、分层记忆系统
@@ -332,12 +389,31 @@ JSONL 树形结构，每行一个 JSON 对象：
 ### 数据流
 
 ```
-recall   每轮对话前：query → (embedding | 关键词 + BM25) → 打分+新鲜度加成 → 分级细节 → 注入 user message
+recall   每轮对话前：query → embedding+BM25 混合检索 → 分类型配额 → 打分(相似度+新鲜度+重要+强度) → 分级细节 → 注入 user message
 learn    每轮对话后：后台 asyncio.create_task 提取，每 N 轮节流一次（省 API 成本）
 force_learn  压缩前触发：跳过 learn 的节流，确保原始对话细节在压缩前被提取（hook 于 before_compact）
-confirm  回复产生后：扫描回复内容匹配已召回记忆 → 命中则 touch() + importance += 0.02
-dream    定时 / 手动：衰减 → 强化 → 情景→语义整合 → 聚类合并 → 清理
+confirm  回复产生后：扫描回复内容匹配已召回记忆 → 命中则 touch() + strength/importance 提升（召回≠使用）
+dream    定时 / 手动：衰减 → 强化 → 情景→语义整合 → 聚类合并(KMeans) → 清理
 ```
+
+### 混合检索：BM25 + BGE-M3（关键）
+
+检索不再只靠语义——`memory/bm25.py` 提供关键词信号，补上 embedding 在**精确术语（名字 / 路径 / 错误码）**上的盲区：
+
+- **embedding**：BGE-M3 语义相关，余弦相似度（硬门槛 0.45）
+- **BM25**：精确关键词命中，名字 / 路径 / ID 这类语义匹配不到的也能召回
+- **融合**：`relevance = max(sim, bm25_norm)` 取两者之强，再叠上新鲜度×时效 + 重要性 + strength
+- **类型配额**：semantic/episodic/procedural 各保底名额（2/1/1），避免某类垄断 TopK
+- **召回≠使用**：`confirm_usage()` 在回复产生后判断记忆内容是否被引用，命中才 touch + 提升，未被使用的记忆继续衰减
+
+### 梦境去重：KMeans 聚类 + 簇内合并
+
+记忆量一大就爆上下文。`memory/clustering.py` 用**纯 numpy KMeans**（余弦距离、固定 seed、无 sklearn）把语义相近的记忆聚成簇，再 `consolidate_by_clustering()` 簇内合并：
+
+- 保留簇内 strength 最高的第一条，其余 content 折叠进它，删除冗余
+- 无 embedding 的记忆退化为 singleton，不强制合并
+- 确定性可测，`tests/memory/test_consolidator.py` 覆盖聚类分簇、缺失 embedding、合并删除、跨簇不误并、keeper 加强
+- 解决"全量丢给大模型"的问题——先聚类成小簇，簇内再交给 LLM（或确定性合并）
 
 ### 缓存友好设计（关键）
 
@@ -376,17 +452,21 @@ DeepSeek / OpenAI-compatible provider 按**请求前缀**缓存：system prompt 
 | `/memory list [类型]` | 列出记忆（可按 semantic/episodic/procedural 过滤）|
 | `/memory <关键词>` | 关键词搜索记忆 |
 | `/dream` | 立即触发整合（做梦）|
-| `/forget` | 清空所有记忆 |
+| `/forget <关键词>` | 按关键词/类型/ID 选择性删除（persona 受保护）|
+| `/new` | 新会话 |
+| `/stop` | 中断当前 agent |
+| `/restart` | 重启进程（守护进程拉起）|
+| `/cmd` | 命令帮助 |
 
-无需 sqlite / 文本工具翻 db 和 jsonl，直接在飞书对话里查看。
+无需 sqlite / 文本工具翻 db 和 jsonl，直接在飞书对话里查看。另外 agent 可通过 `memory` 工具自行搜索 / 软遗忘（soft-forget, strength→0, 下次 dream 回收）记忆，persona 级受保护只能 `/forget id` 显式删。
 
 ## 十五、技术栈
 
 ```
 Python 3.14 + asyncio · uv 包管理
-DeepSeek (openai SDK) · lark-oapi (WebSocket + HTTP)
+DeepSeek (openai SDK) · lark-oapi + lark-channel-sdk (WebSocket + HTTP)
 LanceDB · BGE-M3 · BGE-Reranker-v2-m3 (RAG, 可选)
-SQLite · numpy (分层记忆)
-bubblewrap · unshare (沙箱)
-tiktoken · aiofiles · questionary · qrcode
+SQLite · numpy (分层记忆) · xxhash (hashline)
+bubblewrap · unshare (沙箱) · lightpanda-py (无头浏览器)
+openai · tiktoken · aiofiles · pyyaml · questionary · qrcode · websockets · httpx · torch
 ```
