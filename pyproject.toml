@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "互联Claw · ConnectClaw — 轻量级 AI 助手，接入飞书 IM"
 requires-python = ">=3.14"
 readme = "README.md"
-license = { text = "AGPL-3.0-or-later" }
+license = { text = "MIT" }
 
 dependencies = [
     "openai>=2.0.0",

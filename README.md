@@ -104,7 +104,7 @@ CONNECTCLAW_LOG_LEVEL=DEBUG uv run connectclaw
 
 ## 许可
 
-AGPL v3 or later. 使用、修改、分发（含网络服务）均需以相同协议开源。
+MIT License. 附带目录保留各自作者的原许可证（见各自 `LICENSE`/`THIRD_PARTY_NOTICES`）。
 
 ## 技术栈
 
