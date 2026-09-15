@@ -16,6 +16,7 @@ see module history in compaction.py.
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from typing import Any
 
 import tiktoken
@@ -24,6 +25,15 @@ import tiktoken
 
 _tokenizer_cache: dict[str, Any] = {}
 _tokenizer_failure: Exception | None = None
+
+# Memoized count_tokens results, bounded by total cached characters (not entry
+# count — some tool results are multi-KB). Compaction rescans the same message
+# set repeatedly across its cut-point iterations, so this turns O(iterations)
+# tiktoken passes into cache hits.
+_token_memo: OrderedDict[str, int] = OrderedDict()
+_token_memo_chars = 0
+_TOKEN_MEMO_MAX_CHARS = 4 * 1024 * 1024
+_TOKEN_MEMO_MAX_ITEM = 64 * 1024
 
 
 def _get_tokenizer(name: str = "cl100k_base") -> Any | None:
@@ -62,15 +72,28 @@ def count_tokens(text: str) -> int:
     """Best-effort text token count: tiktoken cl100k_base, else CJK-aware heuristic."""
     if not text:
         return 0
+    cached = _token_memo.get(text)
+    if cached is not None:
+        _token_memo.move_to_end(text)
+        return cached
+
     enc = _get_tokenizer()
     if enc is not None:
         try:
-            return max(1, len(enc.encode(text, disallowed_special=())))
+            result = max(1, len(enc.encode(text, disallowed_special=())))
         except Exception:
-            pass
-    cjk = sum(1 for ch in text if _is_cjk(ch))
-    other = len(text) - cjk
-    return max(1, cjk + other // 4)
+            enc = None
+    if enc is None:
+        cjk = sum(1 for ch in text if _is_cjk(ch))
+        result = max(1, cjk + (len(text) - cjk) // 4)
+
+    if len(text) <= _TOKEN_MEMO_MAX_ITEM:
+        global _token_memo_chars
+        while _token_memo and _token_memo_chars + len(text) > _TOKEN_MEMO_MAX_CHARS:
+            _token_memo_chars -= len(_token_memo.popitem(last=False)[0])
+        _token_memo[text] = result
+        _token_memo_chars += len(text)
+    return result
 
 
 # ── Image counting ─────────────────────────────────────────────

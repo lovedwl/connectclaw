@@ -67,6 +67,31 @@ def test_store_drops_entry_for_missing_file(attachments_dir):
     assert asyncio.run(store2.get("zzz")) is None
 
 
+def test_store_evicts_oldest_over_caps(attachments_dir, monkeypatch):
+    """超过数量/字节上限时按注册先后淘汰最旧的（文件与条目一起删）。"""
+    import connectclaw.coding.tools.attach_image as ai
+
+    monkeypatch.setattr(ai, "_MAX_ATTACHMENTS", 2)
+    monkeypatch.setattr(ai, "_MAX_ATTACHMENT_BYTES", 10 * 1024 * 1024)
+    store = AttachmentStore(attachments_dir)
+
+    os.makedirs(attachments_dir, exist_ok=True)
+    paths = []
+    for i in range(3):
+        p = os.path.join(attachments_dir, f"img{i}.png")
+        with open(p, "wb") as f:
+            f.write(f"img{i}".encode() * 1000)
+        asyncio.run(store.register(f"id{i}", p, "image/png", os.path.getsize(p)))
+        paths.append(p)
+
+    # 最旧的 id0 被数量上限淘汰；id1/id2 保留。
+    assert asyncio.run(store.get("id0")) is None
+    assert asyncio.run(store.get("id1")) is not None
+    assert asyncio.run(store.get("id2")) is not None
+    assert not os.path.exists(paths[0])
+    assert os.path.exists(paths[1]) and os.path.exists(paths[2])
+
+
 def test_make_image_ref():
     item = {"id": "a1", "path": "/x/y.png", "mime_type": "image/png", "size": 2048}
     assert make_image_ref(item) == {

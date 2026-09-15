@@ -118,6 +118,28 @@ def test_attach_image_tool_result_rides_synthetic_user_message(tmp_path):
     assert "image_url" not in str(tool_msg)
 
 
+def test_historic_tool_result_keeps_placeholder(tmp_path):
+    """历史 toolResult 里的 image_ref 降级后必须保留文字占位符——否则模型会
+    看到“已附加”，既看不到图，也没有“可调用 attach_image”的提示。"""
+    old = tmp_path / "old.png"
+    old.write_bytes(b"x")
+
+    first = UserMessage(content=[{"type": "text", "text": "first"}], timestamp=0)
+    tool_result = ToolResultMessage(
+        tool_call_id="tc1",
+        content=[{"type": "text", "text": "attached"}, _img_ref("c1", str(old))],
+        timestamp=0,
+    )
+    later = UserMessage(content=[{"type": "text", "text": "later turn"}], timestamp=0)
+
+    out = provider.convert_messages([first, tool_result, later])
+
+    tool_msg = next(m for m in out if m["role"] == "tool")
+    text = tool_msg["content"]
+    assert "attached" in text
+    assert "c1" in text and "attach_image" in text
+
+
 def test_legacy_image_block_resolves_without_file(tmp_path):
     """旧式 {'type':'image','data':...} 块始终解析（数据已在内存中）。"""
     import base64
