@@ -10,7 +10,6 @@ dependencies = [
     "openai>=2.0.0",
     "tiktoken>=0.9.0",
     "aiofiles>=25.0.0",
-    "pyyaml>=6.0",
     "questionary>=2.1.1",
     "qrcode>=8.2",
     "lark-oapi>=1.7.0",
