@@ -23,6 +23,9 @@ _provider = DeepSeekProvider()
 # Key: (base_url, api_key_first_8), Value: AsyncOpenAI
 _client_cache: dict[tuple[str, str], Any] = {}
 _client_cache_lock = asyncio.Lock()
+# Each client owns an httpx connection pool (~5-10 MB), so the cache is bounded
+# and the oldest client is closed when a config rotation pushes past the cap.
+_client_cache_max = 8
 
 
 async def stream_simple(
@@ -71,6 +74,12 @@ async def stream_simple(
         else:
             client = provider.build_client(key, base_url=base, proxy=proxy)
             _client_cache[cache_key] = client
+            while len(_client_cache) > _client_cache_max:
+                _, old_client = _client_cache.popitem(last=False)
+                try:
+                    await old_client.close()
+                except Exception:
+                    pass
 
     # Build the initial partial message
     partial = AssistantMessage(

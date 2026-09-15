@@ -24,7 +24,7 @@ from connectclaw.memory import MemorySubsystem
 from connectclaw.memory.subsystem import MemoryConfig as MemCfg
 from connectclaw.provider.types import Model
 
-from .tools.attach_image import AttachImageTool, AttachmentStore
+from .tools.attach_image import AttachImageTool, AttachmentStore, DEFAULT_ATTACHMENTS_DIR
 from .tools.agents import create_agents_tool
 from .tools.bash import BashGuard, create_bash_tool
 from .tools.hash_edit import create_hash_edit_tool
@@ -87,9 +87,7 @@ class CodingAgent:
         )
         # Image attach registry: main.py registers downloaded images here and
         # the model re-attaches any of them to the current turn via the tool.
-        self._attachment_store = AttachmentStore(
-            os.path.join(os.path.expanduser("~/.connectclaw"), "attachments")
-        )
+        self._attachment_store = AttachmentStore(DEFAULT_ATTACHMENTS_DIR)
         self._attach_image_tool = AttachImageTool(self._attachment_store)
 
         # RAG subsystem (optional, lazy init)
@@ -495,7 +493,7 @@ class CodingAgent:
                     if file_path:
                         import os
                         abs_path = os.path.abspath(file_path)
-                        cwd_abs = os.path.abspath(self._cwd)
+                        cwd_abs = os.path.abspath(self._config.agent.cwd)
                         if not abs_path.startswith(cwd_abs + os.sep) and abs_path != cwd_abs:
                             notes.append("🚀 Write sandbox escape authorization")
                             approved = await self.request_unsandboxed_auth(

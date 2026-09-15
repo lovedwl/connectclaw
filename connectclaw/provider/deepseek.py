@@ -3,7 +3,7 @@
 import base64
 import json
 import os
-from functools import lru_cache
+from collections import OrderedDict
 
 from openai import AsyncOpenAI
 
@@ -14,11 +14,30 @@ from .types import (
 )
 
 
-@lru_cache(maxsize=64)
+# Base64 of an attachment file, cached by (path, mtime). Bounded by total
+# encoded bytes rather than entry count: one large image is already several MB
+# of base64, so a count-only cap could pin hundreds of MB for the process
+# lifetime. Evicted entries are simply re-encoded on next use.
+_base64_cache: OrderedDict[tuple[str, int], str] = OrderedDict()
+_base64_cache_bytes = 0
+_BASE64_CACHE_MAX_BYTES = 64 * 1024 * 1024
+
+
 def _read_base64(path: str, mtime_ns: int) -> str:
-    """Cache base64 of an attachment file, keyed by (path, mtime)."""
+    key = (path, mtime_ns)
+    cached = _base64_cache.get(key)
+    if cached is not None:
+        _base64_cache.move_to_end(key)
+        return cached
+    global _base64_cache_bytes
     with open(path, "rb") as f:
-        return base64.b64encode(f.read()).decode("ascii")
+        data = base64.b64encode(f.read()).decode("ascii")
+    _base64_cache[key] = data
+    _base64_cache_bytes += len(data)
+    while _base64_cache_bytes > _BASE64_CACHE_MAX_BYTES:
+        _, victim = _base64_cache.popitem(last=False)
+        _base64_cache_bytes -= len(victim)
+    return data
 
 
 class DeepSeekProvider:
@@ -159,8 +178,15 @@ class DeepSeekProvider:
                 text += block.get("text", "")
             elif btype in ("image", "image_ref"):
                 converted = self._convert_image_block(block, resolve)
-                if converted is not None and converted.get("type") == "image_url":
+                if converted is None:
+                    continue
+                if converted.get("type") == "image_url":
                     image_parts.append(converted)
+                else:
+                    # History: the image degrades to a placeholder so the model
+                    # still knows it existed (and how to re-attach it), instead
+                    # of the tool text claiming it is attached.
+                    text += converted.get("text", "")
         return {
             "role": "tool",
             "tool_call_id": m.tool_call_id,

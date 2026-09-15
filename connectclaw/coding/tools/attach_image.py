@@ -10,13 +10,32 @@ rides in the tool result and the provider resolves it for this turn.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 import os
+import time
 from typing import Any
 
 from connectclaw.agent.types import AgentTool, AgentToolResult
 from connectclaw.logging import get_logger
 
 logger = get_logger(__name__)
+
+# Shared location for downloaded Feishu images. A single constant so main.py
+# (which writes the files) and coding_agent.py (which owns the store) can't
+# drift apart.
+DEFAULT_ATTACHMENTS_DIR = os.path.join(os.path.expanduser("~/.connectclaw"), "attachments")
+
+# The attachments dir + manifest are bounded: at most _MAX_ATTACHMENTS files
+# and _MAX_ATTACHMENT_BYTES total, oldest evicted first when a register pushes
+# past either cap.
+_MAX_ATTACHMENTS = 256
+_MAX_ATTACHMENT_BYTES = 256 * 1024 * 1024
+
+# Manifest writes are debounced: the first register in a burst persists
+# immediately (an entry must never be lost to a crash or a prompt restart),
+# later ones inside the window coalesce into one write after this delay.
+_SAVE_DEBOUNCE_SECS = 2.0
 
 
 class AttachmentStore:
@@ -30,6 +49,9 @@ class AttachmentStore:
         self._dir = attachments_dir
         self._items: dict[str, dict] = {}
         self._lock = asyncio.Lock()
+        self._dirty = False
+        self._save_task: asyncio.Task | None = None
+        self._last_saved_ts = 0.0
         self._load_manifest()
 
     # ── Manifest persistence ─────────────────────────────────
@@ -40,8 +62,6 @@ class AttachmentStore:
 
     def _load_manifest(self) -> None:
         try:
-            import json
-
             with open(self._manifest_path, "r", encoding="utf-8") as f:
                 items = json.load(f)
             if isinstance(items, dict):
@@ -54,12 +74,51 @@ class AttachmentStore:
         except Exception as e:
             logger.warning("attachments manifest load failed: %s", e)
 
-    def _save_manifest(self) -> None:
-        import json
+    def _schedule_save(self) -> None:
+        """Persist dirty state: immediately on the first write of a burst or
+        when no event loop is running, otherwise coalesced into one debounced
+        async write."""
+        self._dirty = True
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is None or self._last_saved_ts == 0 or (time.time() - self._last_saved_ts) > _SAVE_DEBOUNCE_SECS:
+            self._flush_sync()
+        elif self._save_task is None:
+            self._save_task = loop.create_task(self._delayed_save())
 
-        os.makedirs(self._dir, exist_ok=True)
-        with open(self._manifest_path, "w", encoding="utf-8") as f:
-            json.dump(self._items, f, ensure_ascii=False, indent=1)
+    async def _delayed_save(self) -> None:
+        try:
+            await asyncio.sleep(_SAVE_DEBOUNCE_SECS)
+            self._flush_sync()
+        finally:
+            self._save_task = None
+
+    def _flush_sync(self) -> None:
+        """Write the manifest from a snapshot. Safe without the lock: the event
+        loop is single-threaded and register() mutates before any await."""
+        if not self._dirty:
+            return
+        snapshot = dict(self._items)
+        try:
+            os.makedirs(self._dir, exist_ok=True)
+            with open(self._manifest_path, "w", encoding="utf-8") as f:
+                json.dump(snapshot, f, ensure_ascii=False, indent=1)
+            self._dirty = False
+            self._last_saved_ts = time.time()
+        except Exception as e:
+            logger.warning("attachments manifest save failed: %s", e)
+
+    async def flush(self) -> None:
+        """Persist any pending writes immediately (called on shutdown)."""
+        task = self._save_task
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            self._save_task = None
+        self._flush_sync()
 
     # ── Registry API ─────────────────────────────────────────
 
@@ -74,12 +133,38 @@ class AttachmentStore:
                 "mime_type": mime_type,
                 "size": size,
             }
-            self._items[image_id] = ref
+            # ts drives oldest-first eviction; kept out of the returned ref so
+            # image_ref blocks stay lean and stable.
+            self._items[image_id] = {**ref, "ts": time.time()}
+        await self._evict()
+        self._schedule_save()
+        return ref
+
+    async def _evict(self) -> None:
+        """Enforce the caps: drop the oldest entries (file + manifest entry)
+        that push the store past the count or byte limits."""
+        async with self._lock:
+            total = sum(int(v.get("size", 0)) for v in self._items.values())
+            if len(self._items) <= _MAX_ATTACHMENTS and total <= _MAX_ATTACHMENT_BYTES:
+                return
+            ordered = sorted(self._items, key=lambda k: self._items[k].get("ts", 0))
+            dropped: list[dict] = []
+            while (
+                (len(self._items) > _MAX_ATTACHMENTS or total > _MAX_ATTACHMENT_BYTES)
+                and ordered
+            ):
+                k = ordered.pop(0)
+                entry = self._items.pop(k)
+                dropped.append(entry)
+                total -= int(entry.get("size", 0))
+        for entry in dropped:
             try:
-                self._save_manifest()
-            except Exception as e:
-                logger.warning("attachments manifest save failed: %s", e)
-            return ref
+                os.remove(entry.get("path", ""))
+            except OSError:
+                pass
+        if dropped:
+            logger.info("attachments: evicted %d image(s) over cap (%d kept)",
+                        len(dropped), len(self._items))
 
     async def get(self, image_id: str) -> dict | None:
         async with self._lock:

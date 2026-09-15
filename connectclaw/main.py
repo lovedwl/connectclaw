@@ -18,7 +18,10 @@ import signal
 import sys
 
 from connectclaw.channel.feishu import FeishuChannel  # noqa: E402 — must load before asyncio loop
-from connectclaw.coding.tools.attach_image import AttachmentStore
+from connectclaw.coding.tools.attach_image import (
+    AttachmentStore,
+    DEFAULT_ATTACHMENTS_DIR,
+)
 from connectclaw.logging import get_logger
 
 logger = get_logger(__name__)
@@ -49,17 +52,16 @@ async def _download_feishu_images(
     if not image_resources:
         return []
 
-    attachments_dir = os.path.join(os.path.expanduser("~/.connectclaw"), "attachments")
+    attachments_dir = DEFAULT_ATTACHMENTS_DIR
     os.makedirs(attachments_dir, exist_ok=True)
 
     overflow = len(image_resources) - max_images
     to_process = image_resources[:max_images]
 
-    refs: list[dict] = []
-    for i, res in enumerate(to_process):
+    async def download_one(i: int, res) -> dict | None:
         file_key = res.file_key
         if not file_key:
-            continue
+            return None
 
         logger.info("[%s] downloading image %d/%d: %s",
                      conversation_key[:8], i + 1, len(to_process), file_key[:20])
@@ -70,12 +72,12 @@ async def _download_feishu_images(
             )
         except Exception as e:
             logger.error("[%s] image download failed: %s", conversation_key[:8], e)
-            continue
+            return None
 
         if image_data is None:
             logger.warning("[%s] image download returned empty: %s",
                            conversation_key[:8], file_key[:20])
-            continue
+            return None
 
         mime_type = detect_mime_type(image_data)
         ext = MIME_TO_EXT.get(mime_type, ".png")
@@ -88,10 +90,17 @@ async def _download_feishu_images(
                 f.write(image_data)
 
         item = await store.register(image_id, filepath, mime_type, len(image_data))
-        refs.append(make_image_ref(item))
 
         logger.info("[%s] saved image: id=%s (%s, %dKB)",
                      conversation_key[:8], image_id, mime_type, len(image_data) // 1024)
+
+        return make_image_ref(item)
+
+    # Downloads are independent — run them concurrently instead of serially.
+    results = await asyncio.gather(
+        *(download_one(i, res) for i, res in enumerate(to_process))
+    )
+    refs = [r for r in results if r is not None]
 
     if overflow > 0:
         logger.info("[%s] %d image(s) skipped (max %d)",
@@ -304,6 +313,7 @@ async def main(argv: list[str] | None = None) -> None:
             await restart_task
         if config.memory.enabled:
             await coding_agent.memory.close()
+        await coding_agent.attachment_store.flush()
         await channel.close()
 
     # 根协程抛出 → asyncio.run 会把它传播成进程退出码。
