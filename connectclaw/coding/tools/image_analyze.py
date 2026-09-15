@@ -51,6 +51,7 @@ class VisionConfig:
     api_key: str = ""
     base_url: str = ""
     model_id: str = ""
+    proxy: str = ""
 
 
 class ImageAnalyzeTool(AgentTool):
@@ -155,13 +156,26 @@ class ImageAnalyzeTool(AgentTool):
             with open(image_path, "rb") as f:
                 image_data = base64.b64encode(f.read()).decode("utf-8")
 
-            # Call vision model using OpenAI-compatible API
+            # Call vision model using OpenAI-compatible API. Vision rides the
+            # same model proxy as the LLM (trust_env=False so the httpx client
+            # sticks to the explicit proxy and ignores ambient env vars).
             from openai import AsyncOpenAI
 
-            client = AsyncOpenAI(
-                base_url=self._config.base_url,
-                api_key=self._config.api_key,
-            )
+            if self._config.proxy:
+                import httpx
+
+                client = AsyncOpenAI(
+                    base_url=self._config.base_url,
+                    api_key=self._config.api_key,
+                    http_client=httpx.AsyncClient(
+                        proxy=self._config.proxy, trust_env=False
+                    ),
+                )
+            else:
+                client = AsyncOpenAI(
+                    base_url=self._config.base_url,
+                    api_key=self._config.api_key,
+                )
 
             response = await client.chat.completions.create(
                 model=self._config.model_id,
@@ -215,12 +229,14 @@ def create_image_analyze_tool(
     base_url: str = "",
     model_id: str = "",
     cwd: str = ".",
+    proxy: str = "",
 ) -> ImageAnalyzeTool:
     return ImageAnalyzeTool(
         config=VisionConfig(
             api_key=api_key,
             base_url=base_url,
             model_id=model_id,
+            proxy=proxy,
         ),
         cwd=cwd,
     )

@@ -160,14 +160,18 @@ class AgentHarness:
 
     # ── Prompt API ──────────────────────────────────────────
 
-    async def prompt(self, text: str) -> AssistantMessage | None:
-        """Execute a prompt turn. Raises if busy."""
+    async def prompt(self, text: str, images: list[dict] | None = None) -> AssistantMessage | None:
+        """Execute a prompt turn. Raises if busy.
+
+        ``images`` are image_ref blocks attached to this turn's user message
+        (resolved to image_url only for the current turn by the provider).
+        """
         if self._phase != "idle":
             raise RuntimeError("AgentHarness is busy")
 
         self._phase = "turn"
         try:
-            return await self._execute_turn(text)
+            return await self._execute_turn(text, images=images)
         finally:
             self._phase = "idle"
 
@@ -254,7 +258,9 @@ class AgentHarness:
 
     # ── Internal ────────────────────────────────────────────
 
-    async def _execute_turn(self, text: str) -> AssistantMessage | None:
+    async def _execute_turn(
+        self, text: str, images: list[dict] | None = None
+    ) -> AssistantMessage | None:
         """Actually execute the agent loop for one prompt."""
         # Build system prompt
         system_prompt = self._system_prompt
@@ -402,7 +408,14 @@ class AgentHarness:
             self._harness_subscribed = True
 
         # Run the prompt
-        await agent.prompt(text)
+        if images:
+            prompt_msg = UserMessage(
+                content=[{"type": "text", "text": text}, *images],
+                timestamp=time.time() * 1000,
+            )
+        else:
+            prompt_msg = text
+        await agent.prompt(prompt_msg)
 
         # Return last assistant message
         for m in reversed(agent.state.messages):

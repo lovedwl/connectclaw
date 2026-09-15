@@ -40,6 +40,8 @@ cp config.toml.template ~/.connectclaw/config.toml  # 编辑填入配置
 cp .env.template .env
 ```
 
+> 模型 API（LLM + 视觉）需要代理时，在 `~/.connectclaw/config.toml` 加 `[proxy] url = "http://127.0.0.1:7980/"`（或设 `CONNECTCLAW_PROXY_URL`）。仅模型请求走代理，飞书 SDK / 浏览器不受影响。
+
 ## 功能
 
 | 功能 | 说明 |
@@ -48,7 +50,7 @@ cp .env.template .env
 | 文件读写 | read / write（写已存在文件必须先读，限定 cwd） |
 | Shell 执行 | bash（三级安全：危险拒绝 / 可疑授权 / 沙箱隔离） |
 | 网页搜索 | web_search + web_fetch（Lightpanda 无头浏览器，Bing 引擎，免费） |
-| 图片分析 | image_analyze（通用视觉模型，OpenAI 兼容 API） |
+| 图片分析 | 图片直接附加当轮上下文；`attach_image` 可按需重挂历史图片（阅后即弃，省 token 保前缀缓存）；`image_analyze` 视觉模型（可选） |
 | 子 agent 编队 | `agents` 元工具的 `run`：DAG 依赖调度（`depends_on` 拓扑分层，前驱产出注入后继），独立编队卡实时反馈每个子 agent |
 | 自创 agent | `agents(action="create")` 写 `~/.connectclaw/agents/*.md`（自然语言定义），当轮即可 `run`，也可在 DAG 里用 `agent:` 编排 |
 | Markdown 回复 | 支持表格、加粗、代码块等 GFM 格式 |
@@ -79,11 +81,11 @@ cp .env.template .env
 
 ```
 connectclaw/
-├── provider/     LLM API 抽象（DeepSeek + Embedding + Rerank）
+├── provider/     LLM API 抽象（DeepSeek + tokenizer + Embedding + Rerank）
 ├── agent/        Agent 框架 + 双循环引擎
 │   └── harness/  编排器 · 会话 · 压缩 · RAG · Prompt
 ├── coding/       应用层
-│   ├── tools/     所有工具（read/write/bash/web_search/web_fetch/image_analyze/agents/named_agents/subagent/lightpanda）
+│   ├── tools/     所有工具（read/write/bash/web_search/web_fetch/attach_image/image_analyze/agents/named_agents/subagent/lightpanda）
 │   └── safety/    三层沙箱
 ├── channel/      飞书 IM 接入
 ├── memory/       分层记忆（SQLite，可选，无感提取/检索/做梦）

@@ -12,6 +12,8 @@
 - 压缩管道改为 entry-based + `before_compact` hook（§九）
 - 压缩预算加固：tiktoken 真实分词（CJK 感知回退）、预算贴合 keep window、benefit guard、摘要/文件列表上限（§九）
 - 记忆检索加入新鲜度加成 + 自动 importance 提升 + `force_learn`（§十四）
+- **多模态：图片阅后即弃 + 按需重挂**（`attach_image` 工具 + `image_ref` 轻量块，§6.5）；token 估算迁入 `provider/tokenizer.py`（tiktoken + 固定每图成本）
+- **代理仅走模型 API**：新增 `[proxy]` 配置段，LLM + vision 通过代理，飞书 SDK / 浏览器不走（§十三）
 
 ## 一、项目定位
 
@@ -55,8 +57,9 @@ connectclaw/
 │
 ├── provider/                  # LLM API 抽象层
 │   ├── types.py               # Message / Model / Context / StreamEvent + normalize_message()
-│   ├── deepseek.py            # DeepSeekProvider (OpenAI SDK)
-│   ├── stream.py              # stream_simple() 异步流式生成器
+│   ├── tokenizer.py           # tiktoken 真实分词 (CJK 回退) + 固定每图成本估算
+│   ├── deepseek.py            # DeepSeekProvider (OpenAI SDK) + 图片当轮解析/历史降级
+│   ├── stream.py              # stream_simple() 异步流式生成器 (proxy 感知, 客户端缓存)
 │   ├── embedding.py           # BGE-M3 嵌入 (懒加载)
 │   └── rerank.py              # BGE-Reranker-v2-m3 重排序 (懒加载)
 │
@@ -99,7 +102,8 @@ connectclaw/
 │   │   ├── hash_edit.py       # 哈希锚定改 (replace/append/prepend/replace_text, 读快照校验)
 │   │   ├── bash.py            # Shell 执行 (BashGuard 三级 + 三层沙箱)
 │   │   ├── web_search.py      # Lightpanda 无头浏览器，Bing 引擎，免费
-│   │   ├── image_analyze.py   # 子agent: Mimo 视觉分析
+│   │   ├── image_analyze.py   # 子agent: Mimo 视觉分析 (非默认工具，[vision] 启用 + 代理)
+│   │   ├── attach_image.py    # 图片按需重挂 (AttachmentStore + manifest + attach_image 工具)
 │   │   ├── memory.py          # agent 可用记忆工具 (search / soften 软遗忘, persona 受保护)
 │   │   ├── agents.py          # agents 元工具 (list/describe/run/create) — 子 agent 编队 + DAG
 │   │   ├── named_agents.py    # 命名 agent 加载 (~/.connectclaw/agents/*.md)
@@ -222,7 +226,8 @@ outer: while (有 follow-up 消息):
 | `bash` | 执行 shell 命令 | BashGuard 三级 + 三层沙箱 |
 | `web_search` | Lightpanda 无头浏览器 + Bing 引擎搜索 | 免费，无需 API key |
 | `web_fetch`  | Lightpanda 无头浏览器抓取 URL 纯文本 | 免费，无需 API key |
-| `image_analyze` | Mimo 视觉模型分析图片 | API key 可选 |
+| `image_analyze` | Mimo 视觉模型分析图片（**非默认工具**，`[vision]` 配置仍有；请求走模型代理） | API key 可选 |
+| `attach_image` | 把历史图片重新挂进当轮上下文（阅后即弃策略的按需重挂通道） | 只读附件目录 |
 | `memory` | agent 自动作记忆 (search / forget 软遗忘) | persona 级记忆受保护，只能 /forget id 显式删 |
 
 ### 6.2 编排工具
@@ -244,7 +249,7 @@ agents(action="run", tasks=[
 ```
 每次 handle_message():
   _refresh_tools()
-    → base: [read, write, hash_read, hash_edit, bash, web_search, web_fetch, image_analyze, memory]
+    → base: [read, write, hash_read, hash_edit, bash, web_search, web_fetch, attach_image, memory]
     → agents: 元工具 (list/describe/run/create)，单实例常驻
     → 返回完整列表 (可在 config.agent.tools 白名单裁剪，缺省暴露全部)
     → harness.set_tools(最新列表)
@@ -270,6 +275,16 @@ hash_edit  → 编辑指令携带锚点 → 预检哈希 → 底向上应用 →
 **与 `write` 的互补（重要）**：hash_edit 处理精准局部修改；当 JSON 编辑失败或需要大段重写时，模型退到 `write` 全文原子写入。两路都通，不让模型在单个编辑通道上死磕。实际使用中 hash_edit 的精确编辑 + write 的全文降级配合良好。
 
 **实现位置**：`hashline/`（hash/parse/apply/snapshot/guard/diff_util/format/merge/config）+ 工具 `hash_read.py` / `hash_edit.py`。
+
+### 6.5 图片「阅后即弃 + 按需重挂」（关键）
+
+多模态接入的前缀缓存纪律。图片**只在当轮注入**请求，会话历史中只存轻量 `image_ref`（哈希 id + 路径 + mime + 字节数，KB 级）：
+
+- **下发**：`main.py` 下载飞书图片到 `~/.connectclaw/attachments/<xxh128>.<ext>`（内容哈希命名天然去重），注册进 `AttachmentStore`（manifest.json 持久化，重启不丢），返回 `image_ref` 块直接随当轮 user 消息发出（提示文案只列 id 列表）。
+- **当轮解析**：`provider/deepseek.py` 把**最后一条 user 消息及之后**的 `image_ref` 解析成内联 `image_url` data URL（base64 按 `(path, mtime)` LRU 缓存）；更早历史降级为一行文本占位（如 `[图片 id=xxx；如需再查看请调用 attach_image]`），base64 永不进入长文本前缀。
+- **按需重挂**：模型想再看历史图时调 `attach_image`（`coding/tools/attach_image.py`），工具结果携带 image_ref，随 toolResult 后的合成 user 消息解析进当轮。tool 消息本身保持纯文本（各家 API 对 tool 消息多模态不兼容）。
+- **成本与缓存**：API 按固定每图成本计费（非 base64 长度），`estimate_image_cost()` 按字节档位估算（400/800/1200/1700，封顶 2048）。图片不常驻历史 → 每轮 token 便宜、文本前缀字节稳定 → 前缀缓存持续命中。
+- **注意**：图片只出现在 user 角色消息（tool 结果带图 = 合成 user 消息），这是故意规避各家 API 限制的约定。
 
 ## 七、沙箱系统
 
@@ -314,6 +329,7 @@ BashGuard.check(command):
 - **`first_kept_entry_id`**: 压缩时记录保留的起始消息 ID，`build_session_context()` 在该 ID 之前的消息替换为摘要、之后的消息保留原样。避免旧版暴力清空丢失多层 CompactionSummaryMessage。
 - **`before_compact` hook**: 压缩前触发，用于强制记忆提取（`force_learn()`），在原始对话细节被总结覆盖前捕获。钩子支持 async handler。
 - **Token 估算**: provider usage 作为锚点 + trailing 消息估算；单条消息用 tiktoken cl100k_base 真实分词（DeepSeek 兼容），离线回退 CJK 感知启发式。原 chars/4 对中文低估 2-4x，曾导致 keep 窗口超预算、压缩每次都不收效、每轮活锁
+- **图片块计价**: `image`/`image_ref` 块按固定每图成本 `image_block_cost()` 估算（见 `provider/tokenizer.py`）；`_serialize()` 对图片块输出 `[image id mime KB]` 占位符，历史图片不传给摘要 LLM
 - **预算贴合**: `prepare_compaction()` 给定 context_window 时，把 keep-recent 窗口收缩到压缩后（保留 + 摘要）落在 `window - reserve` 内（有界 8 次扫描，窗口下限 max(2048, keep/4)）；压缩结果附带 liberated_tokens / post_compact_estimate / fits_budget 供上层预警
 - **Benefit guard**: 无可压缩内容（切点保留全部）时返回 None，拒绝追加只增不清的无效摘要
 - **摘要上限**: 最终摘要硬 cap `reserve*0.8` token；`<conversation>` 序列化限输入预算，超限丢最旧消息并标注；文件列表截断（≤100 个文件、路径 ≤200 字符）
@@ -363,9 +379,10 @@ JSONL 树形结构，每行一个 JSON 对象：
 优先级: 环境变量 > config.toml > 默认值
 
 ~/.connectclaw/config.toml:
-  [llm]          api_key / base_url / model_id        # 替代旧 [deepseek]
+  [llm]          api_key / base_url / model_id / context_window / max_tokens / reasoning
+  [proxy]        url                                # 仅模型 API（LLM + vision）走此代理；env: CONNECTCLAW_PROXY_URL
   [feishu]       app_id / app_secret
-  [vision]       api_key / base_url / model_id        # 替代旧 [mimo]
+  [vision]       api_key / base_url / model_id      # 替代旧 [mimo]；proxy 缺省复用 [proxy].url
   [agent]        cwd / thinking_level / tools(白名单) / tool_session_idle_timeout
   [session]      dir
   [rag]          enabled / docs_dir / db_path / top_k / top_n

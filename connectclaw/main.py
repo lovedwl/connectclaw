@@ -18,6 +18,7 @@ import signal
 import sys
 
 from connectclaw.channel.feishu import FeishuChannel  # noqa: E402 — must load before asyncio loop
+from connectclaw.coding.tools.attach_image import AttachmentStore
 from connectclaw.logging import get_logger
 
 logger = get_logger(__name__)
@@ -26,30 +27,35 @@ logger = get_logger(__name__)
 async def _download_feishu_images(
     *,
     channel: FeishuChannel,
+    store: AttachmentStore,
     conversation_key: str,
     resources: list,
     message_id: str,
     max_images: int = 5,
 ) -> list[dict]:
-    """Download Feishu images to local cache.
+    """Download Feishu images into the attachments dir and register them.
 
-    Saves images to ``~/.cache/cc/i/`` with short sequential names
-    (1.png, 2.jpg, ...).  Returns a list of dicts with path, mime_type,
-    and size_bytes for each successfully downloaded image.
+    Files land in ``~/.connectclaw/attachments/<xxh128>.<ext>`` — content-hash
+    names dedupe repeats across messages — and each is registered with the
+    in-process AttachmentStore so the ``attach_image`` tool can re-attach it on
+    a later turn. Returns a list of image_ref content blocks for this turn.
     """
+    from connectclaw.coding.tools.attach_image import make_image_ref
     from connectclaw.coding.tools.image_analyze import MIME_TO_EXT, detect_mime_type
+
+    import xxhash
 
     image_resources = [r for r in resources if r.type == "image"]
     if not image_resources:
         return []
 
-    cache_dir = os.path.expanduser("~/.cache/cc/i")
-    os.makedirs(cache_dir, exist_ok=True)
+    attachments_dir = os.path.join(os.path.expanduser("~/.connectclaw"), "attachments")
+    os.makedirs(attachments_dir, exist_ok=True)
 
     overflow = len(image_resources) - max_images
     to_process = image_resources[:max_images]
 
-    saved = []
+    refs: list[dict] = []
     for i, res in enumerate(to_process):
         file_key = res.file_key
         if not file_key:
@@ -73,27 +79,25 @@ async def _download_feishu_images(
 
         mime_type = detect_mime_type(image_data)
         ext = MIME_TO_EXT.get(mime_type, ".png")
-        filename = f"{len(saved) + 1}{ext}"
-        filepath = os.path.join(cache_dir, filename)
+        image_id = xxhash.xxh128(image_data).hexdigest()
+        filepath = os.path.join(attachments_dir, f"{image_id}{ext}")
 
-        with open(filepath, "wb") as f:
-            f.write(image_data)
+        # Content-hash name makes this idempotent: re-sent images are no-ops.
+        if not os.path.exists(filepath):
+            with open(filepath, "wb") as f:
+                f.write(image_data)
 
-        size_kb = len(image_data) // 1024
-        logger.info("[%s] saved image: %s (%s, %dKB)",
-                     conversation_key[:8], filepath, mime_type, size_kb)
+        item = await store.register(image_id, filepath, mime_type, len(image_data))
+        refs.append(make_image_ref(item))
 
-        saved.append({
-            "path": f"~/.cache/cc/i/{filename}",
-            "mime_type": mime_type,
-            "size_bytes": len(image_data),
-        })
+        logger.info("[%s] saved image: id=%s (%s, %dKB)",
+                     conversation_key[:8], image_id, mime_type, len(image_data) // 1024)
 
     if overflow > 0:
         logger.info("[%s] %d image(s) skipped (max %d)",
                      conversation_key[:8], overflow, max_images)
 
-    return saved
+    return refs
 
 
 def _parse_args(argv: list[str]) -> dict:
@@ -230,28 +234,30 @@ async def main(argv: list[str] | None = None) -> None:
         live_card_callbacks: dict | None = None,
         **kwargs,
     ) -> str | None:
-        # Download and cache Feishu images before agent processing
+        # Download and register Feishu images before agent processing. They are
+        # attached to this turn's user message as image_ref blocks (and recorded
+        # in the attachments manifest so attach_image can re-attach them later).
         resources = kwargs.get("resources") or []
         message_id = kwargs.get("message_id", "")
+        images: list[dict] | None = None
 
         if resources:
             saved_images = await _download_feishu_images(
                 channel=channel,
+                store=coding_agent.attachment_store,
                 conversation_key=conversation_key,
                 resources=resources,
                 message_id=message_id,
                 max_images=config.agent.max_images,
             )
             if saved_images:
+                images = saved_images
+                ids = ", ".join(img["id"] for img in saved_images)
                 parts = [text] if text else []
-                parts.append("---")
-                if len(saved_images) == 1:
-                    parts.append("用户发送了 1 张图片，可使用 image_analyze 工具查看：")
-                else:
-                    parts.append(f"用户发送了 {len(saved_images)} 张图片，可使用 image_analyze 工具查看：")
-                for img in saved_images:
-                    size_kb = img["size_bytes"] // 1024
-                    parts.append(f"- {img['path']} ({img['mime_type']}, {size_kb}KB)")
+                parts.append(
+                    f"---\n图片已直接附加到上下文（id: {ids}）。"
+                    f"需要再次查看历史图片时可使用 attach_image 工具。"
+                )
                 text = "\n".join(parts)
 
         logger.info("[%s] User: %s", conversation_key[:8], text[:100])
@@ -266,7 +272,9 @@ async def main(argv: list[str] | None = None) -> None:
             return command_result
 
         try:
-            response = await coding_agent.handle_message(conversation_key, text, live_card_callbacks)
+            response = await coding_agent.handle_message(
+                conversation_key, text, live_card_callbacks, images=images
+            )
             if response:
                 logger.info("[%s] Assistant: %s", conversation_key[:8], response[:100])
             return response

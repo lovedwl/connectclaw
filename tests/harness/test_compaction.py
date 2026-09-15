@@ -68,6 +68,31 @@ def test_estimate_tokens_tolerates_non_dict_content_blocks():
     assert estimate_tokens({"role": "toolResult", "content": [{"text": "ok"}, 42]}) >= 1
 
 
+# ── 1b. Image blocks (use-then-drop policy) ─────────────────────
+
+
+def test_estimate_tokens_counts_image_blocks():
+    # image/image_ref blocks count at a fixed per-image cost (not chars/4),
+    # so a branch with images must price them in.
+    img = {"type": "image_ref", "id": "x", "path": "/none", "mime_type": "image/png", "size": 100 * 1024}
+    est = estimate_tokens({"role": "user", "content": [{"type": "text", "text": "hi"}, img]})
+    assert est >= 800  # 800 = image tier for 100KB
+    est_r = estimate_tokens({"role": "toolResult", "content": [img]})
+    assert est_r >= 800
+
+
+def test_serialize_image_placeholder():
+    msgs = [{
+        "role": "user",
+        "content": [{"type": "text", "text": "look at this"},
+                    {"type": "image_ref", "id": "abc", "path": "/none",
+                     "mime_type": "image/png", "size": 128 * 1024}],
+    }]
+    out = _serialize(msgs)
+    assert "[image abc image/png 128KB]" in out
+    assert "look at this" in out
+
+
 # ── 2. Benefit guard ──────────────────────────────────────────
 
 

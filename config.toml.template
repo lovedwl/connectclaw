@@ -8,6 +8,17 @@ api_key = "${LLM_API_KEY}"
 base_url = "https://api.deepseek.com"
 # Model ID to use
 model_id = "deepseek-chat"
+# Context window and max output tokens (used for compaction budgets / summarizer caps)
+# context_window = 65536
+# max_tokens = 8192
+# Model is a reasoning model (offers thinking blocks when [agent].thinking_level != off)
+# reasoning = true
+
+[proxy]
+# Outbound proxy for MODEL APIs only (LLM + retained vision). Feishu SDK,
+# Lightpanda/browser, and other outbound consumers deliberately do NOT go
+# through this. Env override: CONNECTCLAW_PROXY_URL.
+url = ""
 
 [feishu]
 # Feishu/Lark app ID (required)
@@ -22,6 +33,8 @@ api_key = "${VISION_API_KEY}"
 base_url = ""
 # Vision model ID
 model_id = ""
+# Vision is a model API too: it uses [proxy].url by default. Override with:
+# proxy = "http://127.0.0.1:7980/"
 
 [agent]
 # Working directory (default: current directory)
@@ -33,7 +46,7 @@ thinking_level = "off"
 # `agents` meta-tool, so a newly created agent is usable the same turn and the
 # tools array stays byte-stable (prefix cache). Omit this line to expose all.
 # Unknown names are dropped (warning); empty resolves to ["read","bash"].
-tools = ["read", "write", "hash_read", "hash_edit", "bash", "web_search", "web_fetch", "image_analyze"]
+tools = ["read", "write", "hash_read", "hash_edit", "bash", "web_search", "web_fetch", "attach_image"]
 # Idle seconds before a stateful scripted-tool session (e.g. the browser) is reaped.
 tool_session_idle_timeout = 300
 

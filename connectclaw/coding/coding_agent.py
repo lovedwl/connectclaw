@@ -24,6 +24,7 @@ from connectclaw.memory import MemorySubsystem
 from connectclaw.memory.subsystem import MemoryConfig as MemCfg
 from connectclaw.provider.types import Model
 
+from .tools.attach_image import AttachImageTool, AttachmentStore
 from .tools.agents import create_agents_tool
 from .tools.bash import BashGuard, create_bash_tool
 from .tools.hash_edit import create_hash_edit_tool
@@ -54,9 +55,10 @@ class CodingAgent:
             provider="openai-compatible",
             base_url=config.llm.base_url,
             api="openai-compatible",
-            reasoning=True,
-            context_window=65536,
-            max_tokens=8192,
+            reasoning=config.llm.reasoning,
+            context_window=config.llm.context_window,
+            max_tokens=config.llm.max_tokens,
+            proxy=config.proxy.url,
         )
 
         # Create base tools (always available)
@@ -81,7 +83,14 @@ class CodingAgent:
             base_url=config.vision.base_url,
             model_id=config.vision.model_id,
             cwd=config.agent.cwd,
+            proxy=config.vision.proxy,
         )
+        # Image attach registry: main.py registers downloaded images here and
+        # the model re-attaches any of them to the current turn via the tool.
+        self._attachment_store = AttachmentStore(
+            os.path.join(os.path.expanduser("~/.connectclaw"), "attachments")
+        )
+        self._attach_image_tool = AttachImageTool(self._attachment_store)
 
         # RAG subsystem (optional, lazy init)
         self._rag = RAGSubsystem(
@@ -128,7 +137,8 @@ class CodingAgent:
             for t in [
                 self._read_tool, self._write_tool, self._hash_read_tool,
                 self._hash_edit_tool, self._bash_tool, self._web_search_tool,
-                self._web_fetch_tool, self._image_tool, self._memory_tool,
+                self._web_fetch_tool, self._image_tool, self._attach_image_tool,
+                self._memory_tool,
             ]
         }
         # The single `agents` meta-tool: list / describe / run / create. Every
@@ -186,6 +196,11 @@ class CodingAgent:
     def prompt_builder(self) -> PromptBuilder:
         return self._prompt_builder
 
+    @property
+    def attachment_store(self) -> AttachmentStore:
+        """Registry of downloaded images; main.py registers new ones here."""
+        return self._attachment_store
+
     # ── Dynamic Tool Refresh ────────────────────────────────
 
     def _refresh_tools(self) -> list[AgentTool]:
@@ -238,9 +253,15 @@ class CodingAgent:
     # ── Conversation Management ─────────────────────────────
 
     async def handle_message(
-        self, conversation_key: str, text: str, live_card_callbacks: dict[str, Any] | None = None
+        self, conversation_key: str, text: str, live_card_callbacks: dict[str, Any] | None = None,
+        images: list[dict] | None = None,
     ) -> str | None:
-        """Handle an incoming message."""
+        """Handle an incoming message.
+
+        ``images`` are image_ref content blocks (path + mime + size) attached
+        directly to this turn's user message; the provider resolves them to
+        inline data URLs for this turn only (use-then-drop, see attach_image).
+        """
         # Track this task so /stop can cancel it
         task = asyncio.current_task()
         if task is not None:
@@ -251,7 +272,9 @@ class CodingAgent:
             self._running_tasks[conversation_key] = task
 
         try:
-            return await self._handle_message_impl(conversation_key, text, live_card_callbacks)
+            return await self._handle_message_impl(
+                conversation_key, text, live_card_callbacks, images
+            )
         except asyncio.CancelledError:
             logger.info("[%s] Task cancelled by /stop", conversation_key[:8])
             return "⏹ Interrupted."
@@ -260,7 +283,8 @@ class CodingAgent:
                 del self._running_tasks[conversation_key]
 
     async def _handle_message_impl(
-        self, conversation_key: str, text: str, live_card_callbacks: dict[str, Any] | None = None
+        self, conversation_key: str, text: str, live_card_callbacks: dict[str, Any] | None = None,
+        images: list[dict] | None = None,
     ) -> str | None:
         """Internal message handling — separated so handle_message can wrap it
         with task tracking and cancellation support."""
@@ -310,7 +334,7 @@ class CodingAgent:
             if context_blocks:
                 prompt_text = "\n\n".join(context_blocks) + "\n\n" + text
 
-            result = await harness.prompt(prompt_text)
+            result = await harness.prompt(prompt_text, images=images)
             if result is None:
                 return "No response generated."
 
