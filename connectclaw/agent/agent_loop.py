@@ -275,6 +275,7 @@ async def _stream_assistant_response(
         session_id=config.session_id,
         max_retries=config.max_retries,
         base_url=config.model.base_url,
+        proxy=config.model.proxy,
     ):
         event_count += 1
         if signal and signal.is_set():

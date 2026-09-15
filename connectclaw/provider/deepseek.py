@@ -1,24 +1,47 @@
 """OpenAI-compatible LLM provider."""
 
+import base64
 import json
+import os
+from functools import lru_cache
 
 from openai import AsyncOpenAI
 
 from .types import (
     AssistantMessage,
     Model,
-    StreamEvent,
     ToolDef,
 )
 
 
+@lru_cache(maxsize=64)
+def _read_base64(path: str, mtime_ns: int) -> str:
+    """Cache base64 of an attachment file, keyed by (path, mtime)."""
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode("ascii")
+
+
 class DeepSeekProvider:
-    """OpenAI-compatible provider with reasoning_content support."""
+    """OpenAI-compatible provider with reasoning_content + multimodal support."""
 
     def __init__(self, base_url: str = "https://api.deepseek.com"):
         self.base_url = base_url
 
-    def build_client(self, api_key: str, base_url: str | None = None) -> AsyncOpenAI:
+    def build_client(
+        self,
+        api_key: str,
+        base_url: str | None = None,
+        proxy: str | None = None,
+    ) -> AsyncOpenAI:
+        if proxy:
+            import httpx
+
+            http_client = httpx.AsyncClient(proxy=proxy, trust_env=False)
+            return AsyncOpenAI(
+                base_url=base_url or self.base_url,
+                api_key=api_key,
+                http_client=http_client,
+            )
         return AsyncOpenAI(base_url=base_url or self.base_url, api_key=api_key)
 
     def convert_tools(self, tools: list[ToolDef] | None) -> list[dict] | None:
@@ -37,59 +60,82 @@ class DeepSeekProvider:
         ]
 
     def convert_messages(self, messages: list) -> list[dict]:
-        """Convert ConnectClaw messages to OpenAI format."""
-        result = []
-        for m in messages:
-            role = m.role
-            if role == "user":
-                result.append(self._convert_user_message(m))
-            elif role == "assistant":
+        """Convert ConnectClaw messages to OpenAI format.
+
+        Image attach policy (prefix-cache discipline): image_ref blocks are
+        resolved to inline ``image_url`` data URLs only for the current turn —
+        the last user message and anything after it (attach_image tool
+        results). Image blocks in older history degrade to a short text
+        placeholder so base64 never sits in the long-lived text prefix that
+        the provider's prefix cache is keyed on; images are billed per turn,
+        so keeping them out of history keeps every turn cheap and the prefix
+        byte-stable.
+        """
+        last_user_idx = -1
+        for i, m in enumerate(messages):
+            if m.role == "user":
+                last_user_idx = i
+
+        result: list[dict] = []
+        for i, m in enumerate(messages):
+            resolve = i >= last_user_idx
+            if m.role == "user":
+                result.append(self._convert_user_message(m, resolve))
+            elif m.role == "assistant":
                 result.append(self._convert_assistant_message(m))
-            elif role == "toolResult":
-                result.append(self._convert_tool_result(m))
+            elif m.role == "toolResult":
+                tool_msg, image_parts = self._convert_tool_result(m, resolve)
+                result.append(tool_msg)
+                # Attached images ride in a synthetic *user* message — tool
+                # messages are text-only in the OpenAI-compatible wire format.
+                if image_parts:
+                    result.append({
+                        "role": "user",
+                        "content": [{"type": "text", "text": "[已挂载图片]"}, *image_parts],
+                    })
         return result
 
-    def _convert_user_message(self, m) -> dict:
+    # ── Per-role conversion ───────────────────────────────────
+
+    def _convert_user_message(self, m, resolve: bool = True) -> dict:
         content = m.content
         if isinstance(content, str):
             return {"role": "user", "content": content}
-        # Content is a list of blocks
         parts = []
         for block in content:
-            block_type = block.get("type", block["type"])
-            if block_type == "text":
-                parts.append({"type": "text", "text": block.get("text", block["text"])})
-            elif block_type == "image":
-                parts.append({
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:{block.get('mimeType', block['mimeType'])};base64,{block.get('data', block['data'])}"
-                    },
-                })
+            if not isinstance(block, dict):
+                parts.append({"type": "text", "text": str(block)})
+                continue
+            btype = block.get("type")
+            if btype == "text":
+                parts.append({"type": "text", "text": block.get("text", "")})
+            elif btype in ("image", "image_ref"):
+                converted = self._convert_image_block(block, resolve)
+                if converted is not None:
+                    parts.append(converted)
         return {"role": "user", "content": parts}
 
     def _convert_assistant_message(self, m) -> dict:
-        content = m.content
         msg: dict = {"role": "assistant", "content": ""}
         text_parts = []
         tool_calls = []
         thinking_parts = []
 
-        for block in content:
-            block_type = block.get("type", block["type"])
-            if block_type == "text":
-                text_parts.append(block.get("text", block["text"]))
-            elif block_type == "thinking":
-                thinking_text = block.get("thinking", block["thinking"])
-                # reasoning_content carries thinking output
-                thinking_parts.append(thinking_text)
-            elif block_type == "toolCall":
+        for block in m.content:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type")
+            if btype == "text":
+                text_parts.append(block.get("text", ""))
+            elif btype == "thinking":
+                thinking_parts.append(block.get("thinking", ""))
+            elif btype == "toolCall":
                 tool_calls.append({
-                    "id": block.get("id", block["id"]),
+                    "id": block.get("id", ""),
                     "type": "function",
                     "function": {
-                        "name": block.get("name", block["name"]),
-                        "arguments": json.dumps(block.get("arguments", block["arguments"])),
+                        "name": block.get("name", ""),
+                        "arguments": json.dumps(block.get("arguments", {})),
                     },
                 })
 
@@ -100,77 +146,57 @@ class DeepSeekProvider:
             msg["tool_calls"] = tool_calls
         return msg
 
-    def _convert_tool_result(self, m) -> dict:
-        content = m.content
+    def _convert_tool_result(self, m, resolve: bool = True) -> tuple[dict, list[dict]]:
+        """Convert a toolResult to a text-only tool message plus resolved images."""
         text = ""
-        for block in content:
-            if block.get("type", block["type"]) == "text":
-                text += block.get("text", block["text"])
+        image_parts: list[dict] = []
+        for block in m.content:
+            if not isinstance(block, dict):
+                text += str(block)
+                continue
+            btype = block.get("type")
+            if btype == "text":
+                text += block.get("text", "")
+            elif btype in ("image", "image_ref"):
+                converted = self._convert_image_block(block, resolve)
+                if converted is not None and converted.get("type") == "image_url":
+                    image_parts.append(converted)
         return {
             "role": "tool",
             "tool_call_id": m.tool_call_id,
             "content": text,
-        }
+        }, image_parts
 
-    def map_chunk_to_event(
-        self, chunk, model: Model, partial: AssistantMessage, content_index: int
-    ) -> StreamEvent | None:
-        """Map an OpenAI SSE chunk to a StreamEvent."""
-        delta = chunk.choices[0].delta if chunk.choices else None
-        if delta is None:
-            return None
-
-        # Reasoning / thinking content (DeepSeek-specific)
-        if hasattr(delta, "reasoning_content") and delta.reasoning_content:
-            reasoning = delta.reasoning_content
-            if partial.content and partial.content[-1].get("type") != "thinking":
-                partial.content.append({"type": "thinking", "thinking": ""})
-            idx = len(partial.content) - 1
-            partial.content[idx]["thinking"] += reasoning
-            return StreamEvent(
-                type="thinking_delta",
-                delta=reasoning,
-                content_index=idx,
-                partial=partial,
-            )
-
-        # Regular text content
-        if delta.content:
-            text = delta.content
-            if not partial.content or partial.content[-1].get("type") != "text":
-                partial.content.append({"type": "text", "text": ""})
-            idx = len(partial.content) - 1
-            partial.content[idx]["text"] += text
-            return StreamEvent(
-                type="text_delta",
-                delta=text,
-                content_index=idx,
-                partial=partial,
-            )
-
-        # Tool calls
-        if delta.tool_calls:
-            for tc_delta in delta.tool_calls:
-                idx = tc_delta.index
-                # Ensure the content slot exists
-                while len(partial.content) <= idx:
-                    partial.content.append({"type": "toolCall", "id": "", "name": "", "arguments": {}})
-                existing = partial.content[idx]
-                if tc_delta.id:
-                    existing["id"] = tc_delta.id
-                if tc_delta.function:
-                    if tc_delta.function.name:
-                        existing["name"] = tc_delta.function.name
-                    if tc_delta.function.arguments:
-                        existing["arguments"] = json.loads(tc_delta.function.arguments)
-                partial.content[idx] = dict(existing)
-                return StreamEvent(
-                    type="toolcall_delta",
-                    delta=json.dumps(existing.get("arguments", {})),
-                    content_index=idx,
-                    partial=partial,
-                )
-
+    def _convert_image_block(self, block: dict, resolve: bool) -> dict | None:
+        """image_ref → inline data URL for the current turn, else a placeholder."""
+        btype = block.get("type")
+        if btype == "image_ref":
+            path = block.get("path")
+            if resolve and path and os.path.exists(path):
+                mime = block.get("mime_type") or "image/png"
+                try:
+                    mtime_ns = int(os.stat(path).st_mtime_ns)
+                except OSError:
+                    mtime_ns = 0
+                data = _read_base64(path, mtime_ns)
+                return {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{data}"},
+                }
+            size_kb = int(block.get("size", 0)) // 1024
+            return {
+                "type": "text",
+                "text": f"[图片 id={block.get('id', '?')} "
+                        f"({block.get('mime_type', '?')} {size_kb}KB)；如需再查看请调用 attach_image]",
+            }
+        if btype == "image":
+            mime = block.get("mimeType") or "image/png"
+            data = block.get("data")
+            if data:  # legacy inline block — already in memory, always resolve
+                return {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{data}"},
+                }
         return None
 
 

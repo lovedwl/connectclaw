@@ -14,73 +14,18 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-import tiktoken
-
-from connectclaw.provider.types import Context, Model, UserMessage
 from connectclaw.provider.stream import stream_simple
+from connectclaw.provider.tokenizer import count_tokens, image_block_cost  # noqa: F401 (count_tokens re-exported for tests)
+from connectclaw.provider.types import Context, Model, UserMessage
 
 from ..types import AgentMessage, ThinkingLevel
 
-
 # ── Token Estimation ───────────────────────────────────────────
 #
-# Where the naive chars/4 heuristic hurt: for CJK text (DeepSeek tokenizer is
-# cl100k_base based, roughly 1 token per CJK char) chars/4 UNDER-counts by
-# ~2-4x. That silently blew up every downstream decision: the keep-recent cut
-# retained far more than `keep_recent_tokens`, so post-compaction context could
-# stay over budget and force a compaction on *every* turn — a per-turn livelock.
-#
-# We now use tiktoken's cl100k_base (DeepSeek-compatible) when available, with
-# a CJK-aware char heuristic as an offline fallback.
-
-
-def _is_cjk(ch: str) -> bool:
-    return any(
-        lo <= ch <= hi
-        for lo, hi in (
-            ("\u3040", "\u30ff"),  # Hiragana + Katakana
-            ("\u3400", "\u4dbf"),  # CJK Extension A
-            ("\u4e00", "\u9fff"),  # CJK Unified Ideographs
-            ("\uf900", "\ufaff"),  # CJK Compatibility Ideographs
-            ("\uff66", "\uff9f"),  # Halfwidth Katakana
-            ("\u3000", "\u303f"),  # CJK Symbols / Punctuation
-        )
-    )
-
-
-_tokenizer_cache: dict[str, Any] = {}
-_tokenizer_failure: Exception | None = None
-
-
-def _get_tokenizer(name: str = "cl100k_base") -> Any | None:
-    """Cached tiktoken encoding; None on any failure (e.g. offline)."""
-    global _tokenizer_failure
-    if name in _tokenizer_cache:
-        return _tokenizer_cache[name]
-    if _tokenizer_failure is not None:
-        return None
-    try:
-        enc = tiktoken.get_encoding(name)
-        _tokenizer_cache[name] = enc
-        return enc
-    except Exception as exc:  # pragma: no cover - offline / download issue
-        _tokenizer_failure = exc
-        return None
-
-
-def count_tokens(text: str) -> int:
-    """Best-effort token count: tiktoken cl100k_base, else CJK-aware heuristic."""
-    if not text:
-        return 0
-    enc = _get_tokenizer()
-    if enc is not None:
-        try:
-            return max(1, len(enc.encode(text, disallowed_special=())))
-        except Exception:
-            pass
-    cjk = sum(1 for ch in text if _is_cjk(ch))
-    other = len(text) - cjk
-    return max(1, cjk + other // 4)
+# Text token counting lives in provider/tokenizer.py (tiktoken cl100k_base,
+# CJK-aware offline fallback); image/image_ref blocks count at a fixed
+# per-image cost via image_block_cost(). Kept here per-role so cut logic and
+# budget math always have something realistic to accumulate.
 
 
 # ── Settings ───────────────────────────────────────────────────
@@ -107,38 +52,50 @@ def estimate_tokens(message: Any) -> int:
     if role == "user":
         content = msg.get("content", "")
         if isinstance(content, str):
-            chars = content
-        elif isinstance(content, list):
-            chars = "".join(
-                str(b.get("text", "")) if isinstance(b, dict) else str(b)
-                for b in content
-            )
-        else:
-            chars = str(content)
-        return max(1, count_tokens(chars))
+            return max(1, count_tokens(content))
+        if isinstance(content, list):
+            tokens = 0
+            for b in content:
+                if isinstance(b, dict) and b.get("type") in ("image", "image_ref"):
+                    tokens += image_block_cost(b)
+                else:
+                    tokens += count_tokens(
+                        str(b.get("text", "")) if isinstance(b, dict) else str(b)
+                    )
+            return max(1, tokens)
+        return max(1, count_tokens(str(content)))
 
     if role == "assistant":
         content = msg.get("content", [])
         if isinstance(content, str):
             return max(1, count_tokens(content))
-        chars = ""
+        tokens = 0
         for block in content:
-            if not isinstance(block, dict):
-                chars += str(block)
+            if isinstance(block, dict) and block.get("type") in ("image", "image_ref"):
+                tokens += image_block_cost(block)
                 continue
-            t = block.get("type", "")
+            t = block.get("type", "") if isinstance(block, dict) else ""
             if t == "text":
-                chars += str(block.get("text", ""))
+                tokens += count_tokens(str(block.get("text", "")))
             elif t == "thinking":
-                chars += str(block.get("thinking", ""))
+                tokens += count_tokens(str(block.get("thinking", "")))
             elif t == "toolCall":
-                chars += str(block.get("name", "")) + str(block.get("arguments", {}))
-        return max(1, count_tokens(chars))
+                tokens += count_tokens(str(block.get("name", "")) + str(block.get("arguments", {})))
+            else:
+                tokens += count_tokens(str(block))
+        return max(1, tokens)
 
     if role == "toolResult":
         content = msg.get("content") or []
-        chars = "".join(str(b.get("text", "")) if isinstance(b, dict) else str(b) for b in content)
-        return max(1, count_tokens(chars))
+        tokens = 0
+        for b in content:
+            if isinstance(b, dict) and b.get("type") in ("image", "image_ref"):
+                tokens += image_block_cost(b)
+            else:
+                tokens += count_tokens(
+                    str(b.get("text", "")) if isinstance(b, dict) else str(b)
+                )
+        return max(1, tokens)
 
     if role == "bashExecution":
         return max(1, count_tokens(str(msg.get("command", "")) + str(msg.get("output", ""))))
@@ -772,9 +729,20 @@ def _serialize(messages: list[Any], max_tokens: int | None = None) -> str:
         role = msg.get("role", "?")
         content = msg.get("content", "")
         if isinstance(content, list):
-            content = " ".join(
-                b.get("text", "") for b in content if b.get("type") in ("text", None)
+            text = " ".join(
+                b.get("text", "") for b in content
+                if isinstance(b, dict) and b.get("type") in ("text", None)
             )
+            images = [
+                b for b in content
+                if isinstance(b, dict) and b.get("type") in ("image", "image_ref")
+            ]
+            if images:
+                text += " " + " ".join(
+                    f"[image {b.get('id', '')} {b.get('mime_type', '')} {int(b.get('size', 0)) // 1024}KB]"
+                    for b in images
+                )
+            content = text
         command = msg.get("command", "")
         if command:
             content = f"[bash: {command[:80]}] → {content[:200]}"

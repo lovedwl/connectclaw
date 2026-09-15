@@ -83,6 +83,21 @@ class LLMConfig:
     api_key: str = ""
     base_url: str = "https://api.deepseek.com"
     model_id: str = "deepseek-chat"
+    context_window: int = 65536
+    max_tokens: int = 8192
+    reasoning: bool = True
+
+
+@dataclass
+class ProxyConfig:
+    """Outbound HTTP(S) proxy — the single config place.
+
+    Currently consumed by the model clients (LLM + retained vision only);
+    wire additional outbound consumers (feishu SDK, future USTC APIs) here as
+    they need it. Env override: CONNECTCLAW_PROXY_URL.
+    """
+
+    url: str = ""
 
 
 @dataclass
@@ -96,6 +111,8 @@ class VisionConfig:
     api_key: str = ""
     base_url: str = ""
     model_id: str = ""
+    # Vision requests ride the same model proxy as the LLM (falls back to [proxy].url).
+    proxy: str = ""
 
 
 @dataclass
@@ -111,7 +128,7 @@ class AgentConfig:
     tools: list[str] = field(
         default_factory=lambda: [
             "read", "write", "hash_read", "hash_edit",
-            "bash", "web_search", "web_fetch", "image_analyze",
+            "bash", "web_search", "web_fetch", "attach_image",
         ]
     )
 
@@ -169,6 +186,7 @@ class Config:
     llm: LLMConfig = field(default_factory=LLMConfig)
     feishu: FeishuConfig = field(default_factory=FeishuConfig)
     vision: VisionConfig = field(default_factory=VisionConfig)
+    proxy: ProxyConfig = field(default_factory=ProxyConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     session: SessionConfig = field(default_factory=SessionConfig)
     rag: RAGConfig = field(default_factory=RAGConfig)
@@ -205,6 +223,16 @@ class Config:
             model_id=os.environ.get("LLM_MODEL")
                 or os.environ.get("DEEPSEEK_MODEL")
                 or llm_raw.get("model_id", "deepseek-chat"),
+            context_window=int(llm_raw.get("context_window", 65536)),
+            max_tokens=int(llm_raw.get("max_tokens", 8192)),
+            reasoning=llm_raw.get("reasoning", True),
+        )
+
+        # Proxy (model clients today; the single place for future consumers)
+        px = raw.get("proxy", {})
+        proxy = ProxyConfig(
+            url=os.environ.get("CONNECTCLAW_PROXY_URL")
+                or _expand_env(px.get("url", "")),
         )
 
         # Feishu
@@ -234,6 +262,8 @@ class Config:
             model_id=os.environ.get("VISION_MODEL")
                 or os.environ.get("MIMO_MODEL")
                 or vision_raw.get("model_id", ""),
+            # Vision is a model API: it goes through the same [proxy] as the LLM.
+            proxy=os.environ.get("VISION_PROXY_URL") or proxy.url,
         )
 
         # Agent
@@ -315,6 +345,7 @@ class Config:
             llm=llm,
             feishu=feishu,
             vision=vision,
+            proxy=proxy,
             agent=agent,
             session=session,
             rag=rag,

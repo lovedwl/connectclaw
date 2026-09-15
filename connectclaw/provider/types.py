@@ -67,9 +67,17 @@ def normalize_message(raw: dict[str, Any] | Message) -> Message:
     # user or unknown → UserMessage
     content = raw.get("content", "")
     if isinstance(content, list):
-        content = "".join(
+        # Preserve non-text blocks (e.g. image_ref) alongside text; the old
+        # `join(text) or content` dropped image blocks whenever text existed.
+        text = "".join(
             b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"
-        ) or content
+        )
+        rest = [b for b in content if not (isinstance(b, dict) and b.get("type") == "text")]
+        if rest:
+            blocks = ([{"type": "text", "text": text}] if text else []) + rest
+            content = blocks
+        else:
+            content = text
     return UserMessage(
         content=content,
         timestamp=raw.get("timestamp", 0.0),
@@ -89,6 +97,7 @@ class Model:
     reasoning: bool = True
     context_window: int = 65536
     max_tokens: int = 8192
+    proxy: str = ""  # optional HTTP(S) proxy URL for this model's API calls
 
 
 @dataclass

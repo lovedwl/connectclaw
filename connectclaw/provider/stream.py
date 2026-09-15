@@ -36,6 +36,7 @@ async def stream_simple(
     timeout_ms: int = 300_000,
     max_retries: int = 3,
     base_url: str | None = None,
+    proxy: str | None = None,
     _provider_instance: DeepSeekProvider | None = None,
 ) -> AsyncIterator[StreamEvent]:
     """
@@ -58,15 +59,17 @@ async def stream_simple(
     provider = _provider_instance or _provider
     base = base_url or model.base_url
     key = api_key or ""
+    proxy = proxy or getattr(model, "proxy", "") or None
 
     # Reuse cached client — creating a new AsyncOpenAI per call leaks
     # httpx.AsyncClient connection pools (each ~5-10 MB).
-    cache_key = (base, key[:8] if key else "")
+    # Proxy is part of the key so switching it creates a fresh client.
+    cache_key = (base, key[:8] if key else "", proxy or "")
     async with _client_cache_lock:
         if cache_key in _client_cache:
             client = _client_cache[cache_key]
         else:
-            client = provider.build_client(key, base_url=base)
+            client = provider.build_client(key, base_url=base, proxy=proxy)
             _client_cache[cache_key] = client
 
     # Build the initial partial message
