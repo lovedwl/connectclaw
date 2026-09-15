@@ -14,10 +14,73 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+import tiktoken
+
 from connectclaw.provider.types import Context, Model, UserMessage
 from connectclaw.provider.stream import stream_simple
 
 from ..types import AgentMessage, ThinkingLevel
+
+
+# ── Token Estimation ───────────────────────────────────────────
+#
+# Where the naive chars/4 heuristic hurt: for CJK text (DeepSeek tokenizer is
+# cl100k_base based, roughly 1 token per CJK char) chars/4 UNDER-counts by
+# ~2-4x. That silently blew up every downstream decision: the keep-recent cut
+# retained far more than `keep_recent_tokens`, so post-compaction context could
+# stay over budget and force a compaction on *every* turn — a per-turn livelock.
+#
+# We now use tiktoken's cl100k_base (DeepSeek-compatible) when available, with
+# a CJK-aware char heuristic as an offline fallback.
+
+
+def _is_cjk(ch: str) -> bool:
+    return any(
+        lo <= ch <= hi
+        for lo, hi in (
+            ("\u3040", "\u30ff"),  # Hiragana + Katakana
+            ("\u3400", "\u4dbf"),  # CJK Extension A
+            ("\u4e00", "\u9fff"),  # CJK Unified Ideographs
+            ("\uf900", "\ufaff"),  # CJK Compatibility Ideographs
+            ("\uff66", "\uff9f"),  # Halfwidth Katakana
+            ("\u3000", "\u303f"),  # CJK Symbols / Punctuation
+        )
+    )
+
+
+_tokenizer_cache: dict[str, Any] = {}
+_tokenizer_failure: Exception | None = None
+
+
+def _get_tokenizer(name: str = "cl100k_base") -> Any | None:
+    """Cached tiktoken encoding; None on any failure (e.g. offline)."""
+    global _tokenizer_failure
+    if name in _tokenizer_cache:
+        return _tokenizer_cache[name]
+    if _tokenizer_failure is not None:
+        return None
+    try:
+        enc = tiktoken.get_encoding(name)
+        _tokenizer_cache[name] = enc
+        return enc
+    except Exception as exc:  # pragma: no cover - offline / download issue
+        _tokenizer_failure = exc
+        return None
+
+
+def count_tokens(text: str) -> int:
+    """Best-effort token count: tiktoken cl100k_base, else CJK-aware heuristic."""
+    if not text:
+        return 0
+    enc = _get_tokenizer()
+    if enc is not None:
+        try:
+            return max(1, len(enc.encode(text, disallowed_special=())))
+        except Exception:
+            pass
+    cjk = sum(1 for ch in text if _is_cjk(ch))
+    other = len(text) - cjk
+    return max(1, cjk + other // 4)
 
 
 # ── Settings ───────────────────────────────────────────────────
@@ -34,47 +97,54 @@ class CompactionSettings:
 
 
 def estimate_tokens(message: Any) -> int:
-    """Estimate token count using chars/4 heuristic, per-message-type."""
+    """Estimate token count per-message-type using the real tokenizer.
+
+    Always returns >= 1 (callers accumulate/compare with this, so 0 would skew
+    cut logic and downstream divisions)."""
     msg = _unwrap(message)
     role = msg.get("role", "")
 
     if role == "user":
         content = msg.get("content", "")
         if isinstance(content, str):
-            return max(1, len(content) // 4)
-        if isinstance(content, list):
-            chars = sum(len(str(b.get("text", ""))) for b in content)
+            chars = content
+        elif isinstance(content, list):
+            chars = "".join(
+                str(b.get("text", "")) if isinstance(b, dict) else str(b)
+                for b in content
+            )
         else:
-            chars = len(str(content))
-        return max(1, chars // 4)
+            chars = str(content)
+        return max(1, count_tokens(chars))
 
     if role == "assistant":
         content = msg.get("content", [])
         if isinstance(content, str):
-            return max(1, len(content) // 4)
-        chars = 0
+            return max(1, count_tokens(content))
+        chars = ""
         for block in content:
             if not isinstance(block, dict):
-                chars += len(str(block))
+                chars += str(block)
                 continue
             t = block.get("type", "")
             if t == "text":
-                chars += len(str(block.get("text", "")))
+                chars += str(block.get("text", ""))
             elif t == "thinking":
-                chars += len(str(block.get("thinking", "")))
+                chars += str(block.get("thinking", ""))
             elif t == "toolCall":
-                chars += len(str(block.get("name", ""))) + len(str(block.get("arguments", {})))
-        return max(1, chars // 4)
+                chars += str(block.get("name", "")) + str(block.get("arguments", {}))
+        return max(1, count_tokens(chars))
 
     if role == "toolResult":
-        chars = sum(len(str(b.get("text", ""))) for b in msg.get("content", []))
-        return max(1, chars // 4)
+        content = msg.get("content") or []
+        chars = "".join(str(b.get("text", "")) if isinstance(b, dict) else str(b) for b in content)
+        return max(1, count_tokens(chars))
 
     if role == "bashExecution":
-        return max(1, (len(str(msg.get("command", ""))) + len(str(msg.get("output", "")))) // 4)
+        return max(1, count_tokens(str(msg.get("command", "")) + str(msg.get("output", ""))))
 
     if role in ("compactionSummary", "branchSummary"):
-        return max(1, len(str(msg.get("summary", ""))) // 4)
+        return max(1, count_tokens(str(msg.get("summary", ""))))
 
     return 1
 
@@ -288,13 +358,46 @@ def _extract_file_ops(messages: list[Any]) -> FileOperations:
     return ops
 
 
+_MAX_FILES_LISTED = 100
+_MAX_FILE_PATH_CHARS = 200
+
+
 def _format_file_ops(ops: FileOperations) -> str:
+    """Render read/modified file lists, deduped and bounded.
+
+    The naive version accumulated every edited path across every compaction
+    forever (an unbounded struct that grows the summary each cycle). We now cap
+    both the number of files and the length of each path.
+    """
     parts = []
-    if ops.read:
-        parts.append("\n\n### Files Read\n" + "\n".join(f"- `{f}`" for f in sorted(ops.read)))
-    if ops.edited:
-        parts.append("\n\n### Files Modified\n" + "\n".join(f"- `{f}`" for f in sorted(ops.edited)))
+    for label, files in (("Read", ops.read), ("Modified", ops.edited)):
+        if not files:
+            continue
+        fs = sorted(files)
+        extra = ""
+        if len(fs) > _MAX_FILES_LISTED:
+            extra = f"\n- ... and {len(fs) - _MAX_FILES_LISTED} more"
+            fs = fs[:_MAX_FILES_LISTED]
+        body = "\n".join(f"- `{f[:_MAX_FILE_PATH_CHARS]}`" for f in fs)
+        parts.append(f"\n\n### Files {label}\n{body}{extra}")
     return "".join(parts)
+
+
+def _cap_summary(summary: str, max_tokens: int) -> str:
+    """Hard cap on the final summary string (LLM text + file ops).
+
+    The LLM portion is already bounded by `max_tokens` at generation time; this
+    guard catches the assembled result (e.g. the file-ops tail) so the summary
+    can never silently outgrow the keep-recent budget.
+    """
+    if not summary or max_tokens <= 0:
+        return summary
+    est = count_tokens(summary)
+    if est <= max_tokens:
+        return summary
+    char_budget = max(1, int(len(summary) * max_tokens / max(1, est)))
+    head = summary[:char_budget].rstrip()
+    return f"{head}\n[summary truncated: {est}tk > budget {max_tokens}tk]\n"
 
 
 # ── Summarization ──────────────────────────────────────────────
@@ -318,8 +421,9 @@ async def generate_summary(
     if custom_instructions:
         base_prompt = f"{base_prompt}\n\nAdditional focus: {custom_instructions}"
 
-    # Serialize messages
-    conversation_text = _serialize(messages)
+    # Serialize messages (budget-capped so this summarizer call cannot itself
+    # overflow the model window, and capped per-message via _serialize)
+    conversation_text = _serialize(messages, max_tokens=_summarize_input_budget(model, reserve_tokens))
 
     prompt_text = f"<conversation>\n{conversation_text}\n</conversation>\n\n"
     if previous_summary:
@@ -357,7 +461,7 @@ async def _generate_turn_prefix_summary(
     """Summarize a split-turn prefix."""
     max_tokens = min(int(0.5 * reserve_tokens), model.max_tokens or 4096)
 
-    conversation_text = _serialize(messages)
+    conversation_text = _serialize(messages, max_tokens=_summarize_input_budget(model, reserve_tokens))
     prompt_text = f"<conversation>\n{conversation_text}\n</conversation>\n\n{TURN_PREFIX_PROMPT}"
 
     context = Context(
@@ -393,13 +497,34 @@ class CompactionPreparation:
     tokens_before: int = 0
     previous_summary: str | None = None
     file_ops: FileOperations = field(default_factory=FileOperations)
+    # ── Hardening metadata ──
+    liberated_tokens: int = 0          # estimated tokens condensed into summary
+    post_compact_estimate: int = 0     # estimated kept + summary tokens after compaction
+    fits_budget: bool = True           # whether post-compaction fits window - reserve
 
 
 def prepare_compaction(
     entries: list[dict],
     settings: CompactionSettings,
+    context_window: int | None = None,
 ) -> CompactionPreparation | None:
-    """Prepare session entries for compaction. Returns None if not applicable."""
+    """Prepare session entries for compaction. Returns None if not applicable.
+
+    Hardening vs. the naive version:
+      * **Benefit guard**: if there is nothing to condense (the cut marker would
+        keep everything — the degenerate "add a summary, shrink nothing" case),
+        return None instead of appending a pointless compaction entry that only
+        grows the JSONL and re-triggers on every turn.
+      * **Budget fit**: when `context_window` is given, shrink the keep-recent
+        window until post-compaction context (kept messages + new summary) fits
+        `context_window - reserve_tokens`. This is the direct livelock breaker:
+        the old code kept ~`keep_recent_tokens` by a chars/4 estimate that
+        under-counted CJK 2-4x, so the window alone could exceed the budget and
+        compaction never actually shrinks the context.
+
+    The search is bounded (at most 8 cut-point scans, no LLM calls), and the
+    recent window never drops below `max(2048, keep_recent // 4)`.
+    """
     if not entries or entries[-1].get("type") == "compaction":
         return None
 
@@ -424,23 +549,55 @@ def prepare_compaction(
 
     boundary_end = len(entries)
 
-    # Calculate tokens
-    messages = [e.get("message", e) for e in entries[boundary_start:boundary_end] if e.get("type") == "message"]
-    tokens_before = calculate_context_tokens(messages)
-
-    # Find cut point
-    cut = find_cut_point(entries, boundary_start, boundary_end, settings.keep_recent_tokens)
-    first_entry = entries[cut.first_kept_entry_index]
-    first_kept_id = first_entry.get("id", "")
-    if not first_kept_id:
-        return None
-
-    # Gather messages to summarize
-    history_end = cut.turn_start_index if cut.is_split_turn else cut.first_kept_entry_index
-    msgs_to_summarize = [
-        e.get("message", e) for e in entries[boundary_start:history_end]
-        if e.get("type") == "message" and e.get("message", {}).get("role") not in ("compaction", None)
+    # Current context of the compactible window (usage-anchored when available)
+    window_msgs = [
+        e.get("message", e)
+        for e in entries[boundary_start:boundary_end]
+        if e.get("type") == "message"
     ]
+    window_tokens = calculate_context_tokens(window_msgs)
+
+    budget = (context_window - settings.reserve_tokens) if context_window else None
+    floor = max(2048, int(settings.keep_recent_tokens * 0.25))
+    summary_upper_est = max(2048, int(settings.reserve_tokens * 0.25))
+
+    keep = settings.keep_recent_tokens
+    chosen: tuple[CutPointResult, list[Any], int, int] | None = None  # cut, msgs, freed, post
+
+    for _ in range(8):
+        cut = find_cut_point(entries, boundary_start, boundary_end, keep)
+        first_entry = entries[cut.first_kept_entry_index]
+        first_kept_id = first_entry.get("id", "")
+        if not first_kept_id:
+            return None
+
+        history_end = cut.turn_start_index if cut.is_split_turn else cut.first_kept_entry_index
+        msgs = [
+            e.get("message", e) for e in entries[boundary_start:history_end]
+            if e.get("type") == "message" and e.get("message", {}).get("role") not in ("compaction", None)
+        ]
+
+        if not msgs:
+            # Degenerate: nothing to condense at this keep-width. With a budget we
+            # can dig deeper (a smaller keep window will cut real messages);
+            # otherwise there is genuinely nothing useful to do.
+            if budget is None or keep <= floor:
+                return None
+            keep = max(floor, int(keep * 0.6))
+            continue
+
+        freed = sum(estimate_tokens(m) for m in msgs)
+        summary_est = min(summary_upper_est, freed)
+        post_est = max(0, window_tokens - freed) + summary_est
+        chosen = (cut, msgs, freed, post_est)
+        if budget is None or post_est <= budget or keep <= floor:
+            break
+        keep = max(floor, int(keep * 0.6))
+
+    if chosen is None:
+        return None
+    cut, msgs_to_summarize, freed, post_est = chosen
+    first_kept_id = entries[cut.first_kept_entry_index].get("id", "")
 
     # Split-turn prefix
     turn_prefix = []
@@ -458,9 +615,12 @@ def prepare_compaction(
         messages_to_summarize=msgs_to_summarize,
         turn_prefix_messages=turn_prefix,
         is_split_turn=cut.is_split_turn,
-        tokens_before=tokens_before,
+        tokens_before=window_tokens,
         previous_summary=previous_summary,
         file_ops=file_ops,
+        liberated_tokens=freed,
+        post_compact_estimate=post_est,
+        fits_budget=(budget is None) or (post_est <= budget),
     )
 
 
@@ -472,6 +632,15 @@ class CompactionResult:
     details: dict = field(default_factory=dict)
 
 
+def _summarize_input_budget(model: Model, reserve_tokens: int) -> int:
+    """Cap `<conversation>` tokens sent to the summarizer so the summarizer's own
+    call stays well inside the model window (input + output + prompt overhead)."""
+    window = getattr(model, "context_window", 0) or 65536
+    out = min(int(0.8 * reserve_tokens), model.max_tokens or 8192)
+    overhead = int(reserve_tokens * 0.5)
+    return max(4096, window - out - overhead)
+
+
 async def compact(
     prep: CompactionPreparation,
     model: Model,
@@ -479,9 +648,10 @@ async def compact(
     api_key: str | None = None,
     custom_instructions: str | None = None,
     thinking_level: ThinkingLevel = "off",
+    settings: CompactionSettings | None = None,
 ) -> CompactionResult:
     """Run the full compaction."""
-    settings = CompactionSettings()
+    settings = settings or CompactionSettings()
 
     if prep.is_split_turn and prep.turn_prefix_messages:
         # Two-part summary: history + turn prefix
@@ -518,6 +688,7 @@ async def compact(
         )
 
     summary += _format_file_ops(prep.file_ops)
+    summary = _cap_summary(summary, int(settings.reserve_tokens * 0.8))
 
     return CompactionResult(
         summary=summary,
@@ -526,6 +697,9 @@ async def compact(
         details={
             "read_files": sorted(prep.file_ops.read),
             "modified_files": sorted(prep.file_ops.edited),
+            "liberated_tokens": prep.liberated_tokens,
+            "post_compact_estimate": prep.post_compact_estimate,
+            "fits_budget": prep.fits_budget,
         },
     )
 
@@ -585,8 +759,13 @@ def _unwrap(msg: Any) -> dict:
     return {"role": "unknown", "content": str(msg)}
 
 
-def _serialize(messages: list[Any]) -> str:
-    """Convert messages to a compact text representation."""
+def _serialize(messages: list[Any], max_tokens: int | None = None) -> str:
+    """Convert messages to a compact text representation.
+
+    When `max_tokens` is given and the serialized size exceeds it, the OLDEST
+    messages are dropped (newest preserved) with a note, so the summarizer input
+    stays bounded even for very long sessions.
+    """
     lines = []
     for msg in messages:
         msg = _unwrap(msg)
@@ -600,4 +779,21 @@ def _serialize(messages: list[Any]) -> str:
         if command:
             content = f"[bash: {command[:80]}] → {content[:200]}"
         lines.append(f"[{role}] {str(content)[:300]}")
+
+    if max_tokens and max_tokens > 0:
+        counts = [count_tokens(line) for line in lines]
+        total = sum(counts)
+        if total > max_tokens:
+            kept: list[str] = []
+            acc = 0
+            for line, c in zip(reversed(lines), reversed(counts)):
+                if kept and acc + c > max_tokens:
+                    break
+                kept.append(line)
+                acc += c
+            kept.reverse()
+            dropped = len(lines) - len(kept)
+            if dropped:
+                lines = [f"[note] oldest {dropped} messages dropped to fit {max_tokens}tk summarize input"] + kept
+
     return "\n".join(lines)

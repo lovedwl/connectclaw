@@ -10,6 +10,7 @@
 - Agent 自带记忆管理工具 `tools/memory.py`（search / soft-forget）
 - 配置去 vendor：`[llm]/[vision]` 替代 `[deepseek]/[mimo]`（§十三）
 - 压缩管道改为 entry-based + `before_compact` hook（§九）
+- 压缩预算加固：tiktoken 真实分词（CJK 感知回退）、预算贴合 keep window、benefit guard、摘要/文件列表上限（§九）
 - 记忆检索加入新鲜度加成 + 自动 importance 提升 + `force_learn`（§十四）
 
 ## 一、项目定位
@@ -312,7 +313,10 @@ BashGuard.check(command):
 - **异步管道**: 全异步调用链——`prepare_compaction()`（纯索引，不阻塞）→ `entry_based_compact()`（async LLM 总结）→ `session.append_compaction()`（async I/O 持久化）
 - **`first_kept_entry_id`**: 压缩时记录保留的起始消息 ID，`build_session_context()` 在该 ID 之前的消息替换为摘要、之后的消息保留原样。避免旧版暴力清空丢失多层 CompactionSummaryMessage。
 - **`before_compact` hook**: 压缩前触发，用于强制记忆提取（`force_learn()`），在原始对话细节被总结覆盖前捕获。钩子支持 async handler。
-- **Token 估算**: provider usage 作为锚点 + trailing 消息估算（比纯 chars/4 精确得多）
+- **Token 估算**: provider usage 作为锚点 + trailing 消息估算；单条消息用 tiktoken cl100k_base 真实分词（DeepSeek 兼容），离线回退 CJK 感知启发式。原 chars/4 对中文低估 2-4x，曾导致 keep 窗口超预算、压缩每次都不收效、每轮活锁
+- **预算贴合**: `prepare_compaction()` 给定 context_window 时，把 keep-recent 窗口收缩到压缩后（保留 + 摘要）落在 `window - reserve` 内（有界 8 次扫描，窗口下限 max(2048, keep/4)）；压缩结果附带 liberated_tokens / post_compact_estimate / fits_budget 供上层预警
+- **Benefit guard**: 无可压缩内容（切点保留全部）时返回 None，拒绝追加只增不清的无效摘要
+- **摘要上限**: 最终摘要硬 cap `reserve*0.8` token；`<conversation>` 序列化限输入预算，超限丢最旧消息并标注；文件列表截断（≤100 个文件、路径 ≤200 字符）
 - **合法切分点**: user 消息、branch summary、compaction（不切 toolResult 和 mid-turn）
 - **Split-turn**: 超过预算的单轮拆分为前缀摘要 + 保留后缀
 - **增量摘要**: `UPDATE_SUMMARIZATION_PROMPT` 合并进已有摘要

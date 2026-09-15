@@ -228,7 +228,9 @@ class AgentHarness:
                 api_key = result
 
         entries_dicts = [asdict(e) for e in entries]
-        prep = prepare_compaction(entries_dicts, self._compaction_settings)
+        prep = prepare_compaction(
+            entries_dicts, self._compaction_settings, context_window=self._model.context_window
+        )
         if not prep:
             return {"summary": None, "tokens_before": 0}
 
@@ -237,6 +239,7 @@ class AgentHarness:
             api_key=api_key,
             custom_instructions=custom_instructions,
             thinking_level=self._thinking_level,
+            settings=self._compaction_settings,
         )
 
         if result:
@@ -293,17 +296,30 @@ class AgentHarness:
 
             # Use entry-based pipeline so first_kept_entry_id is properly set
             entries_dicts = [asdict(e) for e in entries]
-            prep = prepare_compaction(entries_dicts, self._compaction_settings)
+            prep = prepare_compaction(
+                entries_dicts,
+                self._compaction_settings,
+                context_window=self._model.context_window,
+            )
             if prep:
                 result = await entry_based_compact(
                     prep, self._model,
                     api_key=compaction_api_key,
                     thinking_level=self._thinking_level,
+                    settings=self._compaction_settings,
                 )
                 if result:
                     await self._session.append_compaction(
                         result.summary, result.first_kept_entry_id, result.tokens_before
                     )
+                    if not prep.fits_budget:
+                        logger.warning(
+                            "compaction under-delivered: freed~%d, post-compact est~%d "
+                            "(budget %d) — recent window at floor; summary may still be large",
+                            prep.liberated_tokens,
+                            prep.post_compact_estimate,
+                            self._model.context_window - self._compaction_settings.reserve_tokens,
+                        )
                     # Rebuild context after compaction
                     entries = await self._session.get_path_to_root()
                     ctx = build_session_context(entries)
