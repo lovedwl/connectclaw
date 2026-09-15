@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import contextlib
+import html.parser
 import json
 import os
 import re
@@ -475,8 +476,95 @@ async def _run_stateless(action) -> str:
     )
 
 
-async def fetch_once(url: str, max_chars: int = 8000) -> str:
-    """Stateless: open a fresh page, navigate, read markdown. Crash-recovering."""
+# ── plain-HTTP fast path (web_fetch) ─────────────────────────
+#
+# Many pages are static enough that opening a browser session is wasted work:
+# GET the page, strip HTML → visible text. Only fall back to the browser engine
+# when the fast path yields nothing usable (JS-rendered shells, non-HTML,
+# network errors). Keeps web_fetch fast on the common path and usable even if
+# Lightpanda isn't installed.
+
+_FASTPATH_MIN_CHARS = 200
+_FASTPATH_TIMEOUT = 12.0
+_HTTP_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0 Safari/537.36"
+)
+
+
+class _HTMLTextExtractor(html.parser.HTMLParser):
+    """Dependency-free HTML → visible text (skips script/style/noscript/etc)."""
+
+    _SKIP_TAGS = {"script", "style", "noscript", "template", "svg", "head"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._skip = 0
+        self._chunks: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self._SKIP_TAGS:
+            self._skip += 1
+        elif tag in ("p", "div", "h1", "h2", "h3", "h4", "li", "br", "tr"):
+            self._chunks.append("\n")
+
+    def handle_startendtag(self, tag, attrs):
+        if tag == "br":
+            self._chunks.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in self._SKIP_TAGS and self._skip:
+            self._skip -= 1
+
+    def handle_data(self, data):
+        if not self._skip:
+            self._chunks.append(data)
+
+
+def _html_to_text(html_text: str) -> str:
+    parser = _HTMLTextExtractor()
+    parser.feed(html_text)
+    parser.close()
+    return _collapse("".join(parser._chunks))
+
+
+async def http_fetch_once(url: str, max_chars: int = 8000, timeout: float = _FASTPATH_TIMEOUT) -> str:
+    """Plain-HTTP page fetch (no browser).
+
+    Returns '' — not raises — when the response isn't usable as page text
+    (non-HTML content, HTTP errors, JS-rendered shell), so the caller can fall
+    back to the browser engine.
+    """
+    headers = {"User-Agent": _HTTP_USER_AGENT}
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=True, timeout=timeout, headers=headers
+        ) as client:
+            resp = await client.get(url)
+    except Exception:
+        return ""
+    if resp.status_code >= 400:
+        return ""
+    ctype = (resp.headers.get("content-type") or "").lower()
+    if ctype and "html" not in ctype and "text/plain" not in ctype:
+        return ""
+    text = _cap(_html_to_text(resp.text), max_chars)
+    # Tiny content WITH scripts is the classic JS-app shell signature — the
+    # server sent a loader, the real text renders client-side. Hand those (and
+    # empty results) to the browser engine; genuinely small static pages come
+    # back as-is instead of paying for a browser session.
+    if len(text.strip()) < _FASTPATH_MIN_CHARS and "<script" in resp.text.lower():
+        return ""
+    return text
+
+
+async def fetch_once(url: str, max_chars: int = 8000, http_timeout: float = _FASTPATH_TIMEOUT) -> str:
+    """Stateless page fetch: plain-HTTP fast path first (most static pages need
+    no browser), then a real browser session for JS-rendered pages."""
+    text = await http_fetch_once(url, max_chars, timeout=http_timeout)
+    if text.strip():
+        return text
+
     async def _do(eng: LightpandaEngine, sid: str) -> str:
         await eng.navigate(sid, url)
         return _cap(await eng.read_markdown(sid), max_chars)
