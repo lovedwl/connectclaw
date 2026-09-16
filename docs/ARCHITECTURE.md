@@ -289,14 +289,14 @@ hash_edit  → 编辑指令携带锚点 → 预检哈希 → 底向上应用 →
 
 ## 七、沙箱系统
 
-设计（2026-09 重构）：**沙箱只提供隔离，不做资源限制**。`RLIMIT_AS` 会把整个工具链打废（node/V8、JVM、Go 都要预留大块虚拟地址空间，512MB 直接 OOM），却挡不住危险命令——风险控制因此落在两处：BashGuard（危险指令门禁）+ 沙箱（爆炸半径隔离，只读根 + 项目可写 + 私有 /tmp）。**网络默认开放**，不再逐命令授权。
+设计（2026-09 重构）：**沙箱只提供隔离，不做资源限制**。`RLIMIT_AS` 会把整个工具链打废（node/V8、JVM、Go 都要预留大块虚拟地址空间，512MB 直接 OOM），却挡不住危险命令——风险控制因此落在两处：BashGuard（危险指令门禁）+ 沙箱（爆炸半径隔离，**系统路径只读 + `$HOME` 与系统 `/tmp` 可写**）。**网络默认开放**，不再逐命令授权。`$HOME` 与 `/tmp` 可写（且跨命令持久）让 curl 保存、pip --user、npm -g、仓库内测试缓存、临时文件都像普通 shell 一样自然工作——沙箱防的是祸害系统，不是防你自己目录里的正常操作。
 
 三层自动降级：
 
 | 层 | 实现 | 文件隔离 | 网络 | 依赖 |
 |---|------|---------|------|------|
-| 1 | BwrapSandbox | `--ro-bind / /` 全局只读 + `--bind $cwd` 项目可写 | 开放 | bubblewrap |
-| 2 | NamespaceSandbox | unshare --mount + tmpfs | 开放 | util-linux |
+| 1 | BwrapSandbox | `--ro-bind / /` 系统只读 + `--bind $HOME` 与 `/tmp` 可写（跨命令持久） | 开放 | bubblewrap |
+| 2 | NamespaceSandbox | unshare --mount（`$HOME`/`/tmp` 不限） | 开放 | util-linux |
 | 3 | DirectSandbox | 无隔离（兜底） | 开放 | 无 |
 
 授权只针对危险动作（不再有 Network Access / Sandbox Escape 卡片）：
