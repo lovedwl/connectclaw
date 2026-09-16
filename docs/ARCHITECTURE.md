@@ -115,8 +115,9 @@ connectclaw/
 │       └── shellpath.py       # 用户交互 PATH 捕获（注入 bash / skills bin 检测）
 │
 ├── channel/                   # IM 接入层
-│   ├── base.py                # Channel 抽象接口
-│   └── feishu.py              # 飞书实现 (lark_oapi.channel.FeishuChannel + CardKit 流式 + 卡片授权)
+│   ├── base.py                # Channel 抽象接口（含 outbound 媒体能力声明）
+│   ├── capabilities.py        # channel 能力型 AgentTool（send_file 等，只绑定 Channel ABC）
+│   └── feishu.py              # 飞书实现 (lark_oapi.channel.FeishuChannel + CardKit 流式 + 卡片授权 + 媒体发送)
 │
 ├── memory/                    # 分层记忆子系统 (可选，SQLite 单文件，无感)
 │   ├── types.py               # MemoryEntry / MemoryType (semantic/episodic/procedural)
@@ -229,6 +230,7 @@ outer: while (有 follow-up 消息):
 | `web_fetch`  | Lightpanda 无头浏览器抓取 URL 纯文本 | 免费，无需 API key |
 | `image_analyze` | Mimo 视觉模型分析图片（**非默认工具**，`[vision]` 配置仍有；请求走模型代理） | API key 可选 |
 | `attach_image` | 把历史图片重新挂进当轮上下文（阅后即弃策略的按需重挂通道） | 只读附件目录 |
+| `send_file` | 把本地文件/图片发给用户（绑定 `Channel` ABC 的 channel 能力工具，见 `channel/capabilities.py`；飞书实现 upload_media → image/file 消息） | 仅发送，读取本地文件 |
 | `memory` | agent 自动作记忆 (search / forget 软遗忘) | persona 级记忆受保护，只能 /forget id 显式删 |
 
 ### 6.2 编排工具

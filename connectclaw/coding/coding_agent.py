@@ -18,6 +18,7 @@ from connectclaw.agent.harness.prompt_builder import PromptBuilder
 from connectclaw.agent.harness.rag.subsystem import RAGConfig, RAGSubsystem
 from connectclaw.agent.harness.session import SessionRepo
 from connectclaw.agent.types import AgentTool
+from connectclaw.channel.capabilities import create_send_file_tool
 from connectclaw.channel.feishu import FeishuChannel
 from connectclaw.config import Config
 from connectclaw.memory import MemorySubsystem
@@ -96,6 +97,15 @@ class CodingAgent:
         self._skills_store = SkillStore(os.path.expanduser(config.skills.dir))
         self._skills_tool = SkillsTool(self._skills_store)
 
+        # File delivery: channel capability tool (channel/capabilities.py) so
+        # the agent can hand the user a produced file/image; binds the live
+        # channel + active chat at call time, no Feishu specifics here.
+        self._active_chat = ""
+        self._send_file_tool = create_send_file_tool(
+            channel_provider=lambda: self._channel,
+            chat_provider=lambda: self._active_chat,
+        )
+
         # RAG subsystem (optional, lazy init)
         self._rag = RAGSubsystem(
             RAGConfig(
@@ -142,7 +152,7 @@ class CodingAgent:
                 self._read_tool, self._write_tool, self._hash_read_tool,
                 self._hash_edit_tool, self._bash_tool, self._web_search_tool,
                 self._web_fetch_tool, self._image_tool, self._attach_image_tool,
-                self._skills_tool, self._memory_tool,
+                self._skills_tool, self._send_file_tool, self._memory_tool,
             ]
         }
         # The single `agents` meta-tool: list / describe / run / create. Every
@@ -274,6 +284,9 @@ class CodingAgent:
             if prev is not None and not prev.done():
                 prev.cancel()
             self._running_tasks[conversation_key] = task
+        # The active chat for outbound tools (send_file). With per-chat
+        # serialization upstream, this is unambiguous during a turn.
+        self._active_chat = conversation_key
 
         try:
             return await self._handle_message_impl(

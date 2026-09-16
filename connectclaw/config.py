@@ -128,7 +128,7 @@ class AgentConfig:
     tools: list[str] = field(
         default_factory=lambda: [
             "read", "write", "hash_read", "hash_edit",
-            "bash", "web_search", "web_fetch", "attach_image", "skills",
+            "bash", "web_search", "web_fetch", "attach_image", "skills", "send_file",
         ]
     )
 
