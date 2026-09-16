@@ -23,7 +23,9 @@ from connectclaw.channel.feishu import FeishuChannel
 from connectclaw.config import Config
 from connectclaw.memory import MemorySubsystem
 from connectclaw.memory.subsystem import MemoryConfig as MemCfg
-from connectclaw.provider.types import Model
+from connectclaw.model_registry import ModelProfile, ModelsStore
+from connectclaw.provider.stream import stream_simple
+from connectclaw.provider.types import Context, Model, UserMessage
 
 from .tools.attach_image import AttachImageTool, AttachmentStore, DEFAULT_ATTACHMENTS_DIR
 from .tools.agents import create_agents_tool
@@ -105,6 +107,9 @@ class CodingAgent:
             channel_provider=lambda: self._channel,
             chat_provider=lambda: self._active_chat,
         )
+        # Multi-step /model wizard state per conversation (add profile without
+        # a working model: ask base_url → model_id → api_key via chat replies).
+        self._wizard: dict[str, dict] = {}
 
         # RAG subsystem (optional, lazy init)
         self._rag = RAGSubsystem(
@@ -436,6 +441,100 @@ class CodingAgent:
         if harness:
             return await harness.compact()
         return None
+
+    # ── Model escape hatch (/model) ─────────────────────────
+
+    def entry_model_profile(self) -> ModelProfile:
+        """The ACTIVE profile = current config.llm (the [llm] section)."""
+        llm = self._config.llm
+        return ModelProfile(
+            name="(active)",
+            base_url=llm.base_url,
+            model_id=llm.model_id,
+            api_key=llm.api_key or "",
+            reasoning=llm.reasoning,
+            context_window=llm.context_window,
+            max_tokens=llm.max_tokens,
+            desc="当前激活配置（config.toml [llm]）",
+        )
+
+    def _build_model_from_profile(self, p: ModelProfile) -> Model:
+        return Model(
+            id=p.model_id,
+            name=p.name,
+            provider="openai-compatible",
+            base_url=p.base_url,
+            api="openai-compatible",
+            reasoning=p.reasoning,
+            context_window=p.context_window,
+            max_tokens=p.max_tokens,
+            proxy=self._config.proxy.url,
+        )
+
+    async def apply_model_profile(self, p: ModelProfile) -> str:
+        """Live-swap every live conversation (and future sub-agents) to this
+        profile, then persist it as the active [llm] in config.toml."""
+        if not p.base_url or not p.model_id:
+            raise ValueError("base_url 与 model_id 必填")
+        model = self._build_model_from_profile(p)
+        self._model = model
+        self._agents_tool.set_model(model)
+        for harness in list(self._conversations.values()):
+            await harness.set_model(model)
+        ModelsStore().set_active(p)
+        return (
+            f"✅ 已切换并持久化：**{p.name}** `{p.model_id}`\n"
+            f"↳ {p.base_url}\n已应用到全部会话（无需重启）。"
+        )
+
+    async def test_model_profile(self, p: ModelProfile) -> tuple[bool, str]:
+        """Escape verification: a minimal real generation against this profile
+        (same proxy chain as production). Returns (ok, detail)."""
+        model = self._build_model_from_profile(p)
+        context = Context(
+            system_prompt="reply OK",
+            messages=[UserMessage(content=[{"type": "text", "text": "ping"}], timestamp=0)],
+            tools=[],
+        )
+        seen_done = False
+        try:
+            async for ev in stream_simple(
+                model, context,
+                api_key=p.resolved_api_key() or self._config.llm.api_key or None,
+                reasoning="off",
+                max_retries=1,
+                timeout_ms=20_000,
+            ):
+                if ev.type == "done":
+                    seen_done = True
+                    break
+                if ev.type == "error":
+                    return False, f"请求失败：{ev.error_message or 'unknown'}"
+        except Exception as e:  # noqa: BLE001
+            return False, f"异常：{e}"
+        if seen_done:
+            return True, "✅ 请求成功，模型可用。"
+        return False, "无响应（timeout / 空流）"
+
+    def list_model_profiles(self) -> list[ModelProfile]:
+        return ModelsStore().list()
+
+    def save_model_profile(self, p: ModelProfile) -> str:
+        return ModelsStore().save(p)
+
+    def get_model_profile(self, name: str) -> ModelProfile | None:
+        return ModelsStore().get(name)
+
+    def delete_model_profile(self, name: str) -> bool:
+        return ModelsStore().delete(name)
+
+    # ── Wizard state (multi-step /model add without a working model) ──
+
+    def set_wizard(self, conversation_key: str, state: dict) -> None:
+        self._wizard[conversation_key] = state
+
+    def pop_wizard(self, conversation_key: str) -> dict | None:
+        return self._wizard.pop(conversation_key, None)
 
     def abort(self, conversation_key: str | None = None) -> None:
         """Abort the current agent run by cancelling the underlying asyncio task.

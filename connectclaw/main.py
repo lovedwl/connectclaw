@@ -148,6 +148,7 @@ async def main(argv: list[str] | None = None) -> None:
 
     # Start bot
     from connectclaw.commands import handle as handle_command
+    from connectclaw.commands import run_model_wizard_step
     from connectclaw.config import Config
     from connectclaw.coding.coding_agent import CodingAgent
 
@@ -243,6 +244,15 @@ async def main(argv: list[str] | None = None) -> None:
         live_card_callbacks: dict | None = None,
         **kwargs,
     ) -> str | None:
+        # Model wizard feed (escape hatch): a pending /model add wizard consumes
+        # non-command replies; any slash command cancels it. Runs BEFORE image
+        # handling and the agent loop, so it never depends on a working model.
+        wiz = coding_agent.pop_wizard(conversation_key)
+        if wiz is not None:
+            if text.strip().startswith("/"):
+                return "（已取消进行中的模型添加向导，请重新执行命令）"
+            return await run_model_wizard_step(coding_agent, wiz, text)
+
         # Download and register Feishu images before agent processing. They are
         # attached to this turn's user message as image_ref blocks (and recorded
         # in the attachments manifest so attach_image can re-attach them later).
