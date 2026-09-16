@@ -253,6 +253,16 @@ async def main(argv: list[str] | None = None) -> None:
                 return "（已取消进行中的模型添加向导，请重新执行命令）"
             return await run_model_wizard_step(coding_agent, wiz, text)
 
+        # Operator bash escape: `!cmd` or `/bash cmd` → raw sandboxed shell for
+        # whitelisted operators (no LLM involved; works with the model down).
+        if (text.startswith("!") and len(text) > 1) or text.startswith("/bash "):
+            cmd = text[1:].strip() if text.startswith("!") else text[6:].strip()
+            return await coding_agent.run_operator_bash(
+                conversation_key,
+                kwargs.get("sender_open_id", ""),
+                cmd,
+            )
+
         # Download and register Feishu images before agent processing. They are
         # attached to this turn's user message as image_ref blocks (and recorded
         # in the attachments manifest so attach_image can re-attach them later).

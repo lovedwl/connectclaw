@@ -30,6 +30,8 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 
+from connectclaw.security import protected_file_paths
+
 
 # ── Result Types ───────────────────────────────────────────────
 
@@ -140,6 +142,23 @@ class BwrapSandbox(Sandbox):
               if os.path.abspath(path) != self.cwd and os.path.exists(os.path.abspath(path))],
             # Real system /tmp, read-write and persistent across commands
             "--bind", "/tmp", "/tmp",
+        ]
+
+        # Escape-hatch security files (config.toml / models.toml) stay
+        # READ-ONLY even inside the writable home/cwd — the agent must not
+        # modify the operator whitelist or model registry via bash. A missing
+        # registry file is touched into existence first, or bash could simply
+        # create it (the RO bind only shadows existing files).
+        for _pf in protected_file_paths():
+            try:
+                if not os.path.isfile(_pf):
+                    os.makedirs(os.path.dirname(_pf) or ".", exist_ok=True)
+                    open(_pf, "a").close()
+                bwrap_args += ["--ro-bind", _pf, _pf]
+            except OSError:
+                continue
+
+        bwrap_args += [
             # Fresh /proc for the PID namespace
             "--proc", "/proc",
             # Minimal /dev

@@ -106,6 +106,14 @@ class FeishuChannel(Channel):
             text = (msg.content_text or "").strip()
             resources = msg.resources or []
             message_id = msg.message_id or ""
+            # Sender identity (open_id) — used by the `!`/`/bash` operator gate.
+            sender = getattr(msg, "sender", None)
+            if isinstance(sender, str):
+                sender_open_id = sender
+            elif sender is not None:
+                sender_open_id = getattr(sender, "open_id", None) or ""
+            else:
+                sender_open_id = getattr(msg, "open_id", "") or ""
 
             # Allow pure-image messages (no text but has resources)
             if not text and not resources:
@@ -129,6 +137,7 @@ class FeishuChannel(Channel):
                         chat_id, text, callbacks,
                         resources=resources,
                         message_id=message_id,
+                        sender_open_id=sender_open_id,
                     )
                     if response:
                         await channel._stream_text(chat_id, response)
