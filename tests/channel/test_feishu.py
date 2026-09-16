@@ -26,6 +26,16 @@ def test_different_chats_get_distinct_locks():
     assert ch._chat_lock("oc_a") is not ch._chat_lock("oc_b")
 
 
+def test_only_stop_bypasses_serialization():
+    """/stop 是唯一必须绕过串行锁的命令（否则会死在它要取消的任务后面）。"""
+    ch = _channel()
+    assert ch._is_interrupt("/stop") is True
+    assert ch._is_interrupt("  /stop") is True      # 带前导空格
+    assert ch._is_interrupt("/stop 额外参数") is True
+    assert ch._is_interrupt("/forget 1") is False   # 走正常串行
+    assert ch._is_interrupt("普通消息") is False
+
+
 async def test_same_chat_messages_run_serially():
     ch = _channel()
     log: list[str] = []
