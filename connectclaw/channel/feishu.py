@@ -125,8 +125,9 @@ class FeishuChannel(Channel):
                 text[:100] if text else f"[{len(resources)} resource(s)]",
             )
 
-            # Commands don't need the live thinking card
-            is_cmd = text.startswith("/")
+            # Commands and operator-escape lines get no live thinking card —
+            # `!`/`/bash` are raw execution, not an agent turn (no thinking).
+            is_cmd = text.startswith(("/", "!"))
             # /stop is the one command that may NOT queue behind the lock
             interrupt = self._is_interrupt(text)
 
