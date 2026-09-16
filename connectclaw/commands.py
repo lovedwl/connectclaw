@@ -256,6 +256,291 @@ async def _restart(conversation_key: str, agent: Any, args: str = "") -> str:
     return "❌ 重启功能未启用（_restart_event 未设置）"
 
 
+# ══════════════════════════════════════════════════════════════
+# /model —— 模型逃生口（纯配置+直连实测，不依赖当前模型可用）
+# ══════════════════════════════════════════════════════════════
+
+_MODEL_BOOLS = {"true": True, "false": False, "1": True, "0": False, "yes": True, "no": False}
+
+
+def _parse_pairs(args: str) -> dict:
+    """Parse ``k=v k2=v2`` pairs with shlex quoting support."""
+    import shlex
+
+    out: dict = {}
+    for tok in shlex.split(args or ""):
+        if "=" in tok:
+            k, _, v = tok.partition("=")
+            out[k.strip()] = v.strip()
+    return out
+
+
+def _profile_from_pairs(pairs: dict) -> dict:
+    from connectclaw.model_registry import ModelProfile
+
+    p = ModelProfile(
+        name=pairs.get("name", ""),
+        base_url=pairs.get("base_url", ""),
+        model_id=pairs.get("model_id", ""),
+        api_key=pairs.get("api_key", ""),
+        desc=pairs.get("desc", ""),
+    )
+    if "reasoning" in pairs:
+        p.reasoning = _MODEL_BOOLS.get(pairs["reasoning"].lower(), p.reasoning)
+    for k in ("context_window", "max_tokens"):
+        if k in pairs:
+            try:
+                setattr(p, k, int(pairs[k]))
+            except ValueError:
+                pass
+    return p
+
+
+MODEL_WIZARD_STEPS = ["base_url", "model_id", "api_key"]
+_MODEL_WIZARD_PROMPTS = {
+    "base_url": "① base_url（OpenAI 兼容端点，如 `https://api.deepseek.com` 或网关地址）：",
+    "model_id": "② model_id（模型名，如 `deepseek-v4-flash`）：",
+    "api_key": "③ api_key（没有可回复 `无` 跳过）：",
+}
+
+
+async def run_model_wizard_step(agent: Any, state: dict, text: str) -> str:
+    """Feed one non-command reply into a pending /model add wizard."""
+    from connectclaw.model_registry import ModelProfile
+
+    idx = state.get("step", 0)
+    if idx >= len(MODEL_WIZARD_STEPS):
+        return "向导已结束，可用 /model 查看。"
+    key = MODEL_WIZARD_STEPS[idx]
+    value = text.strip()
+    if key == "api_key" and value in ("无", "none", "/skip"):
+        value = ""
+    if key == "base_url" and not value.startswith(("http://", "https://")):
+        return "base_url 应以 `http(s)://` 开头，请重试：\n" + _MODEL_WIZARD_PROMPTS[key]
+    if key != "api_key" and not value:
+        return _MODEL_WIZARD_PROMPTS[key]
+    state["fields"][key] = value
+    if key == "base_url":
+        state["fields"]["base_url"] = value.rstrip("/")
+    idx += 1
+    state["step"] = idx
+    if idx < len(MODEL_WIZARD_STEPS):
+        agent.set_wizard(state.get("_conv", ""), state)
+        return _MODEL_WIZARD_PROMPTS[MODEL_WIZARD_STEPS[idx]]
+    # complete
+    agent.pop_wizard(state.get("_conv", ""))
+    p = ModelProfile(
+        name=state["fields"].get("name", ""),
+        base_url=state["fields"].get("base_url", ""),
+        model_id=state["fields"].get("model_id", ""),
+        api_key=state["fields"].get("api_key", ""),
+    )
+    if not p.base_url or not p.model_id:
+        return "❌ base_url/model_id 不能为空，向导已放弃。"
+    name = agent.save_model_profile(p)
+    return (
+        f"✅ 已保存 profile **{name}**（`{p.model_id}` @ {p.base_url}）。\n"
+        f"建议下一步：`/model test {name}` 实测 → 通过后 `/model set {name}` 激活。"
+    )
+
+
+@register(
+    "/model",
+    "模型逃生口：/model 清单 · /model add 添加(向导) · /model test <name> 实测 · "
+    "/model set <name> 激活 · /model edit|rm <name> · /model verify <base_url> · /model cancel",
+)
+async def _model(conversation_key: str, agent: Any, args: str = "") -> str:
+    parts = (args or "").split()
+    sub = parts[0].lower() if parts else ""
+    rest = args[len(parts[0]):].strip() if parts else ""
+
+    if sub in ("help", "-h", "--help"):
+        return _model_help()
+
+    if sub == "":  # /model → list
+        return _model_list(agent)
+
+    if sub == "add":
+        pairs = _parse_pairs(rest)
+        p = _profile_from_pairs(pairs) if pairs else None
+        return await _model_add(agent, conversation_key, p, pairs.get("name", ""))
+
+    if sub == "edit":
+        pairs = _parse_pairs(rest)
+        name = pairs.pop("name", "") or (parts[1] if len(parts) > 1 else "")
+        return await _model_edit(agent, conversation_key, name, pairs)
+
+    if sub == "rm":
+        name = rest.strip() or (parts[1] if len(parts) > 1 else "")
+        return _model_rm(agent, name)
+
+    if sub == "test":
+        name = rest.strip() or ""
+        return await _model_test(agent, name)
+
+    if sub == "set":
+        name = rest.strip() or (parts[1] if len(parts) > 1 else "")
+        return await _model_set(agent, name)
+
+    if sub == "verify":
+        url = rest.strip() or (parts[1] if len(parts) > 1 else "")
+        return await _model_verify(agent, url)
+
+    if sub == "cancel":
+        agent.pop_wizard(conversation_key)
+        return "已取消当前向导。"
+
+    return _model_help()
+
+
+def _model_help() -> str:
+    return (
+        "**/model —— 模型逃生口**\n"
+        "· `/model` 列出注册表与激活状态\n"
+        "· `/model add` 交互向导添加；或 `/model add name=x base_url=... model_id=... api_key=...`\n"
+        "· `/model test <name>` 对该模型发送最小请求实测（逃生校验）\n"
+        "· `/model set <name>` 激活（热切换全部会话 + 写入 config.toml）\n"
+        "· `/model edit <name> base_url=... model_id=...` / `/model rm <name>`\n"
+        "· `/model verify <base_url>` 查看端点自称的模型列表（*可能不完整，仅供参考*）\n"
+        "· `/model cancel` 取消进行中的添加向导\n"
+        "无论当前模型是否可用，以上操作都能执行。"
+    )
+
+
+def _model_list(agent: Any) -> str:
+    profiles = agent.list_model_profiles()
+    active = agent.entry_model_profile()
+    if not profiles:
+        lines = ["注册表为空。用 `/model add` 添加第一个 profile（逃生时走向导也行）。\n"]
+    else:
+        lines = [f"模型注册表（{len(profiles)}）："]
+        for p in profiles:
+            mark = "✅ 激活" if (p.base_url == active.base_url and p.model_id == active.model_id) else ""
+            lines.append(f"- **{p.name}** `{p.model_id}` @ {p.base_url} {mark}")
+    lines.append(f"\n当前激活：[llm] `{active.model_id}` @ {active.base_url}")
+    lines.append("用法：/model help")
+    return "\n".join(lines)
+
+
+async def _model_add(agent: Any, conversation_key: str, partial, name_hint: str = "") -> str:
+    if partial is not None and partial.base_url and partial.model_id:
+        pname = agent.save_model_profile(partial)
+        return (
+            f"✅ 已保存 **{pname}**（`{partial.model_id}` @ {partial.base_url}）。\n"
+            f"建议：`/model test {pname}` 实测 → `/model set {pname}` 激活。"
+        )
+    # Wizard mode: no model available? Still works — answers arrive as chat texts.
+    fields = {}
+    if partial is not None:
+        d = partial.__dict__
+        fields = {k: d.get(k, "") for k in ("base_url", "model_id", "api_key")}
+    if name_hint:
+        fields["name"] = name_hint
+    state = {"fields": fields, "step": 0, "_conv": conversation_key}
+    agent.set_wizard(conversation_key, state)
+    return "开始添加模型 profile（向导会逐个收集，随时 `/model cancel` 取消）。\n" + _MODEL_WIZARD_PROMPTS["base_url"]
+
+
+async def _model_edit(agent: Any, conversation_key: str, name: str, pairs: dict) -> str:
+    if not name:
+        return "用法：`/model edit <name> base_url=... model_id=... [api_key=...]`"
+    cur = agent.get_model_profile(name)
+    if cur is None:
+        return f"❌ 没有名为 {name} 的 profile（/model 查看）"
+    merged = {
+        "base_url": pairs.get("base_url", cur.base_url),
+        "model_id": pairs.get("model_id", cur.model_id),
+        "api_key": pairs.get("api_key", cur.api_key),
+        "desc": pairs.get("desc", cur.desc),
+        "reasoning": pairs.get("reasoning", str(cur.reasoning).lower()),
+        "context_window": pairs.get("context_window", str(cur.context_window)),
+        "max_tokens": pairs.get("max_tokens", str(cur.max_tokens)),
+    }
+    p = _profile_from_pairs(merged)
+    p.name = name
+    p = _overlay(p, pairs)
+    agent.save_model_profile(p)
+    return f"✅ 已更新 **{name}** → `{p.model_id}` @ {p.base_url}"
+
+
+def _overlay(p, pairs: dict):
+    if "base_url" in pairs: p.base_url = pairs["base_url"].rstrip("/")
+    if "model_id" in pairs: p.model_id = pairs["model_id"]
+    if "api_key" in pairs: p.api_key = pairs["api_key"]
+    if "desc" in pairs: p.desc = pairs["desc"]
+    if "reasoning" in pairs: p.reasoning = _MODEL_BOOLS.get(pairs["reasoning"].lower(), p.reasoning)
+    for k in ("context_window", "max_tokens"):
+        if k in pairs:
+            try: setattr(p, k, int(pairs[k]))
+            except ValueError: pass
+    return p
+
+
+def _model_rm(agent: Any, name: str) -> str:
+    if not name:
+        return "用法：`/model rm <name>`"
+    if agent.delete_model_profile(name):
+        return f"🗑️ 已删除 profile **{name}**。"
+    return f"❌ 没有名为 {name} 的 profile"
+
+
+def _active_profile(agent: Any, name: str):
+    if not name or name in ("active", "当前", "now", "激活"):
+        return agent.entry_model_profile(), None
+    p = agent.get_model_profile(name)
+    if p is None:
+        return None, f"❌ 没有名为 {name} 的 profile（/model 查看）"
+    return p, None
+
+
+async def _model_test(agent: Any, name: str) -> str:
+    p, err = _active_profile(agent, name)
+    if err:
+        return err
+    ok, detail = await agent.test_model_profile(p)
+    label = name or "当前激活模型"
+    return f"🔌 实测 `{label}`（{p.model_id} @ {p.base_url}）：\n{detail}" + ("\n→ 可 `/model set <name>` 激活" if ok else "")
+
+
+async def _model_set(agent: Any, name: str) -> str:
+    if not name:
+        return "用法：`/model set <name>`"
+    p = agent.get_model_profile(name)
+    if p is None:
+        return f"❌ 没有名为 {name} 的 profile（/model 查看）"
+    if not p.base_url or not p.model_id:
+        return f"❌ profile {name} 缺 base_url/model_id，先 `/model edit {name}`"
+    try:
+        return await agent.apply_model_profile(p)
+    except Exception as e:  # noqa: BLE001
+        return f"❌ 切换失败：{e}"
+
+
+async def _model_verify(agent: Any, url: str) -> str:
+    import httpx
+
+    if not url:
+        return "用法：`/model verify <base_url>`"
+    base = url.rstrip("/")
+    endpoint = f"{base}/models"
+    proxy = getattr(agent, "_config", None) and agent._config.proxy.url or None
+    try:
+        async with httpx.AsyncClient(
+            timeout=12, proxy=proxy or None, trust_env=False,
+        ) as c:
+            r = await c.get(endpoint)
+        if r.status_code != 200:
+            return f"⚠️ `{endpoint}` → HTTP {r.status_code}（可能不是 OpenAI 兼容端点或无权限）"
+        ids = [m.get("id") for m in r.json().get("data", []) if isinstance(m, dict)]
+        if not ids:
+            return f"`{endpoint}` 返回空模型列表（网关可能不暴露，见 /model help 定位）"
+        head = "\n".join(f"- `{m}`" for m in ids[:40])
+        more = f"\n…共 {len(ids)} 个（列表可能不完整，可用性以 /model test 为准）" if len(ids) > 40 else ""
+        return f"`{base}` 自称提供 {len(ids)} 个模型：\n{head}{more}"
+    except Exception as e:  # noqa: BLE001
+        return f"❌ 无法访问 `{endpoint}`：{e}"
+
+
 # ── Memory formatting helpers ──────────────────────────────────
 
 

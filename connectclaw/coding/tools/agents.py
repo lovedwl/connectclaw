@@ -187,6 +187,10 @@ class AgentsTool(AgentTool):
             cwd=self._cwd,
         )
 
+    def set_model(self, model: Model) -> None:
+        """Swap the model used to spawn sub-agents (live /model set)."""
+        self._model = model
+
     # ── Catalog (injected into the user message each turn) ──
 
     def build_catalog(self) -> str:
