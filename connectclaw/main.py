@@ -202,7 +202,7 @@ async def main(argv: list[str] | None = None) -> None:
 
     restart_task = asyncio.create_task(_restart_monitor())
 
-    # China-friendly HuggingFace mirror. BGE-M3 (memory/RAG embeddings) is
+    # China-friendly HuggingFace mirror. The embedding model (memory/RAG) is
     # pulled from HuggingFace; without a mirror the first load can hang for a
     # long time trying to reach huggingface.co. Only set when the user hasn't
     # overridden it. Must be set before sentence-transformers is imported
@@ -213,7 +213,7 @@ async def main(argv: list[str] | None = None) -> None:
         logger.info("  HF endpoint: %s", os.environ["HF_ENDPOINT"])
 
         # Cap ML thread/process fan-out. On a 24-core box, torch's intra-op
-        # pool and joblib/loky each default to one worker PER CORE — BGE-M3
+        # pool and joblib/loky each default to one worker PER CORE — the embedder
         # runs on the per-turn recall path, so an unbounded fan-out spikes CPU
         # and RSS (and leaks loky semaphores at shutdown). A small fixed cap is
         # plenty for single-query embedding and keeps the baseline flat. Must be

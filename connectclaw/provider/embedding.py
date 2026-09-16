@@ -1,8 +1,15 @@
-"""BGE-M3 embedding provider — lazy-loaded, local model."""
+"""BGE-zh embedding provider — lazy-loaded, local model.
+
+Default is BAAI/bge-base-zh-v1.5 (390MB, 768-dim): Chinese-focused, a fraction
+of bge-m3's 2.2GB while keeping semantic quality for personal-memory recall.
+Swap ``model_name`` to experiment (e.g. BAAI/bge-small-zh-v1.5).
+"""
 
 from __future__ import annotations
 
 import asyncio
+
+_EMBEDDING_MODEL = "BAAI/bge-base-zh-v1.5"
 
 
 def _resolve_device() -> str:
@@ -18,21 +25,20 @@ def _resolve_device() -> str:
 
 
 class EmbeddingProvider:
-    """Lazy-loaded BGE-M3 embedding model.
+    """Lazy-loaded embedding model.
 
-    If RAG is not configured, this class is never instantiated.
-    On first use, downloads the model from HuggingFace.
+    On first use, downloads the model from HuggingFace (HF mirror).
     """
 
     def __init__(
         self,
-        model_name: str = "BAAI/bge-m3",
+        model_name: str = _EMBEDDING_MODEL,
         device: str | None = None,
     ):
         self._model = None
         self._model_name = model_name
-        # Auto-pick GPU when available — BGE-M3 on CPU is ~10x slower per query,
-        # and query embedding sits on the per-turn recall path.
+        # Auto-pick GPU when available — a big embedding model on CPU is ~10x
+        # slower per query, and query embedding sits on the per-turn recall path.
         self._device = device or _resolve_device()
 
     async def ensure_loaded(self) -> None:
@@ -41,7 +47,7 @@ class EmbeddingProvider:
             return
 
         # Hard-cap torch CPU threads (belt-and-braces over OMP_NUM_THREADS):
-        # some paths ignore the env var. On CPU, BGE-M3 single-query embedding
+        # some paths ignore the env var. On CPU, a single embedding query
         # does not benefit from all cores and an unbounded pool spikes RSS.
         try:
             import os as _os
@@ -85,13 +91,13 @@ _shared_provider: EmbeddingProvider | None = None
 
 
 def get_shared_embedding_provider(
-    model_name: str = "BAAI/bge-m3", device: str | None = None
+    model_name: str = _EMBEDDING_MODEL, device: str | None = None
 ) -> EmbeddingProvider:
     """Return a process-wide shared EmbeddingProvider.
 
-    RAG and the memory subsystem both need BGE-M3. Sharing one instance
-    avoids loading the ~2GB model into memory twice. Device is auto-detected
-    (GPU if available) unless explicitly given.
+    RAG and the memory subsystem share one instance to avoid loading the model
+    into memory twice. Device is auto-detected (GPU if available) unless
+    explicitly given.
     """
     global _shared_provider
     if _shared_provider is None:

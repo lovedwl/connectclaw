@@ -95,7 +95,7 @@ class MemorySubsystem:
                     get_shared_embedding_provider,
                 )
 
-                # Share the single BGE-M3 instance with RAG — avoids loading
+                # Share the single embedding model instance with RAG — avoids loading
                 # the ~2GB model into memory twice.
                 self._embedding_provider = get_shared_embedding_provider()
                 logger.info("Memory: using shared embedding provider")

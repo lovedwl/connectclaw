@@ -5,7 +5,7 @@
 ## 〇、变更历史
 
 - 新增 **hashline 哈希锚定编辑协议**（`hashline/` 12 文件 + `tools/hash_read.py` / `hash_edit.py`）
-- 新增 **记忆混合检索**（`memory/bm25.py` BM25 + BGE-M3 语义，召回与使用分离 `confirm_usage`）
+- 新增 **记忆混合检索**（`memory/bm25.py` BM25 + BGE-zh 语义，召回与使用分离 `confirm_usage`）
 - 新增 **记忆去重**（`memory/clustering.py` 纯 numpy KMeans + 簇内合并）
 - Agent 自带记忆管理工具 `tools/memory.py`（search / soft-forget）
 - 配置去 vendor：`[llm]/[vision]` 替代 `[deepseek]/[mimo]`（§十三）
@@ -60,7 +60,7 @@ connectclaw/
 │   ├── tokenizer.py           # tiktoken 真实分词 (CJK 回退) + 固定每图成本估算
 │   ├── deepseek.py            # DeepSeekProvider (OpenAI SDK) + 图片当轮解析/历史降级
 │   ├── stream.py              # stream_simple() 异步流式生成器 (proxy 感知, 客户端缓存)
-│   ├── embedding.py           # BGE-M3 嵌入 (懒加载)
+│   ├── embedding.py           # BGE-zh 嵌入 (懒加载, bge-base-zh-v1.5)
 │   └── rerank.py              # BGE-Reranker-v2-m3 重排序 (懒加载)
 │
 ├── hashline/                  # 哈希锚定编辑协议 (自 pi-hashline-edit, MIT)
@@ -100,7 +100,7 @@ connectclaw/
 │   │   ├── write.py           # 文件写入 (已存在必须先 read + 原子写入)
 │   │   ├── hash_read.py       # 哈希锚定读 (带 LINE#HASH 锚点, hash_edit 的唯一寻址方式)
 │   │   ├── hash_edit.py       # 哈希锚定改 (replace/append/prepend/replace_text, 读快照校验)
-│   │   ├── bash.py            # Shell 执行 (BashGuard 三级 + 三层沙箱)
+│   │   ├── bash.py            # Shell 执行 (BashGuard 门禁 + 隔离沙箱 + 用户 PATH)
 │   │   ├── web_search.py      # Lightpanda 无头浏览器，Bing 引擎，免费
 │   │   ├── image_analyze.py   # 子agent: Mimo 视觉分析 (非默认工具，[vision] 启用 + 代理)
 │   │   ├── attach_image.py    # 图片按需重挂 (AttachmentStore + manifest + attach_image 工具)
@@ -111,7 +111,8 @@ connectclaw/
 │   │   └── lightpanda.py      # Lightpanda CDP 引擎 (web_search/web_fetch 底层)
 │   │
 │   └── safety/
-│       └── sandbox.py         # 三层沙箱 (bwrap → unshare → rlimit)
+│       ├── sandbox.py         # 隔离沙箱 (bwrap → unshare → direct，无资源限制)
+│       └── shellpath.py       # 用户交互 PATH 捕获（注入 bash / skills bin 检测）
 │
 ├── channel/                   # IM 接入层
 │   ├── base.py                # Channel 抽象接口
@@ -168,7 +169,7 @@ sequenceDiagram
 
         alt tool calls
             Loop->>Loop: 并行执行工具 (asyncio.gather)
-            alt bash: SUSPICIOUS / allow_network / unsandboxed
+            alt bash: SUSPICIOUS 危险指令
                 CA->>Feishu: 飞书授权卡片 (approve/deny)
                 Feishu-->>User: 交互按钮
                 User->>Feishu: 点击
@@ -288,25 +289,25 @@ hash_edit  → 编辑指令携带锚点 → 预检哈希 → 底向上应用 →
 
 ## 七、沙箱系统
 
+设计（2026-09 重构）：**沙箱只提供隔离，不做资源限制**。`RLIMIT_AS` 会把整个工具链打废（node/V8、JVM、Go 都要预留大块虚拟地址空间，512MB 直接 OOM），却挡不住危险命令——风险控制因此落在两处：BashGuard（危险指令门禁）+ 沙箱（爆炸半径隔离，只读根 + 项目可写 + 私有 /tmp）。**网络默认开放**，不再逐命令授权。
+
 三层自动降级：
 
-| 层 | 实现 | 文件隔离 | 网络隔离 | 依赖 |
-|---|------|---------|---------|------|
-| 1 | BwrapSandbox | `--ro-bind / /` 全局只读 + `--bind $cwd` 项目可写 | `--unshare-net` | bubblewrap |
-| 2 | NamespaceSandbox | unshare --mount + tmpfs | `--net` | util-linux |
-| 3 | RlimitSandbox | setrlimit (内存/CPU/进程) | 无 | 无 |
+| 层 | 实现 | 文件隔离 | 网络 | 依赖 |
+|---|------|---------|------|------|
+| 1 | BwrapSandbox | `--ro-bind / /` 全局只读 + `--bind $cwd` 项目可写 | 开放 | bubblewrap |
+| 2 | NamespaceSandbox | unshare --mount + tmpfs | 开放 | util-linux |
+| 3 | DirectSandbox | 无隔离（兜底） | 开放 | 无 |
 
-沙箱提权（需飞书卡片授权，60s 超时）：
+授权只针对危险动作（不再有 Network Access / Sandbox Escape 卡片）：
+- BashGuard SUSPICIOUS 命令 → Bash Authorization 卡片
+- write 工具越出 cwd → Sandbox Escape 卡片
 
-| 参数 | 卡片标题 | 卡片样式 | 效果 |
-|------|---------|---------|------|
-| 默认 | — | — | 完整沙箱隔离 |
-| `allow_network: true` | Network Access Required | info | 跳过网络隔离 |
-| `unsandboxed: true` | Sandbox Escape Authorization | danger | 仅 rlimit，无隔离 |
+bash 命令注入用户的交互 shell PATH（~/.npm-global/bin、~/.local/bin、pyenv…），保证 bot 与你终端看到同一套工具链。
 
 ## 八、Bash 安全
 
-三级分类 + 三层沙箱（BashGuard 可配置，`config.toml` 可追加自定义档位）：
+三级分类（BashGuard 可配置，`config.toml` 可追加自定义档位）：
 
 ```
 BashGuard.check(command):
@@ -316,7 +317,7 @@ BashGuard.check(command):
   SUSPICIOUS:   rm, mv, chmod, chown, eval, curl pipe to shell...
                 → 飞书授权卡片 (approve/deny)
 
-  SAFE:         → 进入沙箱执行
+  SAFE:         → 进入沙箱执行（网络开放，无资源限制）
 ```
 
 > 保持无状态、不做持久白名单——高风险命令每次强制授权，用户随时可反悔。可配置性通过 BashGuard 风险分级清单实现（如把 `docker system prune` 提为 DANGEROUS）而不必 fork 类。
@@ -417,11 +418,11 @@ confirm  回复产生后：扫描回复内容匹配已召回记忆 → 命中则
 dream    定时 / 手动：衰减 → 强化 → 情景→语义整合 → 聚类合并(KMeans) → 清理
 ```
 
-### 混合检索：BM25 + BGE-M3（关键）
+### 混合检索：BM25 + BGE-zh（关键）
 
 检索不再只靠语义——`memory/bm25.py` 提供关键词信号，补上 embedding 在**精确术语（名字 / 路径 / 错误码）**上的盲区：
 
-- **embedding**：BGE-M3 语义相关，余弦相似度（硬门槛 0.45）
+- **embedding**：BGE-base-zh-v1.5（768 维）语义相关，余弦相似度（硬门槛 0.48）
 - **BM25**：精确关键词命中，名字 / 路径 / ID 这类语义匹配不到的也能召回
 - **融合**：`relevance = max(sim, bm25_norm)` 取两者之强，再叠上新鲜度×时效 + 重要性 + strength
 - **类型配额**：semantic/episodic/procedural 各保底名额（2/1/1），避免某类垄断 TopK
@@ -445,15 +446,15 @@ DeepSeek / OpenAI-compatible provider 按**请求前缀**缓存：system prompt 
 - **持久化进历史反而最优**：动态上下文成为下一轮的固定前缀，让缓存前缀持续增长命中；"临时注入不持久化"反而会让倒数第二条 user message 分叉、命中更差。
 - 历史膨胀由上下文压缩（§九）兜底。
 
-### 向量检索：BGE-M3 + GPU
+### 向量检索：BGE-zh + GPU
 
-语义召回用 BGE-M3 embedding（`provider/embedding.py`，RAG 与记忆**共享同一实例**，避免加载两份 ~2.3GB 模型），**自动检测 GPU**（有 CUDA 用显存，否则 CPU）。依赖 `sentence-transformers`（在 `[optional] rag` 组）。
+语义召回用 BGE-base-zh-v1.5（`provider/embedding.py`，默认 390MB / 768 维，RAG 与记忆**共享同一实例**避免重复加载；可换 `BAAI/bge-small-zh-v1.5` 91MB 等），**自动检测 GPU**（有 CUDA 用显存，否则 CPU）。依赖 `sentence-transformers`（在 `[optional] rag` 组）。
 
 缺依赖时记忆退化为关键词检索——但**中文关键词召回基本失效**（按空格分词，中文整句成一个 token），所以中文场景强烈建议启用 embedding。
 
-首次加载从 HuggingFace 拉 BGE-M3（~2.3GB）；`main.py` 启动时若 `HF_ENDPOINT` 未设会自动指向 `hf-mirror.com`，避免连 huggingface.co 卡住。模型缓存后可 `export HF_HUB_OFFLINE=1` 跳过更新检查。
+首次加载从 HuggingFace 拉模型（390MB）；`main.py` 启动时若 `HF_ENDPOINT` 未设会自动指向 `hf-mirror.com`，避免连 huggingface.co 卡住。模型缓存后可 `export HF_HUB_OFFLINE=1` 跳过更新检查。（2026-09 由 bge-m3 2.2GB 换为 bge-base-zh-v1.5，缓存从 7.9GB 缩到 0.8GB。）
 
-**相关性硬门槛**：cosine similarity < `min_similarity`（默认 0.45）直接判为不相关丢弃。实测 BGE-M3 中文——相关命中 0.50–0.73，不相关 query 峰值 <0.45。没有这道门槛时，新记忆靠 recency/importance/strength 就能凑够综合分，导致无关 query 也召回记忆。
+**相关性硬门槛**：cosine similarity < `min_similarity`（默认 0.48）直接判为不相关丢弃。实测 bge-base-zh-v1.5 中文——相关命中 0.50–0.55，不相关 query 峰值 ~0.47。没有这道门槛时，新记忆靠 recency/importance/strength 就能凑够综合分，导致无关 query 也召回记忆。
 
 ### 检索：模糊记忆 + 新鲜度保障
 
@@ -486,7 +487,7 @@ DeepSeek / OpenAI-compatible provider 按**请求前缀**缓存：system prompt 
 ```
 Python 3.14 + asyncio · uv 包管理
 DeepSeek (openai SDK) · lark-oapi + lark-channel-sdk (WebSocket + HTTP)
-LanceDB · BGE-M3 · BGE-Reranker-v2-m3 (RAG, 可选)
+LanceDB · BGE-base-zh-v1.5 (记忆语义) · BGE-Reranker-v2-m3 (RAG, 可选)
 SQLite · numpy (分层记忆) · xxhash (hashline)
 bubblewrap · unshare (沙箱) · lightpanda-py (无头浏览器)
 openai · tiktoken · aiofiles · questionary · qrcode · websockets · httpx · torch
