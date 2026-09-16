@@ -256,6 +256,24 @@ async def _restart(conversation_key: str, agent: Any, args: str = "") -> str:
     return "❌ 重启功能未启用（_restart_event 未设置）"
 
 
+@register("/whoami", "查看自己的 open_id（填入 [bash] operator_open_ids 即可加入 !/bash 直连白名单）")
+async def _whoami(conversation_key: str, agent: Any, args: str = "") -> str:
+    rid = getattr(agent, "last_sender", "") or ""
+    if not rid:
+        return "❌ 获取不到你的 open_id（只支持在飞书会话中使用）"
+    ops: list = []
+    cfg = getattr(agent, "_config", None)
+    bash_cfg = getattr(cfg, "bash", None) if cfg is not None else None
+    if bash_cfg is not None:
+        ops = list(bash_cfg.operator_open_ids or [])
+    mark = "（已在白名单 ✅）" if rid in ops else "（尚未加入白名单）"
+    return (
+        f"你的 open_id：`{rid}` {mark}\n"
+        f"把它加入 `~/.connectclaw/config.toml` 的 `[bash] operator_open_ids = [...]` "
+        f"即可使用 `!命令` / `/bash 命令` 直连执行。"
+    )
+
+
 # ══════════════════════════════════════════════════════════════
 # /model —— 模型逃生口（纯配置+直连实测，不依赖当前模型可用）
 # ══════════════════════════════════════════════════════════════
