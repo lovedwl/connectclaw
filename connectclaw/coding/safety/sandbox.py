@@ -1,10 +1,22 @@
 """
 Command execution sandbox for ConnectClaw.
 
+Design (2026-09): the sandbox provides *isolation*, not resource limits.
+Resource limits (RLIMIT_AS in particular) silently break whole toolchains —
+node/V8, JVM, Go all reserve large virtual address regions and die on a
+512MB cap — while doing nothing to stop a genuinely dangerous command. Risk
+control therefore lives in two places:
+
+1. BashGuard: static pattern gate (dangerous → blocked, suspicious → user auth).
+2. Sandbox: bwrap / unshare namespaces contain the blast radius (read-only
+   root, writable cwd, private /tmp). Network is open by default — per-command
+   network authorization was removed; authorization now exists only for
+   dangerous commands (BashGuard suspicious) and out-of-cwd writes.
+
 Three-tier fallback:
   Tier 1: bubblewrap (bwrap) — full unprivileged container
-  Tier 2: unshare + Landlock — Linux namespace + filesystem sandbox
-  Tier 3: Direct execution with rlimit — resource limits only
+  Tier 2: unshare — Linux namespace isolation
+  Tier 3: direct execution (no isolation available)
 
 Auto-detects best available at runtime.
 """
@@ -13,7 +25,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import resource
 import shutil
 import time
 from dataclasses import dataclass
@@ -25,8 +36,8 @@ from enum import Enum
 
 class SandboxLevel(Enum):
     BWARP = "bwrap"          # Full container isolation
-    UNSHARE = "unshare"      # Namespace + landlock isolation
-    RLIMIT = "rlimit"         # Resource limits only
+    UNSHARE = "unshare"      # Namespace isolation
+    DIRECT = "direct"        # No isolation available
 
 
 @dataclass
@@ -36,7 +47,7 @@ class SandboxResult:
     exit_code: int = -1
     timed_out: bool = False
     truncated: bool = False
-    level: SandboxLevel = SandboxLevel.RLIMIT
+    level: SandboxLevel = SandboxLevel.DIRECT
     wall_time_ms: float = 0.0
 
 
@@ -49,7 +60,7 @@ def detect_best_sandbox() -> type:
         return BwrapSandbox
     if shutil.which("unshare"):
         return NamespaceSandbox
-    return RlimitSandbox
+    return DirectSandbox
 
 
 # ── Base ───────────────────────────────────────────────────────
@@ -63,20 +74,10 @@ class Sandbox:
         cwd: str,
         *,
         allowed_paths: list[str] | None = None,
-        allow_network: bool = False,
-        unsandboxed: bool = False,
-        max_memory_mb: int = 512,
-        max_cpu_seconds: int = 60,
-        max_processes: int = 300,
         max_output_bytes: int = 100_000,
     ):
         self.cwd = os.path.abspath(cwd)
         self.allowed_paths = allowed_paths or [self.cwd]
-        self.allow_network = allow_network
-        self.unsandboxed = unsandboxed
-        self.max_memory_mb = max_memory_mb
-        self.max_cpu_seconds = max_cpu_seconds
-        self.max_processes = max_processes
         self.max_output_bytes = max_output_bytes
 
     @property
@@ -106,13 +107,11 @@ class BwrapSandbox(Sandbox):
     Full unprivileged container via bubblewrap (bwrap).
 
     Creates a new mount namespace with:
-    - Read-only bind: /usr, /lib, /lib64, /bin, /etc (system deps)
-    - Read-write bind: cwd and allowed_paths
-    - New /tmp (tmpfs, private)
-    - New /dev (minimal)
-    - Unshared network (--unshare-net)
-    - Unshared PID (--unshare-pid) when possible
-    - Resource limits via --setenv for ulimit propagation
+    - Read-only bind of the whole root — only cwd and allowed_paths writable
+    - New /tmp (tmpfs, private) and minimal /dev
+    - Private /proc (PID namespace)
+    Network stays open (no --unshare-net): authorization gates a command's
+    *danger* (BashGuard), not its connectivity.
     """
 
     @property
@@ -120,17 +119,6 @@ class BwrapSandbox(Sandbox):
         return SandboxLevel.BWARP
 
     async def execute(self, command: str, timeout: int = 120) -> SandboxResult:
-        # If unsandboxed, delegate to rlimit-only execution
-        if self.unsandboxed:
-            rlimit = RlimitSandbox(
-                cwd=self.cwd,
-                max_memory_mb=self.max_memory_mb,
-                max_cpu_seconds=self.max_cpu_seconds,
-                max_processes=self.max_processes,
-                max_output_bytes=self.max_output_bytes,
-            )
-            return await rlimit.execute(command, timeout=timeout)
-
         # Build bwrap args with read-only root + explicit writable paths
         bwrap_args = [
             "bwrap",
@@ -149,8 +137,6 @@ class BwrapSandbox(Sandbox):
             "--proc", "/proc",
             # Minimal /dev
             "--dev", "/dev",
-            # Network isolation
-            "" if self.allow_network else "--unshare-net",
             "--unshare-ipc",
             "--unshare-uts",
             "--unshare-pid",
@@ -158,16 +144,7 @@ class BwrapSandbox(Sandbox):
             "--chdir", self.cwd,
         ]
 
-        # Filter empty args
-        bwrap_args = [a for a in bwrap_args if a]
-
-        # Apply resource limits inline, single shell level
-        ulimits = (
-            f"ulimit -v $(({self.max_memory_mb} * 1024)) 2>/dev/null; "
-            f"ulimit -t {self.max_cpu_seconds} 2>/dev/null; "
-            f"ulimit -u {self.max_processes} 2>/dev/null; "
-        )
-        bwrap_args.extend(["--", "bash", "-c", ulimits + command])
+        bwrap_args.extend(["--", "bash", "-c", command])
 
         return await _run_command(bwrap_args, timeout, self.max_output_bytes, self.level)
 
@@ -177,14 +154,10 @@ class BwrapSandbox(Sandbox):
 
 class NamespaceSandbox(Sandbox):
     """
-    Linux namespace isolation via unshare.
+    Linux namespace isolation via unshare (mount + PID namespaces).
 
-    Uses `unshare` to create:
-    - Mount namespace (--mount)
-    - Network namespace (--net) unless allowed
-    - PID namespace (--pid --fork)
-
-    Within the namespace, /tmp is remounted as private tmpfs.
+    /tmp is remounted as a private tmpfs. Network stays open — no --net
+    namespace: authorization gates danger (BashGuard), not connectivity.
     """
 
     @property
@@ -194,20 +167,11 @@ class NamespaceSandbox(Sandbox):
     async def execute(self, command: str, timeout: int = 120) -> SandboxResult:
         t0 = time.time()
 
-        unshare_args = ["unshare", "--mount", "--fork"]
-
-        if not self.allow_network:
-            unshare_args.append("--net")
-
-        # PID namespace
-        unshare_args.extend(["--pid", "--mount-proc"])
+        unshare_args = ["unshare", "--mount", "--fork", "--pid", "--mount-proc"]
 
         # Build the inner command
         inner = (
             f"mount -t tmpfs tmpfs /tmp 2>/dev/null; "
-            f"ulimit -v $(({self.max_memory_mb} * 1024)) 2>/dev/null; "
-            f"ulimit -t {self.max_cpu_seconds} 2>/dev/null; "
-            f"ulimit -u {self.max_processes} 2>/dev/null; "
             f"cd {self.cwd}; "
             f"{command}"
         )
@@ -217,20 +181,20 @@ class NamespaceSandbox(Sandbox):
         return await _run_command(unshare_args, timeout, self.max_output_bytes, self.level)
 
 
-# ── Tier 3: Resource Limits Only ───────────────────────────────
+# ── Tier 3: Direct (no isolation available) ────────────────────
 
 
-class RlimitSandbox(Sandbox):
+class DirectSandbox(Sandbox):
     """
-    Minimal sandbox with only resource limits.
+    Fallback when neither bwrap nor unshare is available: plain subprocess.
 
-    Sets rlimit for memory, CPU, and processes before executing.
-    No filesystem or network isolation.
+    Same execution contract (output capture / timeout / truncation), no
+    namespace isolation. Safety rests on BashGuard alone.
     """
 
     @property
     def level(self) -> SandboxLevel:
-        return SandboxLevel.RLIMIT
+        return SandboxLevel.DIRECT
 
     async def execute(self, command: str, timeout: int = 120) -> SandboxResult:
         t0 = time.time()
@@ -243,10 +207,6 @@ class RlimitSandbox(Sandbox):
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self.cwd,
                 executable="/bin/bash",
-                preexec_fn=lambda: _set_rlimits(
-                    self.max_memory_mb,
-                    self.max_cpu_seconds,
-                ),
             )
 
             try:
@@ -285,20 +245,6 @@ class RlimitSandbox(Sandbox):
 
 # ── Helpers ────────────────────────────────────────────────────
 
-
-def _set_rlimits(mem_mb: int, cpu_sec: int) -> None:
-    """Set resource limits for the child process.
-    Skips RLIMIT_NPROC — the system default applies, and hard-coding
-    it too low breaks commands that fork (e.g. git commit).
-    """
-    try:
-        resource.setrlimit(resource.RLIMIT_AS, (mem_mb * 1024 * 1024, mem_mb * 1024 * 1024))
-    except (ValueError, OSError):
-        pass
-    try:
-        resource.setrlimit(resource.RLIMIT_CPU, (cpu_sec, cpu_sec))
-    except (ValueError, OSError):
-        pass
 
 async def _run_command(
     cmd_args: list[str],

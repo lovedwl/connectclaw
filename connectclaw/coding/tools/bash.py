@@ -10,6 +10,7 @@ from typing import Any, Literal
 
 from connectclaw.agent.types import AgentTool, AgentToolResult
 from connectclaw.coding.safety.sandbox import detect_best_sandbox
+from connectclaw.coding.safety.shellpath import with_user_path
 
 
 class BashGuard:
@@ -84,7 +85,8 @@ class BashTool(AgentTool):
         "Execute a shell command in a subprocess. "
         "The command will be executed in the working directory. "
         "A timeout can be specified (default 120 seconds). "
-        "Some commands may require user authorization."
+        "Runs in a sandbox (filesystem isolation) with full network access; "
+        "dangerous commands require user authorization."
     )
     parameters = {
         "type": "object",
@@ -96,14 +98,6 @@ class BashTool(AgentTool):
             "timeout": {
                 "type": "integer",
                 "description": "Timeout in seconds (default: 120, max: 600)",
-            },
-            "allow_network": {
-                "type": "boolean",
-                "description": "Allow network access for this command (requires user approval). Use when git push/pull, curl, pip install, npm install, etc.",
-            },
-            "unsandboxed": {
-                "type": "boolean",
-                "description": "Run outside the sandbox entirely (requires user approval). Use only when the sandbox blocks essential functionality.",
             },
         },
         "required": ["command"],
@@ -156,9 +150,9 @@ class BashTool(AgentTool):
                 }],
             )
 
-        # Execute in sandbox (with optional network or full escape)
-        allow_network = params.get("allow_network", False)
-        unsandboxed = params.get("unsandboxed", False)
+        # Run in the isolation sandbox with the user's interactive PATH (the
+        # systemd env PATH misses ~/.npm-global/bin, ~/.local/bin, pyenv, ...).
+        command = with_user_path(command)
 
         # Build allowed paths: cwd + git root (for git operations)
         allowed_paths = [self._cwd]
@@ -168,11 +162,6 @@ class BashTool(AgentTool):
         sandbox = self._sandbox_cls(
             cwd=self._cwd,
             allowed_paths=allowed_paths,
-            allow_network=allow_network,
-            unsandboxed=unsandboxed,
-            max_memory_mb=512,
-            max_cpu_seconds=timeout,
-            max_processes=300,
         )
 
         result = await sandbox.execute(command, timeout=timeout)

@@ -436,18 +436,6 @@ class FeishuChannel(Channel):
             timeout=timeout,
         )
 
-    async def request_network_authorization(
-        self, conversation_key: str, command: str, timeout: float = 60.0
-    ) -> bool:
-        return await self._request_auth(
-            conversation_key=conversation_key,
-            title="Network Access",
-            template="info",
-            command=command,
-            description="The assistant needs network access for:",
-            timeout=timeout,
-        )
-
     async def request_unsandboxed_authorization(
         self, conversation_key: str, command: str, timeout: float = 60.0
     ) -> bool:
