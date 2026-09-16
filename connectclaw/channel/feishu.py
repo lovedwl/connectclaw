@@ -57,6 +57,15 @@ class FeishuChannel(Channel):
 
     # ── Per-conversation serialization ─────────────────────
 
+    def _is_interrupt(self, text: str) -> bool:
+        """True for control commands that must bypass per-chat serialization.
+
+        Currently /stop: it is the escape hatch that has to run *while* the
+        same chat's task holds the lock — queueing it behind the lock deadlocks
+        it against the very task it is meant to cancel.
+        """
+        return text.strip().startswith("/stop")
+
     def _chat_lock(self, chat_id: str) -> asyncio.Lock:
         """The serialization lock for one conversation (created on demand).
 
@@ -86,6 +95,11 @@ class FeishuChannel(Channel):
             command and a follow-up text must not race (e.g. /forget followed
             by a message that reads the session before the forget lands).
             Different chats still process concurrently.
+
+            EXCEPTION: the /stop interrupt bypasses the lock on purpose — it is
+            the escape hatch that must run *while* the same chat's long-running
+            task holds it, or it would deadlock behind the very task it is
+            meant to cancel.
             """
             chat_id = msg.chat_id
             text = (msg.content_text or "").strip()
@@ -104,20 +118,28 @@ class FeishuChannel(Channel):
 
             # Commands don't need the live thinking card
             is_cmd = text.startswith("/")
+            # /stop is the one command that may NOT queue behind the lock
+            interrupt = self._is_interrupt(text)
+
+            async def _dispatch() -> None:
+                try:
+                    callbacks = None if is_cmd else channel.create_live_card(chat_id)
+                    response = await on_message(
+                        chat_id, text, callbacks,
+                        resources=resources,
+                        message_id=message_id,
+                    )
+                    if response:
+                        await channel._stream_text(chat_id, response)
+                except Exception as e:
+                    logger.error("Message handler error: %s", e)
 
             async def _process() -> None:
+                if interrupt:
+                    await _dispatch()
+                    return
                 async with self._chat_lock(msg.chat_id):
-                    try:
-                        callbacks = None if is_cmd else channel.create_live_card(chat_id)
-                        response = await on_message(
-                            chat_id, text, callbacks,
-                            resources=resources,
-                            message_id=message_id,
-                        )
-                        if response:
-                            await channel._stream_text(chat_id, response)
-                    except Exception as e:
-                        logger.error("Message handler error: %s", e)
+                    await _dispatch()
 
             asyncio.create_task(_process())
 
