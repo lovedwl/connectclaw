@@ -536,6 +536,47 @@ class CodingAgent:
     def pop_wizard(self, conversation_key: str) -> dict | None:
         return self._wizard.pop(conversation_key, None)
 
+    # ── Operator bash escape (`!cmd` / `/bash cmd`) ─────────
+    # Direct, sandboxed shell for whitelisted operators only — the config
+    # escape (config.toml [bash] operator_open_ids + models.toml) is
+    # agent-protected via connectclaw/security.py.
+
+    async def run_operator_bash(
+        self, conversation_key: str, sender_open_id: str, command: str
+    ) -> str:
+        """Run a raw sandboxed shell command for a whitelisted operator.
+
+        Same guardrail triple as the agent's bash tool (BashGuard DANGEROUS →
+        hard block, SUSPICIOUS → Feishu auth card, then the isolation sandbox +
+        user PATH) — without any LLM involvement, so it works when the model is
+        down. Returns the formatted output for the chat.
+        """
+        operators = self._config.bash.operator_open_ids
+        if not operators or sender_open_id not in operators:
+            return "⛔ 你没有使用 `!`/`/bash` 直连执行的权限。"
+        cmd = (command or "").strip()
+        if not cmd:
+            return "用法：`! <shell命令>` 或 `/bash <命令>` —— 沙箱内直连执行（逃生用）"
+
+        check = self._bash_guard.check(cmd)
+        if check == "DANGEROUS":
+            return f"⛔ 危险命令已拦截（DANGEROUS）：`{cmd}`"
+        if check == "SUSPICIOUS":
+            if self._channel is None:
+                return f"❌ 该命令需要授权（SUSPICIOUS），但当前无授权通道：`{cmd}`"
+            approved = await self._channel.request_bash_authorization(conversation_key, cmd)
+            if not approved:
+                return f"❌ 已拒绝执行：`{cmd}`"
+
+        try:
+            result = await self._bash_tool.execute("operator-bash", {"command": cmd})
+        except Exception as e:  # noqa: BLE001
+            logger.warning("operator-bash failed: %s", e)
+            return f"❌ 执行异常：{e}"
+        if result is None or not result.content:
+            return "（无输出）"
+        return result.content[0].get("text", "") or "（空输出）"
+
     def abort(self, conversation_key: str | None = None) -> None:
         """Abort the current agent run by cancelling the underlying asyncio task.
         Also sets the abort_event for graceful in-task shutdown as a fallback."""

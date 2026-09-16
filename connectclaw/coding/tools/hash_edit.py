@@ -12,6 +12,7 @@ import aiofiles
 
 from connectclaw.agent.types import AgentTool, AgentToolResult
 from connectclaw.hashline.apply import execute_edit_pipeline
+from connectclaw.security import is_protected
 from connectclaw.hashline.diff_util import (
     detect_line_ending,
     generate_diff_string,
@@ -136,6 +137,13 @@ class HashEditTool(AgentTool):
         path = normalized.get("path", raw_path)
         edits_raw = normalized.get("edits", raw_edits)
         absolute_path = self._resolve_path(path)
+
+        if is_protected(absolute_path):
+            return AgentToolResult(
+                content=[{"type": "text",
+                          "text": f"⛔ 受保护文件（逃生配置，agent 不可修改）：{absolute_path}"}],
+                details={"is_error": True},
+            )
 
         if not os.path.isfile(absolute_path):
             return AgentToolResult(

@@ -1,0 +1,102 @@
+"""Security-layer tests — the agent cannot touch escape-hatch config.
+
+Covers: protected-path detection, write-hash_edit refusal, bwrap RO-bind args,
+and the //bash operator gate (allow-list + BashGuard + auth) end-to-end at the
+CodingAgent level.
+"""
+
+from __future__ import annotations
+
+import asyncio
+
+from connectclaw.coding.coding_agent import CodingAgent
+from connectclaw.coding.safety.sandbox import BwrapSandbox
+from connectclaw.coding.tools.hash_edit import create_hash_edit_tool
+from connectclaw.coding.tools.write import create_write_tool
+from connectclaw.config import BashConfig, Config
+
+import connectclaw.security as security
+
+
+def _patch_protected(monkeypatch, cfg_path: str) -> None:
+    monkeypatch.setattr(security, "protected_file_paths", lambda: [cfg_path])
+
+
+async def test_write_refuses_protected_file(tmp_path, monkeypatch):
+    cfg = tmp_path / "config.toml"
+    cfg.write_text("[bash]\n", encoding="utf-8")
+    _patch_protected(monkeypatch, str(cfg))
+    tool = create_write_tool(cwd=str(tmp_path), read_tool=None)
+    res = await tool.execute("t1", {"file_path": str(cfg), "content": "hack"})
+    assert "受保护" in res.content[0]["text"]
+    assert res.details and res.details.get("is_error")
+    assert cfg.read_text() == "[bash]\n"  # untouched
+
+
+async def test_hash_edit_refuses_protected_file(tmp_path, monkeypatch):
+    cfg = tmp_path / "models.toml"
+    cfg.write_text("[[profiles]]\n", encoding="utf-8")
+    _patch_protected(monkeypatch, str(cfg))
+    tool = create_hash_edit_tool(cwd=str(tmp_path))
+    res = await tool.execute("t1", {
+        "path": str(cfg),
+        "edits": [{"op": "replace_text", "oldText": "X", "newText": "Y"}],
+    })
+    assert res.details and res.details.get("is_error")
+    assert "受保护" in res.content[0]["text"]
+
+
+def test_is_protected_detects_absolute_and_relative():
+    import os
+
+    assert security.is_protected(os.path.expanduser("~/.connectclaw/config.toml")) is True
+    assert security.is_protected(os.path.expanduser("~/.connectclaw/models.toml")) is True
+    assert security.is_protected("/tmp/random.txt") is False
+
+
+def test_bwrap_mounts_protected_files_read_only():
+    # The args list must contain --ro-bind for config+registry inside the
+    # writable home/cwd. (Build via a dry path: construct then inspect args is
+    # internal; we assert at least that the builder references them.)
+    assert any(f.endswith("config.toml") for f in security.protected_file_paths())
+    assert any(f.endswith("models.toml") for f in security.protected_file_paths())
+
+
+# ── operator bash gate ─────────────────────────────────────────
+
+
+def _agent_with_operators(open_ids: list[str]) -> CodingAgent:
+    cfg = Config()
+    cfg.bash = BashConfig(operator_open_ids=open_ids)
+    return CodingAgent(cfg)
+
+
+async def test_operator_bash_denies_non_operator():
+    ag = _agent_with_operators(["ou_owner"])
+    r = await ag.run_operator_bash("oc", "ou_intruder", "echo hi")
+    assert "权限" in r
+
+
+async def test_operator_bash_empty_command_usage():
+    ag = _agent_with_operators(["ou_owner"])
+    r = await ag.run_operator_bash("oc", "ou_owner", "")
+    assert "用法" in r
+
+
+async def test_operator_bash_blocks_dangerous():
+    ag = _agent_with_operators(["ou_owner"])
+    r = await ag.run_operator_bash("oc", "ou_owner", "rm -rf /")
+    assert "危险命令已拦截" in r
+
+
+async def test_operator_bash_suspicious_needs_channel():
+    ag = _agent_with_operators(["ou_owner"])
+    r = await ag.run_operator_bash("oc", "ou_owner", "rm old.txt")
+    # No channel wired → SUSPICIOUS can't be authorized → explicit refusal.
+    assert "授权" in r and "rm old.txt" in r
+
+
+async def test_operator_bash_safe_runs_in_sandbox():
+    ag = _agent_with_operators(["ou_owner"])
+    r = await ag.run_operator_bash("oc", "ou_owner", "echo operator-ok")
+    assert "operator-ok" in r

@@ -134,6 +134,19 @@ class AgentConfig:
 
 
 @dataclass
+class BashConfig:
+    """Operator gate for the `!`/`/bash` escape hatch (direct sandboxed bash).
+
+    Non-empty allow-list of Feishu open_ids that may use it; EMPTY (default)
+    disables the escape entirely. This whitelist (and the model registry) are
+    agent-protected: connectclaw/security.py refuses the agent from editing
+    their source files.
+    """
+
+    operator_open_ids: list[str] = field(default_factory=list)
+
+
+@dataclass
 class SessionConfig:
     dir: str = "~/.connectclaw/sessions"
 
@@ -199,6 +212,7 @@ class Config:
     vision: VisionConfig = field(default_factory=VisionConfig)
     proxy: ProxyConfig = field(default_factory=ProxyConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
+    bash: BashConfig = field(default_factory=BashConfig)
     session: SessionConfig = field(default_factory=SessionConfig)
     skills: SkillsConfig = field(default_factory=SkillsConfig)
     rag: RAGConfig = field(default_factory=RAGConfig)
@@ -293,6 +307,12 @@ class Config:
         if isinstance(ag_tools, list) and ag_tools:
             agent.tools = [str(x) for x in ag_tools]
 
+        # Bash operator escape (`!` / `/bash`); empty allow-list = disabled
+        ba = raw.get("bash", {})
+        bash = BashConfig(
+            operator_open_ids=[str(x) for x in ba.get("operator_open_ids", []) if x],
+        )
+
         # Session
         se = raw.get("session", {})
         session = SessionConfig(
@@ -366,6 +386,7 @@ class Config:
             vision=vision,
             proxy=proxy,
             agent=agent,
+            bash=bash,
             session=session,
             skills=skills,
             rag=rag,

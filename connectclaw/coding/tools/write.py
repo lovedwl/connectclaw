@@ -10,6 +10,7 @@ from typing import Any
 import aiofiles
 
 from connectclaw.agent.types import AgentTool, AgentToolResult
+from connectclaw.security import is_protected
 
 
 class WriteTool(AgentTool):
@@ -49,6 +50,19 @@ class WriteTool(AgentTool):
         file_path = params["file_path"]
         content = params["content"]
         absolute_path = self._resolve_path(file_path)
+
+        # Agent must never modify the escape-hatch security files (operator
+        # whitelist in config.toml, model registry). Refuse outright.
+        if is_protected(absolute_path):
+            return AgentToolResult(
+                content=[{
+                    "type": "text",
+                    "text": (
+                        f"⛔ 受保护文件（逃生配置，agent 不可修改）：{absolute_path}"
+                    ),
+                }],
+                details={"is_error": True},
+            )
 
         # Only allow writes within cwd — bash runs in sandbox which can't
         # see files outside cwd, so write must match.
