@@ -489,5 +489,22 @@ DeepSeek (openai SDK) · lark-oapi + lark-channel-sdk (WebSocket + HTTP)
 LanceDB · BGE-M3 · BGE-Reranker-v2-m3 (RAG, 可选)
 SQLite · numpy (分层记忆) · xxhash (hashline)
 bubblewrap · unshare (沙箱) · lightpanda-py (无头浏览器)
-openai · tiktoken · aiofiles · pyyaml · questionary · qrcode · websockets · httpx · torch
+openai · tiktoken · aiofiles · questionary · qrcode · websockets · httpx · torch
 ```
+
+## 十六、Skills 工具（按需检索技能库）
+
+主代理只暴露 **一个 `skills` 元工具**，按需检索/加载本机标准 SKILL.md 技能库（默认 `~/.agents/skills`，与 ZCode 共用同一套技能：lark-*、agently-mail、ustc-107-hpc 等）：
+
+- `scan` —— 列出全部技能（id + 一行简介）
+- `find` —— 对需求描述做 BM25 top-K 匹配（复用 `memory/bm25.py`，纯 Python、CJK 感知），返回命中词与依赖提示
+- `load` —— 载入技能 SKILL.md 正文（上限 8k 字符）+ 技能根目录路径；模型再用自身的 read/bash 读取支持文件/脚本并按步骤执行
+
+设计要点：
+
+- **前缀缓存安全**：`skills` 是稳定的白名单工具（定义一次性进入系统提示词后不再变化）；技能正文永远只出现在工具结果（历史）里，绝不注入系统提示词。
+- **轻量**：技能库按目录 mtime 缓存扫描结果；find 每次重建 BM25（几十个技能毫秒级）；不引入嵌入重排。
+- **信任边界**：技能是用户提供的参考文档。遵循其步骤（bash 等）仍走既有 BashGuard + 授权卡片；v1 不提供技能写入/创建，杜绝 agent 侧持久化注入面。
+- **扩展**：技能目录可用 `[skills] dir` / `CONNECTCLAW_SKILLS_DIR` 调整；子代理经 `agents` 元工具同样可取用 `skills`。
+
+实现：`connectclaw/coding/tools/skills.py`（SkillStore + SkillsTool）。

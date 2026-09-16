@@ -32,6 +32,7 @@ from .tools.hash_read import create_hash_read_tool
 from .tools.image_analyze import create_image_analyze_tool
 from .tools import lightpanda
 from .tools.read import create_read_tool
+from .tools.skills import SkillStore, SkillsTool
 from .tools.web_search import create_web_fetch_tool, create_web_search_tool
 from .tools.write import create_write_tool
 
@@ -90,6 +91,11 @@ class CodingAgent:
         self._attachment_store = AttachmentStore(DEFAULT_ATTACHMENTS_DIR)
         self._attach_image_tool = AttachImageTool(self._attachment_store)
 
+        # Skill library gateway: the model sees ONE `skills` tool and searches /
+        # loads SKILL.md packages on demand (see tools/skills.py).
+        self._skills_store = SkillStore(os.path.expanduser(config.skills.dir))
+        self._skills_tool = SkillsTool(self._skills_store)
+
         # RAG subsystem (optional, lazy init)
         self._rag = RAGSubsystem(
             RAGConfig(
@@ -136,7 +142,7 @@ class CodingAgent:
                 self._read_tool, self._write_tool, self._hash_read_tool,
                 self._hash_edit_tool, self._bash_tool, self._web_search_tool,
                 self._web_fetch_tool, self._image_tool, self._attach_image_tool,
-                self._memory_tool,
+                self._skills_tool, self._memory_tool,
             ]
         }
         # The single `agents` meta-tool: list / describe / run / create. Every

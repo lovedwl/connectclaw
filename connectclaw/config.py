@@ -128,7 +128,7 @@ class AgentConfig:
     tools: list[str] = field(
         default_factory=lambda: [
             "read", "write", "hash_read", "hash_edit",
-            "bash", "web_search", "web_fetch", "attach_image",
+            "bash", "web_search", "web_fetch", "attach_image", "skills",
         ]
     )
 
@@ -136,6 +136,17 @@ class AgentConfig:
 @dataclass
 class SessionConfig:
     dir: str = "~/.connectclaw/sessions"
+
+
+@dataclass
+class SkillsConfig:
+    """Where the `skills` tool scans for SKILL.md packages.
+
+    Defaults to the machine-wide ZCode skill library (~/.agents/skills); point
+    elsewhere (or add more dirs later) via config or CONNECTCLAW_SKILLS_DIR.
+    """
+
+    dir: str = "~/.agents/skills"
 
 
 @dataclass
@@ -189,6 +200,7 @@ class Config:
     proxy: ProxyConfig = field(default_factory=ProxyConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     session: SessionConfig = field(default_factory=SessionConfig)
+    skills: SkillsConfig = field(default_factory=SkillsConfig)
     rag: RAGConfig = field(default_factory=RAGConfig)
     web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
     compaction: CompactionConfig = field(default_factory=CompactionConfig)
@@ -288,6 +300,13 @@ class Config:
                 or se.get("dir", "~/.connectclaw/sessions"),
         )
 
+        # Skills (library scanned by the `skills` tool)
+        sk = raw.get("skills", {})
+        skills = SkillsConfig(
+            dir=os.environ.get("CONNECTCLAW_SKILLS_DIR")
+                or sk.get("dir", "~/.agents/skills"),
+        )
+
         # RAG
         ra = raw.get("rag", {})
         rag = RAGConfig(
@@ -348,6 +367,7 @@ class Config:
             proxy=proxy,
             agent=agent,
             session=session,
+            skills=skills,
             rag=rag,
             web_search=web_search,
             compaction=compaction,
