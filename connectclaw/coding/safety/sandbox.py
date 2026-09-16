@@ -106,12 +106,13 @@ class BwrapSandbox(Sandbox):
     """
     Full unprivileged container via bubblewrap (bwrap).
 
-    Creates a new mount namespace with:
-    - Read-only bind of the whole root — only cwd and allowed_paths writable
-    - New /tmp (tmpfs, private) and minimal /dev
-    - Private /proc (PID namespace)
-    Network stays open (no --unshare-net): authorization gates a command's
-    *danger* (BashGuard), not its connectivity.
+    Filesystem model: system paths read-only ($HOME and the real /tmp are
+    read-write) — the sandbox contains damage against the OS, not against the
+    user's own files. Commands can save anywhere under $HOME or /tmp (curl -o,
+    pip --user, npm -g, temp scratch) exactly like a normal shell, and /tmp
+    survives across commands (it is the system /tmp, not a per-command tmpfs);
+    dangerous commands are gated by BashGuard, not by making the filesystem
+    read-only. Network stays open (no --unshare-net) for the same reason.
     """
 
     @property
@@ -119,20 +120,26 @@ class BwrapSandbox(Sandbox):
         return SandboxLevel.BWARP
 
     async def execute(self, command: str, timeout: int = 120) -> SandboxResult:
-        # Build bwrap args with read-only root + explicit writable paths
+        home = os.environ.get("HOME") or os.path.expanduser("~")
+
+        # Build bwrap args: read-only root, read-write $HOME + system /tmp
         bwrap_args = [
             "bwrap",
             "--die-with-parent",
-            # Read-only bind entire root — everything is read-only by default
+            # Read-only bind entire root — every path is read-only by default;
+            # the binds below selectively re-expose writable areas.
             "--ro-bind", "/", "/",
-            # Read-write project directory
+            # Read-write the user's home: curl saves, pip --user, npm -g,
+            # project checkouts all work like a normal shell.
+            "--bind", home, home,
+            # Read-write project directory (defensive; usually under $HOME)
             "--bind", self.cwd, self.cwd,
             # Additional allowed paths (read-write)
             *[arg for path in self.allowed_paths
               for arg in ["--bind", os.path.abspath(path), os.path.abspath(path)]
               if os.path.abspath(path) != self.cwd and os.path.exists(os.path.abspath(path))],
-            # Private /tmp on tmpfs (writable, isolated)
-            "--tmpfs", "/tmp",
+            # Real system /tmp, read-write and persistent across commands
+            "--bind", "/tmp", "/tmp",
             # Fresh /proc for the PID namespace
             "--proc", "/proc",
             # Minimal /dev
@@ -156,8 +163,9 @@ class NamespaceSandbox(Sandbox):
     """
     Linux namespace isolation via unshare (mount + PID namespaces).
 
-    /tmp is remounted as a private tmpfs. Network stays open — no --net
-    namespace: authorization gates danger (BashGuard), not connectivity.
+    Uses the system /tmp (no private tmpfs) so temp files survive across
+    commands. Network stays open — no --net namespace: authorization gates
+    danger (BashGuard), not connectivity.
     """
 
     @property
@@ -171,7 +179,6 @@ class NamespaceSandbox(Sandbox):
 
         # Build the inner command
         inner = (
-            f"mount -t tmpfs tmpfs /tmp 2>/dev/null; "
             f"cd {self.cwd}; "
             f"{command}"
         )
