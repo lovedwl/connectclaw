@@ -50,6 +50,21 @@ class FeishuChannel(Channel):
         self._running = False
         self._stop_event: asyncio.Event = asyncio.Event()
         self._auth_requests: dict[str, AuthRequest] = {}
+        # Per-conversation locks: messages of the SAME chat are processed in
+        # arrival order (a /forget must land before the follow-up message reads
+        # the session), while different chats still run concurrently.
+        self._chat_locks: dict[str, asyncio.Lock] = {}
+
+    # ── Per-conversation serialization ─────────────────────
+
+    def _chat_lock(self, chat_id: str) -> asyncio.Lock:
+        """The serialization lock for one conversation (created on demand).
+
+        Same-chat messages hold this lock while processing, so they run in
+        arrival order; different chats get independent locks and stay
+        concurrent.
+        """
+        return self._chat_locks.setdefault(chat_id, asyncio.Lock())
 
     # ── Start / Stop ────────────────────────────────────────
 
@@ -66,8 +81,11 @@ class FeishuChannel(Channel):
             """Handle inbound message from SDK Channel.
 
             The actual processing is scheduled as a separate asyncio task so
-            the SDK's ChatPipeline serial queue is released immediately.
-            Slash commands skip the live card (no thinking panel).
+            the SDK's ChatPipeline serial queue is released immediately, but a
+            per-conversation lock keeps each chat's messages ordered: a slash
+            command and a follow-up text must not race (e.g. /forget followed
+            by a message that reads the session before the forget lands).
+            Different chats still process concurrently.
             """
             chat_id = msg.chat_id
             text = (msg.content_text or "").strip()
@@ -88,17 +106,18 @@ class FeishuChannel(Channel):
             is_cmd = text.startswith("/")
 
             async def _process() -> None:
-                try:
-                    callbacks = None if is_cmd else channel.create_live_card(chat_id)
-                    response = await on_message(
-                        chat_id, text, callbacks,
-                        resources=resources,
-                        message_id=message_id,
-                    )
-                    if response:
-                        await channel._stream_text(chat_id, response)
-                except Exception as e:
-                    logger.error("Message handler error: %s", e)
+                async with self._chat_lock(msg.chat_id):
+                    try:
+                        callbacks = None if is_cmd else channel.create_live_card(chat_id)
+                        response = await on_message(
+                            chat_id, text, callbacks,
+                            resources=resources,
+                            message_id=message_id,
+                        )
+                        if response:
+                            await channel._stream_text(chat_id, response)
+                    except Exception as e:
+                        logger.error("Message handler error: %s", e)
 
             asyncio.create_task(_process())
 
