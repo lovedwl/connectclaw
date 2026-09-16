@@ -37,6 +37,24 @@ class Channel(ABC):
         """Send an interactive card. Returns message_id."""
         ...
 
+    # ── Outbound media capabilities ─────────────────────────
+    # Channel-owned capabilities (files, images, cards, live streaming, ...).
+    # The agent binds to these through the abstract interface only — swap the
+    # channel implementation or add new capabilities here, never in the agent
+    # layer (see channel/capabilities.py).
+
+    @abstractmethod
+    async def send_image(self, conversation_key: str, image_path: str) -> str:
+        """Upload a local image and send it as an image message. Returns
+        message_id, or "" on failure."""
+        ...
+
+    @abstractmethod
+    async def send_file(self, conversation_key: str, file_path: str) -> str:
+        """Upload a local file and send it as a file attachment. Returns
+        message_id, or "" on failure."""
+        ...
+
     @abstractmethod
     async def send_thinking_indicator(self, conversation_key: str) -> None:
         """Show a typing/thinking indicator."""
