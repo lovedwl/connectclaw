@@ -17,7 +17,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from lark_channel import FeishuChannel as SdkChannel  # noqa: F401 — must import before asyncio loop starts
-from lark_channel.channel.types import MediaSource
 
 from connectclaw.logging import get_logger
 
@@ -294,18 +293,17 @@ class FeishuChannel(Channel):
     # ── Media sending (images / files to the user) ─────────
 
     async def send_image(self, conversation_key: str, image_path: str) -> str:
-        """Upload a local image and send it to the chat as an image message.
+        """Send a local image as an image message.
 
-        Returns the message id, or "" on failure (error is logged)."""
+        The SDK uploads the local path and sends the image in one step
+        (``{"image": {"source": ...}}``); returns the message id, or "" on
+        failure (error is logged)."""
         if self._sdk is None:
             logger.error("send_image: not connected")
             return ""
         try:
-            key = await self._sdk.upload_media(
-                MediaSource(kind="file", path=image_path), kind="image"
-            )
             result = await self._sdk.send(
-                conversation_key, {"image": {"image_key": key}}
+                conversation_key, {"image": {"source": image_path}}
             )
         except Exception as e:
             logger.error("send_image failed: %s", e)
@@ -316,22 +314,19 @@ class FeishuChannel(Channel):
         return ""
 
     async def send_file(self, conversation_key: str, file_path: str) -> str:
-        """Upload a local file and send it to the chat as a file attachment.
+        """Send a local file as a file attachment.
 
-        Returns the message id, or "" on failure (error is logged)."""
+        The SDK uploads and sends the local path in one step (\"file\" content
+        takes ``source`` + optional ``file_name``); returns the message id, or
+        \"\" on failure (error is logged)."""
         if self._sdk is None:
             logger.error("send_file: not connected")
             return ""
         name = os.path.basename(file_path) or "file"
         try:
-            key = await self._sdk.upload_media(
-                MediaSource(kind="file", path=file_path),
-                kind="file",
-                file_name=name,
-            )
             result = await self._sdk.send(
                 conversation_key,
-                {"file": {"file_key": key, "file_name": name}},
+                {"file": {"source": file_path, "file_name": name}},
             )
         except Exception as e:
             logger.error("send_file failed: %s", e)
