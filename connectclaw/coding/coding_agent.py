@@ -447,14 +447,10 @@ class CodingAgent:
 
     # ── Sandbox Escape Authorization ────────────────────────
 
-    async def request_network_auth(self, conversation_key: str, command: str) -> bool:
-        """Request user authorization to allow network access for a command."""
-        if self._channel is None:
-            return False
-        return await self._channel.request_network_authorization(conversation_key, command)
-
     async def request_unsandboxed_auth(self, conversation_key: str, command: str) -> bool:
-        """Request user authorization to run a command outside the sandbox entirely."""
+        """Request user authorization to write outside the working directory
+        (write-tool escape). This is the only remaining per-action gate other
+        than BashGuard's suspicious-command authorization."""
         if self._channel is None:
             return False
         return await self._channel.request_unsandboxed_authorization(conversation_key, command)
@@ -484,7 +480,7 @@ class CodingAgent:
             _auth_notes: dict[str, list[str]] = {}  # tool_call_id → notes
 
             async def on_before_tool(ctx: dict, signal=None) -> dict | None:
-                """Handle tool authorization: SUSPICIOUS bash, network escape, unsandboxed."""
+                """Handle tool authorization: write escapes + SUSPICIOUS bash."""
                 tool_call = ctx.get("tool_call", {})
                 tc_id = tool_call.get("id", "")
                 tool_name = tool_call.get("name", "")
@@ -515,7 +511,9 @@ class CodingAgent:
 
                 # Bash tool hooks
                 if tool_name == "bash":
-                    # 1. Safety check (SUSPICIOUS commands)
+                    # Safety check (SUSPICIOUS commands).
+                    # Network access needs NO authorization anymore — bash runs
+                    # with open network by default (see sandbox redesign).
                     check = self._bash_guard.check(command)
                     if check == "SUSPICIOUS":
                         notes.append("🔐 Bash authorization")
@@ -523,24 +521,6 @@ class CodingAgent:
                         if not approved:
                             notes.append("  → ❌ Denied by user")
                             return {"block": True, "reason": "User denied command execution"}
-                        notes.append("  → ✅ Approved by user")
-
-                    # 2. Network escape authorization
-                    if args.get("allow_network"):
-                        notes.append("🌐 Network access authorization")
-                        approved = await self.request_network_auth(key, command)
-                        if not approved:
-                            notes.append("  → ❌ Denied by user")
-                            return {"block": True, "reason": "User denied network access"}
-                        notes.append("  → ✅ Approved by user")
-
-                    # 3. Full sandbox escape authorization
-                    if args.get("unsandboxed"):
-                        notes.append("🚀 Sandbox escape authorization")
-                        approved = await self.request_unsandboxed_auth(key, command)
-                        if not approved:
-                            notes.append("  → ❌ Denied by user")
-                            return {"block": True, "reason": "User denied sandbox escape"}
                         notes.append("  → ✅ Approved by user")
 
                 return None

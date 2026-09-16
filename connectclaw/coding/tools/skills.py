@@ -23,11 +23,11 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-import shutil
 from dataclasses import dataclass
 from typing import Any
 
 from connectclaw.agent.types import AgentTool, AgentToolResult
+from connectclaw.coding.safety.shellpath import which_in_user_path
 from connectclaw.logging import get_logger
 from connectclaw.memory.bm25 import BM25Index
 
@@ -221,7 +221,9 @@ class SkillStore:
             "name": skill.name,
             "root": skill.root,
             "text": _cap_text(_body(raw), _LOAD_MAX_CHARS),
-            "missing_bins": [b for b in _required_bins(raw) if shutil.which(b) is None],
+            # Bin availability is judged against the user's interactive PATH
+            # (the systemd env PATH misses ~/.npm-global/bin etc.).
+            "missing_bins": [b for b in _required_bins(raw) if which_in_user_path(b) is None],
         }
 
 
