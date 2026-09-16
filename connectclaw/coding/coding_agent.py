@@ -110,6 +110,9 @@ class CodingAgent:
         # Multi-step /model wizard state per conversation (add profile without
         # a working model: ask base_url → model_id → api_key via chat replies).
         self._wizard: dict[str, dict] = {}
+        # Last message sender (open_id) per dispatch — used by /whoami so the
+        # operator can self-discover their id for the [bash] whitelist.
+        self._last_sender = ""
 
         # RAG subsystem (optional, lazy init)
         self._rag = RAGSubsystem(
@@ -540,6 +543,15 @@ class CodingAgent:
     # Direct, sandboxed shell for whitelisted operators only — the config
     # escape (config.toml [bash] operator_open_ids + models.toml) is
     # agent-protected via connectclaw/security.py.
+
+    @property
+    def last_sender(self) -> str:
+        """Open_id of the sender of the message being processed (main.py sets
+        it each dispatch). Used by /whoami for whitelist self-discovery."""
+        return self._last_sender
+
+    def set_sender(self, sender_open_id: str) -> None:
+        self._last_sender = sender_open_id or ""
 
     async def run_operator_bash(
         self, conversation_key: str, sender_open_id: str, command: str

@@ -244,6 +244,8 @@ async def main(argv: list[str] | None = None) -> None:
         live_card_callbacks: dict | None = None,
         **kwargs,
     ) -> str | None:
+        # Remember who's talking — /whoami needs it for whitelist discovery.
+        coding_agent.set_sender(kwargs.get("sender_open_id", ""))
         # Model wizard feed (escape hatch): a pending /model add wizard consumes
         # non-command replies; any slash command cancels it. Runs BEFORE image
         # handling and the agent loop, so it never depends on a working model.

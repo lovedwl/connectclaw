@@ -100,3 +100,34 @@ async def test_operator_bash_safe_runs_in_sandbox():
     ag = _agent_with_operators(["ou_owner"])
     r = await ag.run_operator_bash("oc", "ou_owner", "echo operator-ok")
     assert "operator-ok" in r
+
+
+# ── /whoami self-discovery ─────────────────────────────────────
+
+
+class FakeAgent:
+    last_sender = "ou_fake_123"
+    _config = Config()
+    _config.bash = BashConfig(operator_open_ids=["ou_fake_123"])
+
+
+async def test_whoami_reports_and_marks_whitelist():
+    from connectclaw.commands import handle
+
+    r = await handle("/whoami", conversation_key="oc", agent=FakeAgent())
+    assert "ou_fake_123" in r
+    assert "已在白名单" in r
+
+
+async def test_whoami_marks_pending_when_not_listed():
+    from connectclaw.commands import handle
+
+    class No(Config):
+        pass
+
+    fa = FakeAgent()
+    fa._config = Config()
+    fa._config.bash = BashConfig(operator_open_ids=["ou_other"])
+    r = await handle("/whoami", conversation_key="oc", agent=fa)
+    assert "尚未加入" in r
+    assert "operator_open_ids" in r
