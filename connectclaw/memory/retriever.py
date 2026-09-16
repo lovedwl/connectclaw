@@ -54,8 +54,9 @@ class RetrievalConfig:
     min_score: float = 0.2
     # Hard cosine-similarity gate for embedding retrieval. Below this, a memory
     # is irrelevant regardless of recency/importance/strength. Measured on
-    # BGE-M3 (zh): relevant hits land 0.50–0.73, unrelated queries peak <0.45.
-    min_similarity: float = 0.45
+    # BGE-base-zh-v1.5 (zh, 2026-09): relevant hits land 0.50–0.55, unrelated
+    # crosstalk peaks ~0.47 — 0.48 keeps real hits in and borderline noise out.
+    min_similarity: float = 0.48
     # Persona injection: high-importance semantic memories (how to address the
     # user, tone, standing preferences) are injected EVERY turn, bypassing the
     # similarity gate — so identity is present from the first "hi", not only when
