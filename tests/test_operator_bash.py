@@ -131,3 +131,34 @@ async def test_whoami_marks_pending_when_not_listed():
     r = await handle("/whoami", conversation_key="oc", agent=fa)
     assert "尚未加入" in r
     assert "operator_open_ids" in r
+
+
+# ── `!`-prefix routing: media placeholders are NOT operator commands ──────
+
+
+def test_image_placeholder_is_not_operator_bash():
+    """SDK 把入站图片渲染成 `![image](img_v3_...)` —— 以 ! 开头但不是命令。
+
+    回归：这类消息曾掉进 operator bash 分支被当 shell 执行，bash 报
+    「未预期的记号」并把 stderr 刷进聊天。它必须走正常 agent 回合。
+    """
+    from connectclaw.main import is_operator_bash
+
+    img = "![image](img_v3_0215k_fb65a176-562a-4014-8d2c-71273f0ecbag)"
+    assert is_operator_bash(img) is False
+    assert is_operator_bash("![表情](img_v3_xxx) 配文") is False
+    assert is_operator_bash("") is False
+
+
+def test_real_operator_lines_still_route_to_bash():
+    from connectclaw.main import is_operator_bash
+
+    assert is_operator_bash("!pwd") is True
+    assert is_operator_bash("!ls -la") is True
+    assert is_operator_bash("/bash echo hi") is True
+    # `!` 单独一个字符不是命令（历史行为保留）
+    assert is_operator_bash("!") is False
+    # 普通消息不带 ! 前缀
+    assert is_operator_bash("你好") is False
+    # markdown 里非开头的图片引用不影响命令判定
+    assert is_operator_bash("!cat a.md\n![image](img_x)") is True
