@@ -20,7 +20,7 @@ from lark_channel import FeishuChannel as SdkChannel  # noqa: F401 — must impo
 
 from connectclaw.logging import get_logger
 
-from .base import Channel, OnMessageCallback
+from .base import Channel, OnMessageCallback, is_media_placeholder
 
 logger = get_logger(__name__)
 
@@ -66,6 +66,18 @@ class FeishuChannel(Channel):
         it against the very task it is meant to cancel.
         """
         return text.strip().startswith("/stop")
+
+    def _is_cmd(self, text: str) -> bool:
+        """True for lines that get no live thinking card (raw execution, not
+        an agent turn): slash commands and operator `!`/`/bash` escapes.
+
+        Media placeholders (`![image](key)`) also start with `!` but are
+        inbound images — they ARE an agent turn (the image gets downloaded
+        and attached) and must not be treated as commands.
+        """
+        if is_media_placeholder(text):
+            return False
+        return text.startswith(("/", "!"))
 
     def _chat_lock(self, chat_id: str) -> asyncio.Lock:
         """The serialization lock for one conversation (created on demand).
@@ -127,7 +139,9 @@ class FeishuChannel(Channel):
 
             # Commands and operator-escape lines get no live thinking card —
             # `!`/`/bash` are raw execution, not an agent turn (no thinking).
-            is_cmd = text.startswith(("/", "!"))
+            # Media placeholders (`![image](...)`) are NOT commands: they are
+            # inbound images that must reach the agent as an agent turn.
+            is_cmd = self._is_cmd(text)
             # /stop is the one command that may NOT queue behind the lock
             interrupt = self._is_interrupt(text)
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -11,6 +12,21 @@ OnMessageCallback = Callable[..., Awaitable[str | None]]
 """Callback: (conversation_key, text, live_card_callbacks=None, *,
               resources=None, message_id=None, sender_open_id=None)
          -> response_text"""
+
+
+MEDIA_PLACEHOLDER_RE = re.compile(r"!\[[^\]]*\]\([^)]+\)")
+"""The SDK flattens inbound image/sticker messages into markdown placeholders
+(``![image](img_v3_...)``)."""
+
+
+def is_media_placeholder(text: str) -> bool:
+    """True if ``text`` starts with a media placeholder like ``![image](key)``.
+
+    Such messages start with ``!`` but are inbound media, never an operator
+    ``!`` command — both the channel live-card gate and the operator-bash
+    gate must exclude them.
+    """
+    return bool(MEDIA_PLACEHOLDER_RE.match(text))
 
 
 class Channel(ABC):

@@ -17,6 +17,7 @@ import shutil
 import signal
 import sys
 
+from connectclaw.channel.base import is_media_placeholder
 from connectclaw.channel.feishu import FeishuChannel  # noqa: E402 — must load before asyncio loop
 from connectclaw.coding.tools.attach_image import (
     AttachmentStore,
@@ -25,6 +26,19 @@ from connectclaw.coding.tools.attach_image import (
 from connectclaw.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+def is_operator_bash(text: str) -> bool:
+    """True for real operator-escape lines (``!cmd`` / ``/bash cmd``).
+
+    Media placeholders (``![image](img_v3_...)``) also start with ``!`` — the
+    SDK's content flattening renders inbound images that way — but they are
+    never operator commands: they must fall through to image download + agent
+    processing.
+    """
+    if is_media_placeholder(text):
+        return False
+    return (text.startswith("!") and len(text) > 1) or text.startswith("/bash ")
 
 
 async def _download_feishu_images(
@@ -257,7 +271,7 @@ async def main(argv: list[str] | None = None) -> None:
 
         # Operator bash escape: `!cmd` or `/bash cmd` → raw sandboxed shell for
         # whitelisted operators (no LLM involved; works with the model down).
-        if (text.startswith("!") and len(text) > 1) or text.startswith("/bash "):
+        if is_operator_bash(text):
             cmd = text[1:].strip() if text.startswith("!") else text[6:].strip()
             return await coding_agent.run_operator_bash(
                 conversation_key,
