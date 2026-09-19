@@ -42,6 +42,33 @@ from .tools.write import create_write_tool
 logger = get_logger(__name__)
 
 
+def final_response_text(result: Any) -> str:
+    """Human-facing text of a finished turn.
+
+    Priority: text blocks → thinking fallback → FULL provider error passthrough
+    (single-operator bot: the raw error is exactly what the operator needs to
+    act — /model switch, key unblock, etc.; truncating it into "(empty
+    response)" hid 401s and gateway config errors behind a useless marker) →
+    literal empty marker.
+    """
+    text_blocks = [
+        c["text"] for c in result.content
+        if c.get("type") == "text" and c.get("text")
+    ]
+    if text_blocks:
+        return "\n".join(text_blocks)
+    thinking_blocks = [
+        c.get("thinking", "") for c in result.content
+        if c.get("type") == "thinking"
+    ]
+    if thinking_blocks:
+        # Model returned only thinking, no text — use thinking as response
+        return thinking_blocks[-1][:2000]
+    if result.error_message:
+        return f"⚠️ 模型调用失败：{result.error_message}"
+    return "(empty response)"
+
+
 class CodingAgent:
     """Assembles a general-purpose AI assistant. Coding is one capability among many."""
 
@@ -377,23 +404,7 @@ class CodingAgent:
             if result.error_message:
                 logger.debug("[CODING] error_message: %s", result.error_message)
 
-            text_blocks = [
-                c["text"] for c in result.content
-                if c.get("type") == "text" and c.get("text")
-            ]
-            thinking_blocks = [
-                c.get("thinking", "") for c in result.content
-                if c.get("type") == "thinking"
-            ]
-
-            if text_blocks:
-                resp = "\n".join(text_blocks)
-            elif thinking_blocks:
-                # Model returned only thinking, no text — use thinking as response
-                logger.debug("[CODING] no text blocks, falling back to thinking (%d blocks)", len(thinking_blocks))
-                resp = thinking_blocks[-1][:2000]
-            else:
-                resp = "(empty response)"
+            resp = final_response_text(result)
 
             logger.debug("[CODING] response: %s", resp[:200])
 
