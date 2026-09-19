@@ -25,7 +25,9 @@ import html.parser
 import json
 import os
 import re
+import time
 import urllib.parse
+import xml.etree.ElementTree as ET
 from typing import Any
 
 import httpx
@@ -297,11 +299,15 @@ _IMG_MD_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
 _EMPTY_LINK_RE = re.compile(r"\[\s*\]\([^)]*\)")
 
 
-def _strip_images(text: str) -> str:
+def _strip_images(text: str, *, cleanup_parens: bool = True) -> str:
     text = _IMG_MD_RE.sub("", text)
     text = _EMPTY_LINK_RE.sub("", text)
-    # Tidy up the "()" / " ." leftovers a removed inline element can leave behind.
-    text = re.sub(r"\(\s*\)", "", text)
+    if cleanup_parens:
+        # Tidy up the "()" leftovers a removed inline element can leave behind.
+        # Only for the LP.getMarkdown path — the HTML→Markdown converter emits
+        # no link remnants, and blanking "()" would eat inline code like
+        # `foo()`.
+        text = re.sub(r"\(\s*\)", "", text)
     return text
 
 
@@ -440,7 +446,7 @@ async def close_shared() -> None:
     _kill_shared_proc()
 
 
-async def _run_stateless(action) -> str:
+async def _run_stateless(action, nav_timeout: int = DEFAULT_NAV_TIMEOUT) -> str:
     """Run action(engine, sid) on a fresh session attached to the shared server.
 
     Each call: acquire the concurrency semaphore → open its own ws + target →
@@ -452,7 +458,7 @@ async def _run_stateless(action) -> str:
     last: Exception | None = None
     async with _sem:
         for _ in (1, 2):
-            eng = LightpandaEngine()
+            eng = LightpandaEngine(nav_timeout=nav_timeout)
             sid: str | None = None
             try:
                 await eng.attach(ws_url)
@@ -490,52 +496,187 @@ _HTTP_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/120.0 Safari/537.36"
 )
+_HTTP_ACCEPT_LANGUAGE = "zh-CN,zh;q=0.9,en;q=0.8"
 
 
-class _HTMLTextExtractor(html.parser.HTMLParser):
-    """Dependency-free HTML → visible text (skips script/style/noscript/etc)."""
+class _HTMLToMarkdown(html.parser.HTMLParser):
+    """Dependency-free HTML → Markdown.
 
-    _SKIP_TAGS = {"script", "style", "noscript", "template", "svg", "head"}
+    Emits headings (#), lists (-), links ([text](href) — the model can
+    web_fetch them onward), simple tables (| cells) and fenced code blocks;
+    like a browser, text data outside <pre> is whitespace-insensitive and
+    collapsed. Page chrome (nav/header/footer/aside/forms/svg/…) and
+    script/style are skipped; images are dropped entirely (token bloat +
+    poison Feishu cards, see _strip_images).
+    """
 
-    def __init__(self) -> None:
+    _SKIP_TAGS = {
+        "script", "style", "noscript", "template", "svg", "textarea",
+        "nav", "header", "footer", "aside", "form", "select", "button",
+        "input", "iframe", "object", "video", "audio", "meta", "link", "base",
+    }
+    # Void elements never emit an end tag — counting them in _skip would leak
+    # and silently swallow the rest of the page.
+    _VOID_TAGS = {
+        "meta", "link", "base", "br", "img", "hr", "input", "wbr",
+        "source", "area", "col", "embed", "track", "param",
+    }
+    _NEWLINE_TAGS = {
+        "p", "div", "section", "article", "blockquote", "table", "ul",
+        "ol", "dl", "tr", "figcaption", "dt", "dd",
+    }
+    _WS_RE = re.compile(r"[ \t\r\n]+")
+
+    def __init__(self, base_url: str = "") -> None:
         super().__init__(convert_charrefs=True)
+        self.base_url = base_url
         self._skip = 0
+        self._pre = 0
+        self._in_title = False
+        self._href: str | None = None
+        self._link_text: list[str] = []
         self._chunks: list[str] = []
+        self.title = ""
 
     def handle_starttag(self, tag, attrs):
         if tag in self._SKIP_TAGS:
-            self._skip += 1
-        elif tag in ("p", "div", "h1", "h2", "h3", "h4", "li", "br", "tr"):
+            if tag not in self._VOID_TAGS:
+                self._skip += 1
+            return
+        if self._skip:
+            return
+        if tag == "title":
+            self._in_title = True
+        elif tag == "a":
+            href = (dict(attrs).get("href") or "").strip()
+            if self._href is None and href and not href.startswith(("javascript:", "#")):
+                self._href = href
+                self._link_text = []
+        elif tag == "pre":
+            self._pre += 1
+            self._chunks.append("\n```\n")
+        elif tag == "code" and not self._pre:
+            self._chunks.append("`")
+        elif tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
+            self._chunks.append("\n\n" + "#" * int(tag[1]) + " ")
+        elif tag == "li":
+            self._chunks.append("\n- ")
+        elif tag in ("td", "th"):
+            self._chunks.append("| ")
+        elif tag == "br":
             self._chunks.append("\n")
-
-    def handle_startendtag(self, tag, attrs):
-        if tag == "br":
+        elif tag in self._NEWLINE_TAGS:
             self._chunks.append("\n")
 
     def handle_endtag(self, tag):
-        if tag in self._SKIP_TAGS and self._skip:
-            self._skip -= 1
+        if tag in self._SKIP_TAGS:
+            if tag not in self._VOID_TAGS and self._skip:
+                self._skip -= 1
+            return
+        if tag == "title":
+            self._in_title = False
+        elif tag == "a" and self._href is not None:
+            text = self._WS_RE.sub(" ", "".join(self._link_text)).strip()
+            if text:
+                href = self._href
+                if self.base_url:
+                    href = urllib.parse.urljoin(self.base_url, href)
+                if href.startswith(("http://", "https://")):
+                    self._chunks.append(f"[{text}]({href})")
+                else:  # mailto:/ftp:/unresolvable — keep the text, drop the link
+                    self._chunks.append(text)
+            self._href = None
+            self._link_text = []
+        elif tag == "pre" and self._pre:
+            self._pre -= 1
+            self._chunks.append("\n```\n")
+        elif tag == "code" and not self._pre:
+            self._chunks.append("`")
+        elif tag in ("td", "th"):
+            self._chunks.append(" ")
 
     def handle_data(self, data):
-        if not self._skip:
+        if self._skip:
+            return
+        if self._in_title:
+            self.title += data
+        elif self._href is not None:
+            self._link_text.append(data if self._pre else self._WS_RE.sub(" ", data))
+        elif self._pre:
             self._chunks.append(data)
+        else:
+            self._chunks.append(self._WS_RE.sub(" ", data))
+
+    def close(self) -> None:
+        super().close()
+        # Unclosed <a> — flush its accumulated text unlinked so it isn't lost.
+        if self._href is not None:
+            text = self._WS_RE.sub(" ", "".join(self._link_text)).strip()
+            if text:
+                self._chunks.append(text)
+            self._href = None
+
+    def markdown(self) -> str:
+        return "".join(self._chunks)
 
 
-def _html_to_text(html_text: str) -> str:
-    parser = _HTMLTextExtractor()
+def _html_to_markdown(html_text: str, base_url: str = "") -> str:
+    parser = _HTMLToMarkdown(base_url=base_url)
     parser.feed(html_text)
     parser.close()
-    return _collapse("".join(parser._chunks))
+    # Empty list items ("-" alone) are icon/image bullets whose content was
+    # dropped — pure noise.
+    lines = [
+        ln
+        for ln in _squeeze_blanklines(
+            _strip_images(parser.markdown(), cleanup_parens=False)
+        ).split("\n")
+        if ln.strip() != "-"
+    ]
+    body = "\n".join(lines).strip()
+    title = parser.title.strip()
+    if title and body:
+        return f"# {title}\n\n{body}"
+    return body or title
 
 
-async def http_fetch_once(url: str, max_chars: int = 8000, timeout: float = _FASTPATH_TIMEOUT) -> str:
-    """Plain-HTTP page fetch (no browser).
+# ── page cache (web_fetch) ───────────────────────────────────
+# 15-min TTL per URL. Stores the FULL uncapped markdown so different
+# max_chars / prompt calls share one entry — the cap is applied per call after
+# retrieval. The insertion-ordered dict doubles as the LRU list.
+
+_FETCH_CACHE_TTL = 900.0
+_FETCH_CACHE_MAX = 32
+_fetch_cache: dict[str, tuple[float, str]] = {}
+
+
+def _cache_get(url: str) -> str | None:
+    hit = _fetch_cache.get(url)
+    if hit is None:
+        return None
+    ts, text = hit
+    if time.monotonic() - ts > _FETCH_CACHE_TTL:
+        _fetch_cache.pop(url, None)
+        return None
+    return text
+
+
+def _cache_put(url: str, text: str) -> None:
+    _fetch_cache.pop(url, None)  # re-insert → freshest at the tail
+    _fetch_cache[url] = (time.monotonic(), text)
+    while len(_fetch_cache) > _FETCH_CACHE_MAX:
+        _fetch_cache.pop(next(iter(_fetch_cache)))
+
+
+async def http_fetch_once(url: str, timeout: float = _FASTPATH_TIMEOUT) -> str:
+    """Plain-HTTP page fetch → Markdown (no browser).
 
     Returns '' — not raises — when the response isn't usable as page text
     (non-HTML content, HTTP errors, JS-rendered shell), so the caller can fall
-    back to the browser engine.
+    back to the browser engine. The text is NOT capped here: the caller caches
+    the full page and applies per-call caps.
     """
-    headers = {"User-Agent": _HTTP_USER_AGENT}
+    headers = {"User-Agent": _HTTP_USER_AGENT, "Accept-Language": _HTTP_ACCEPT_LANGUAGE}
     try:
         async with httpx.AsyncClient(
             follow_redirects=True, timeout=timeout, headers=headers
@@ -548,7 +689,10 @@ async def http_fetch_once(url: str, max_chars: int = 8000, timeout: float = _FAS
     ctype = (resp.headers.get("content-type") or "").lower()
     if ctype and "html" not in ctype and "text/plain" not in ctype:
         return ""
-    text = _cap(_html_to_text(resp.text), max_chars)
+    try:
+        text = _html_to_markdown(resp.text, base_url=str(resp.url))
+    except Exception:
+        return ""
     # Tiny content WITH scripts is the classic JS-app shell signature — the
     # server sent a loader, the real text renders client-side. Hand those (and
     # empty results) to the browser engine; genuinely small static pages come
@@ -558,33 +702,151 @@ async def http_fetch_once(url: str, max_chars: int = 8000, timeout: float = _FAS
     return text
 
 
-async def fetch_once(url: str, max_chars: int = 8000, http_timeout: float = _FASTPATH_TIMEOUT) -> str:
-    """Stateless page fetch: plain-HTTP fast path first (most static pages need
-    no browser), then a real browser session for JS-rendered pages."""
-    text = await http_fetch_once(url, max_chars, timeout=http_timeout)
-    if text.strip():
-        return text
+async def fetch_once(
+    url: str,
+    max_chars: int = 8000,
+    http_timeout: float = _FASTPATH_TIMEOUT,
+    no_cache: bool = False,
+) -> str:
+    """Stateless page fetch → Markdown.
 
-    async def _do(eng: LightpandaEngine, sid: str) -> str:
-        await eng.navigate(sid, url)
-        return _cap(await eng.read_markdown(sid), max_chars)
+    Plain-HTTP fast path first (most static pages need no browser), then a real
+    browser session for JS-rendered pages. The full-page markdown is cached per
+    URL (15-min TTL); `max_chars` caps only the returned text, so a cached page
+    serves different caps / prompts without refetching.
+    """
+    if not no_cache:
+        cached = _cache_get(url)
+        if cached is not None:
+            return _cap(cached, max_chars)
 
-    return await _run_stateless(_do)
+    text = await http_fetch_once(url, timeout=http_timeout)
+    if not text.strip():
+
+        async def _do(eng: LightpandaEngine, sid: str) -> str:
+            await eng.navigate(sid, url)
+            return await eng.read_markdown(sid)
+
+        text = await _run_stateless(_do, nav_timeout=int(http_timeout))
+
+    if text.strip() and not no_cache:
+        _cache_put(url, text)
+    return _cap(text, max_chars)
 
 
 # Bing renders enough server-side for Lightpanda's DOM engine (verified);
-# DuckDuckGo's endpoints crash it. A real browser session beats glyph's scrape.
+# DuckDuckGo's endpoints crash it. The PRIMARY search path is the RSS endpoint
+# below — plain HTTP, structured items, immune to Bing page redesigns. The
+# real browser session over the HTML results page is only the fallback.
 _SEARCH_URL = "https://www.bing.com/search?q={q}"
+_SEARCH_RSS_URL = "https://www.bing.com/search?q={q}&format=rss&count={n}"
 
 
-async def search_once(query: str, max_chars: int = 8000) -> str:
-    """Stateless web search via a real browser session (Bing). Crash-recovering."""
+def _parse_bing_rss(xml_text: str) -> list[dict[str, str]]:
+    """Bing RSS 2.0 XML → [{'title','url','snippet'}].
+
+    Tolerant by design: returns [] on anything unparseable (error pages,
+    endpoint changes) so the caller falls back to the browser session.
+    """
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return []
+    results: list[dict[str, str]] = []
+    for item in root.iter("item"):
+        title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip()
+        if not title or not link:
+            continue
+        # Descriptions occasionally carry markup / nested entities — strip
+        # tags first, then unescape what's left, then squeeze whitespace.
+        desc = re.sub(r"<[^>]+>", " ", html.unescape(item.findtext("description") or ""))
+        results.append({
+            "title": title,
+            "url": link,
+            "snippet": re.sub(r"\s+", " ", desc).strip(),
+        })
+    return results
+
+
+async def _search_rss(query: str, count: int, timeout: float) -> list[dict[str, str]]:
+    """Fetch Bing's RSS search endpoint over plain HTTP (no browser).
+
+    www.bing.com 302s to the regional host (e.g. cn.bing.com) — follow_redirects
+    handles it. Returns [] on any failure; the caller falls back.
+    """
+    url = _SEARCH_RSS_URL.format(q=urllib.parse.quote(query), n=max(count, 10))
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=timeout,
+            headers={"User-Agent": _HTTP_USER_AGENT, "Accept-Language": _HTTP_ACCEPT_LANGUAGE},
+        ) as client:
+            resp = await client.get(url)
+    except Exception:
+        return []
+    if resp.status_code >= 400:
+        return []
+    return _parse_bing_rss(resp.text)
+
+
+def _domain_allowed(url: str, allowed: list[str] | None, blocked: list[str] | None) -> bool:
+    """Domain filter for structured results (exact-host or dot-suffix match)."""
+    if not allowed and not blocked:
+        return True
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    if not host:
+        return not allowed  # opaque URL — only let it through when unfiltered
+
+    def _match(domains: list[str]) -> bool:
+        return any(host == d.lower() or host.endswith("." + d.lower()) for d in domains)
+
+    if blocked and _match(blocked):
+        return False
+    if allowed and not _match(allowed):
+        return False
+    return True
+
+
+def _render_results(results: list[dict[str, str]]) -> str:
+    """Numbered markdown-link list: `N. [title](url)` + indented snippet."""
+    lines: list[str] = []
+    for i, r in enumerate(results, 1):
+        lines.append(f"{i}. [{r['title']}]({r['url']})")
+        if r.get("snippet"):
+            lines.append(f"   {r['snippet']}")
+    return "\n".join(lines)
+
+
+async def search_once(
+    query: str,
+    max_chars: int = 8000,
+    timeout: float = _FASTPATH_TIMEOUT,
+    max_results: int = 8,
+    allowed_domains: list[str] | None = None,
+    blocked_domains: list[str] | None = None,
+) -> str:
+    """Stateless web search.
+
+    Primary: Bing's RSS endpoint over plain HTTP — structured results, no
+    browser. Fallback: a real browser session over the HTML results page
+    (crash-recovering). Domain filters apply to the structured RSS results.
+    """
+    max_results = max(1, min(int(max_results), 30))
+    rss = await _search_rss(query, count=max_results * 3, timeout=timeout)
+    if rss:
+        hits = [r for r in rss if _domain_allowed(r["url"], allowed_domains, blocked_domains)]
+        if hits:
+            return _cap(_render_results(hits[:max_results]), max_chars)
+        # RSS worked but the filters eliminated everything — a browser session
+        # would return the same unfiltered list, so don't pay for one.
+        return "No search results matched the domain filters."
+
     url = _SEARCH_URL.format(q=urllib.parse.quote(query))
 
     async def _do(eng: LightpandaEngine, sid: str) -> str:
         await eng.navigate(sid, url)
-        md = await eng.read_markdown(sid)
         # Drop Bing's header nav and footer; keep just the result list.
-        return _cap(_trim_bing_chrome(md), max_chars)
+        return _trim_bing_chrome(await eng.read_markdown(sid))
 
-    return await _run_stateless(_do)
+    return _cap(await _run_stateless(_do, nav_timeout=int(timeout)), max_chars)

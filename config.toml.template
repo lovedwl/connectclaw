@@ -67,16 +67,19 @@ top_k = 20
 top_n = 5
 
 [web_search]
-# Web search/fetch run on the bundled Lightpanda headless browser (lightpanda-py,
-# binary included): Bing for search, a real DOM session (replaces the old glyph).
-# For login / multi-step interaction, the agent uses the stateful `browser` tool.
+# Web search/fetch tools. Search hits Bing's RSS endpoint over plain HTTP
+# (structured results, fast); fetch uses a plain-HTTP fast path — both fall
+# back to the bundled Lightpanda headless browser (lightpanda-py, binary
+# included) for JS-rendered pages or when the fast path is unavailable.
 # Max characters in search/fetch response
 max_chars = 8000
-# Timeout in seconds
+# Timeout in seconds (HTTP requests + browser navigation budget)
 timeout = 30
-# Parallel browser engines for web_search/web_fetch (each ~tens of MB). Higher =
-# more concurrent searches (e.g. a fleet of search sub-agents), at more memory.
-pool_size = 3
+# Max concurrent browser sessions sharing one Lightpanda serve process
+pool_size = 16
+# models.toml profile name used by web_fetch's `prompt` extraction (a cheap
+# small model). Empty = follow the active main model (hot-switches with /model).
+extract_model = ""
 
 [compaction]
 # Enable automatic context compaction
