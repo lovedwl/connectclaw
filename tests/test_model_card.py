@@ -119,6 +119,34 @@ def test_result_card_states():
     assert _buttons(fail_card) == []
 
 
+def test_render_nonce_makes_recurring_stages_dedup_distinct():
+    """回归：SDK 按 message_id+operator+value 去重卡片点击（TTL 12h）。
+
+    选择卡复用同一条消息原位更新，"重新选择"和"‹ 返回"的 stage 相同——
+    不加渲染级 nonce 的话，返回点击会被当成重新选择的重复投递静默丢弃
+    （用户实测返回失灵）。同 stage 不同渲染 → value 必须不同；同一次
+    渲染内的按钮共享 nonce（真实重复投递仍被去重挡住）。
+    """
+    active = _p("a", "m1", provider="P")
+    agent = FakeAgent([active], active)
+
+    def _values(card):
+        return [b["value"] for b in _buttons(card)]
+
+    card1 = _values(provider_level_card(agent))
+    card2 = _values(provider_level_card(agent))
+    # 同 stage、不同渲染 → nonce 不同 → SDK 去重键不同
+    s1 = [v for v in card1 if v["stage"] == "cancel"][0]
+    s2 = [v for v in card2 if v["stage"] == "cancel"][0]
+    assert s1["n"] != s2["n"]
+    # 同一渲染内所有按钮共享同一个 nonce（同一渲染的重投递 = 同键 = 去重生效）
+    assert len({v["n"] for v in card1}) == 1
+    # 切换按钮的业务字段不被 nonce 破坏
+    lvl2 = _values(model_level_card(agent, "P"))
+    sw = [v for v in lvl2 if v["stage"] == "switch"][0]
+    assert (sw["kind"], sw["name"]) == ("model_switch", "a") and sw["n"]
+
+
 # ── 点击分发 ───────────────────────────────────────────────────
 
 
