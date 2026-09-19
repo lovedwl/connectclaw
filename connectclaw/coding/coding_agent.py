@@ -108,6 +108,12 @@ class CodingAgent:
         self._web_fetch_tool = create_web_fetch_tool(
             max_chars=config.web_search.max_chars,
             timeout=config.web_search.timeout,
+            extract_model=config.web_search.extract_model,
+            # Callables, not the live Model: web_fetch's `prompt` extraction
+            # resolves them per call, so /model hot-switches are honored.
+            model_provider=lambda: self._model,
+            api_key_provider=lambda: self._config.llm.api_key or "",
+            proxy=config.proxy.url,
         )
         self._image_tool = create_image_analyze_tool(
             api_key=config.vision.api_key,

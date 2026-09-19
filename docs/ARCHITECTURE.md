@@ -101,14 +101,14 @@ connectclaw/
 │   │   ├── hash_read.py       # 哈希锚定读 (带 LINE#HASH 锚点, hash_edit 的唯一寻址方式)
 │   │   ├── hash_edit.py       # 哈希锚定改 (replace/append/prepend/replace_text, 读快照校验)
 │   │   ├── bash.py            # Shell 执行 (BashGuard 门禁 + 隔离沙箱 + 用户 PATH)
-│   │   ├── web_search.py      # Lightpanda 无头浏览器，Bing 引擎，免费
+│   │   ├── web_search.py      # Bing RSS 快路径(结构化结果/域名过滤) + web_fetch prompt 提取(小模型)
 │   │   ├── image_analyze.py   # 子agent: Mimo 视觉分析 (非默认工具，[vision] 启用 + 代理)
 │   │   ├── attach_image.py    # 图片按需重挂 (AttachmentStore + manifest + attach_image 工具)
 │   │   ├── memory.py          # agent 可用记忆工具 (search / soften 软遗忘, persona 受保护)
 │   │   ├── agents.py          # agents 元工具 (list/describe/run/create) — 子 agent 编队 + DAG
 │   │   ├── named_agents.py    # 命名 agent 加载 (~/.connectclaw/agents/*.md)
 │   │   ├── subagent.py        # 子 agent 执行引擎
-│   │   └── lightpanda.py      # Lightpanda CDP 引擎 (web_search/web_fetch 底层)
+│   │   └── lightpanda.py      # Lightpanda CDP 引擎 + HTML→Markdown + 页面缓存 (web_search/web_fetch 底层)
 │   │
 │   └── safety/
 │       ├── sandbox.py         # 隔离沙箱 (bwrap → unshare → direct，无资源限制)
@@ -226,8 +226,8 @@ outer: while (有 follow-up 消息):
 | `hash_read` | 哈希锚定读，输出 LINE#HASH 锚点 | 记录读快照 (篡改检测基准) |
 | `hash_edit` | 哈希锚定改 (replace/append/prepend/replace_text) | 锚点哈希预检 + 幂等去重 + 读快照校验 |
 | `bash` | 执行 shell 命令 | BashGuard 三级 + 三层沙箱 |
-| `web_search` | Lightpanda 无头浏览器 + Bing 引擎搜索 | 免费，无需 API key |
-| `web_fetch`  | Lightpanda 无头浏览器抓取 URL 纯文本 | 免费，无需 API key |
+| `web_search` | Bing RSS 快路径（结构化编号结果 + `max_results` / `allowed_domains` / `blocked_domains` 过滤），失败回落 Lightpanda 浏览器会话 | 免费，无需 API key |
+| `web_fetch`  | URL → Markdown（静态页走纯 HTTP 快路径，JS 页回落浏览器）；可选 `prompt` 由小模型按需提取答案；页面 15min TTL 缓存 | 免费，无需 API key |
 | `image_analyze` | Mimo 视觉模型分析图片（**非默认工具**，`[vision]` 配置仍有；请求走模型代理） | API key 可选 |
 | `attach_image` | 把历史图片重新挂进当轮上下文（阅后即弃策略的按需重挂通道） | 只读附件目录 |
 | `send_file` | 把本地文件/图片发给用户（绑定 `Channel` ABC 的 channel 能力工具，见 `channel/capabilities.py`；飞书实现 upload_media → image/file 消息） | 仅发送，读取本地文件 |
@@ -389,7 +389,7 @@ JSONL 树形结构，每行一个 JSON 对象：
   [agent]        cwd / thinking_level / tools(白名单) / tool_session_idle_timeout
   [session]      dir
   [rag]          enabled / docs_dir / db_path / top_k / top_n
-  [web_search]   max_chars / timeout / pool_size
+  [web_search]   max_chars / timeout / pool_size / extract_model
   [compaction]   enabled / reserve_tokens / keep_recent_tokens
   [memory]       enabled / db_path / extract_min_turns / extract_interval_turns
                  / max_context_tokens / recency_threshold_days / use_embeddings

@@ -179,6 +179,9 @@ class WebSearchConfig:
     # Lightpanda `serve` process hosts them all (multi-client model), so this is
     # a session cap, not a process count — no per-session subprocess.
     pool_size: int = 16
+    # models.toml profile name for web_fetch `prompt` extraction (a cheap small
+    # model). Empty = follow the active main model (hot-switches with /model).
+    extract_model: str = ""
 
 
 @dataclass
@@ -352,6 +355,7 @@ class Config:
                 or ws.get("timeout", 30)
             ),
             pool_size=int(ws.get("pool_size", 16)),
+            extract_model=str(ws.get("extract_model", "") or ""),
         )
 
         # Compaction
