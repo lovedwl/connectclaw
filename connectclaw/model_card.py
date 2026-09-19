@@ -13,6 +13,7 @@ picker card walks provider → model → result without spamming the chat.
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 from connectclaw.logging import get_logger
@@ -26,6 +27,19 @@ KIND = "model_switch"
 _NOTE = "<font color='grey'>点击即热切换（全部会话立即生效，写入 config.toml），无需重启 · /model list 看文本清单</font>"
 
 
+def _render_nonce() -> str:
+    """Per-render random tag baked into every button value.
+
+    The SDK dedups card clicks for 12h on ``message_id + operator + value``
+    (WS-redelivery guard). The picker reuses ONE message (in-place updates),
+    so a value like ``{"stage": "providers"}`` recurs across renders —
+    重新选择 → 返回 → 再展开 would be silently dropped as duplicates. A fresh
+    nonce per render keeps genuine re-clicks distinct while a redelivered
+    click (same render, same JSON) still dedups.
+    """
+    return uuid.uuid4().hex[:8]
+
+
 def group_by_provider(profiles: list[ModelProfile]) -> list[tuple[str, list[ModelProfile]]]:
     """Group profiles by display provider, stable order: insertion of first
     member, active-independent (the caller highlights the active one)."""
@@ -35,12 +49,15 @@ def group_by_provider(profiles: list[ModelProfile]) -> list[tuple[str, list[Mode
     return list(groups.items())
 
 
-def _button(text: str, value: dict, style: str = "default") -> dict:
+def _button(text: str, value: dict, style: str = "default", nonce: str = "") -> dict:
+    v = dict(value)
+    if nonce:
+        v["n"] = nonce
     return {
         "tag": "button",
         "text": {"tag": "plain_text", "content": text},
         "type": style,
-        "value": value,
+        "value": v,
     }
 
 
@@ -77,6 +94,7 @@ def provider_level_card(agent: Any) -> dict:
     active = agent.entry_model_profile()
     active_label = f"{active.display_provider() if active else '?'}/{getattr(active, 'model_id', '?')}"
     groups = group_by_provider(profiles)
+    nonce = _render_nonce()
 
     elements: list[dict] = [
         {"tag": "markdown",
@@ -89,9 +107,10 @@ def provider_level_card(agent: Any) -> dict:
             f"{prov} · {len(ps)}个" + ("（当前）" if has_active else ""),
             {"kind": KIND, "stage": "models", "provider": prov},
             "primary" if has_active else "default",
+            nonce=nonce,
         )))
     elements.append({"tag": "hr"})
-    elements.append(_row(_button("取消", {"kind": KIND, "stage": "cancel"})))
+    elements.append(_row(_button("取消", {"kind": KIND, "stage": "cancel"}, nonce=nonce)))
     elements.append({"tag": "markdown", "content": _NOTE})
     return _card("模型切换", "blue", elements)
 
@@ -101,6 +120,7 @@ def model_level_card(agent: Any, provider: str) -> dict:
     profiles = agent.list_model_profiles()
     active = agent.entry_model_profile()
     ps = [p for p in profiles if p.display_provider() == provider]
+    nonce = _render_nonce()
 
     elements: list[dict] = [
         {"tag": "markdown",
@@ -113,11 +133,12 @@ def model_level_card(agent: Any, provider: str) -> dict:
         elements.append(_row(_button(
             label, {"kind": KIND, "stage": "switch", "name": p.name},
             "primary" if is_cur else "default",
+            nonce=nonce,
         )))
     elements.append({"tag": "hr"})
     elements.append(_row(
-        _button("‹ 返回", {"kind": KIND, "stage": "providers"}),
-        _button("取消", {"kind": KIND, "stage": "cancel"}),
+        _button("‹ 返回", {"kind": KIND, "stage": "providers"}, nonce=nonce),
+        _button("取消", {"kind": KIND, "stage": "cancel"}, nonce=nonce),
     ))
     elements.append({"tag": "markdown", "content": _NOTE})
     return _card(f"模型切换 · {provider}", "blue", elements)
@@ -126,9 +147,11 @@ def model_level_card(agent: Any, provider: str) -> dict:
 def result_card(text: str, ok: bool | None = True) -> dict:
     """Terminal state of the picker: switch outcome (+ 重新选择)."""
     template = {True: "green", False: "red", None: "grey"}[ok]
+    nonce = _render_nonce()
     elements: list[dict] = [{"tag": "markdown", "content": text}, {"tag": "hr"}]
     if ok is not False:
-        elements.append(_row(_button("‹ 重新选择", {"kind": KIND, "stage": "providers"})))
+        elements.append(_row(_button(
+            "‹ 重新选择", {"kind": KIND, "stage": "providers"}, nonce=nonce)))
     elements.append({"tag": "markdown", "content": _NOTE})
     return _card("模型切换", template, elements)
 
