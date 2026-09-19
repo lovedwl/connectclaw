@@ -17,6 +17,7 @@ import re
 import tomllib
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 import tomli_w
 
@@ -38,9 +39,19 @@ class ModelProfile:
     context_window: int = 65536
     max_tokens: int = 8192
     desc: str = ""
+    provider: str = ""
+    """Display grouping for the /model picker — in practice the KEY identity
+    (same base_url with different keys = different providers, e.g. USTC's
+    blocked vs working key). Empty → derived from the base_url host."""
 
     def resolved_api_key(self) -> str:
         return _expand_env(self.api_key or "")
+
+    def display_provider(self) -> str:
+        if self.provider:
+            return self.provider
+        host = urlparse(self.base_url).hostname if self.base_url else ""
+        return host or "未分组"
 
 
 class ModelsStore:
@@ -79,6 +90,7 @@ class ModelsStore:
                     context_window=int(item.get("context_window", 65536)),
                     max_tokens=int(item.get("max_tokens", 8192)),
                     desc=str(item.get("desc", "")),
+                    provider=str(item.get("provider", "")),
                 )
             except (TypeError, ValueError):
                 continue

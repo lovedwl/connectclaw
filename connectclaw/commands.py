@@ -302,6 +302,7 @@ def _profile_from_pairs(pairs: dict) -> dict:
         model_id=pairs.get("model_id", ""),
         api_key=pairs.get("api_key", ""),
         desc=pairs.get("desc", ""),
+        provider=pairs.get("provider", ""),
     )
     if "reasoning" in pairs:
         p.reasoning = _MODEL_BOOLS.get(pairs["reasoning"].lower(), p.reasoning)
@@ -375,7 +376,10 @@ async def _model(conversation_key: str, agent: Any, args: str = "") -> str:
     if sub in ("help", "-h", "--help"):
         return _model_help()
 
-    if sub == "":  # /model → list
+    if sub == "":  # /model → interactive picker card
+        return await _model_picker_card(agent, conversation_key)
+
+    if sub in ("list", "ls"):  # text list, grouped by provider
         return _model_list(agent)
 
     if sub == "add":
@@ -414,11 +418,12 @@ async def _model(conversation_key: str, agent: Any, args: str = "") -> str:
 def _model_help() -> str:
     return (
         "**/model —— 模型逃生口**\n"
-        "· `/model` 列出注册表与激活状态\n"
-        "· `/model add` 交互向导添加；或 `/model add name=x base_url=... model_id=... api_key=...`\n"
+        "· `/model` 弹出**选择卡片**：供应商（按 key 区分）→ 模型 → 点击即热切换\n"
+        "· `/model list` 文本清单（按供应商分组）\n"
+        "· `/model add` 交互向导添加；或 `/model add name=x base_url=... model_id=... api_key=... [provider=...]`\n"
         "· `/model test <name>` 对该模型发送最小请求实测（逃生校验）\n"
         "· `/model set <name>` 激活（热切换全部会话 + 写入 config.toml）\n"
-        "· `/model edit <name> base_url=... model_id=...` / `/model rm <name>`\n"
+        "· `/model edit <name> base_url=... model_id=... [provider=...]` / `/model rm <name>`\n"
         "· `/model verify <base_url>` 查看端点自称的模型列表（*可能不完整，仅供参考*）\n"
         "· `/model cancel` 取消进行中的添加向导\n"
         "无论当前模型是否可用，以上操作都能执行。"
@@ -426,18 +431,43 @@ def _model_help() -> str:
 
 
 def _model_list(agent: Any) -> str:
+    from connectclaw.model_card import group_by_provider
+
     profiles = agent.list_model_profiles()
     active = agent.entry_model_profile()
     if not profiles:
-        lines = ["注册表为空。用 `/model add` 添加第一个 profile（逃生时走向导也行）。\n"]
+        lines = ["注册表为空。用 `/model add` 添加第一个 profile（逃生时走向导也行），或 `/model` 弹卡片。"]
     else:
-        lines = [f"模型注册表（{len(profiles)}）："]
-        for p in profiles:
-            mark = "✅ 激活" if (p.base_url == active.base_url and p.model_id == active.model_id) else ""
-            lines.append(f"- **{p.name}** `{p.model_id}` @ {p.base_url} {mark}")
-    lines.append(f"\n当前激活：[llm] `{active.model_id}` @ {active.base_url}")
+        groups = group_by_provider(profiles)
+        lines = [f"模型注册表 · {len(groups)} 个供应商 / {len(profiles)} 个 profile："]
+        for prov, ps in groups:
+            lines.append(f"\n**{prov}**")
+            for p in ps:
+                mark = " ✅当前" if (active is not None
+                                    and p.base_url == active.base_url
+                                    and p.model_id == active.model_id
+                                    and p.api_key == active.api_key) else ""
+                desc = f" — {p.desc}" if p.desc else ""
+                lines.append(f"- **{p.name}** `{p.model_id}`{mark}{desc}")
+    if active is not None:
+        lines.append(f"\n当前激活：[llm] `{active.model_id}` @ {active.base_url}"
+                     f"（{active.display_provider()}）")
     lines.append("用法：/model help")
     return "\n".join(lines)
+
+
+async def _model_picker_card(agent: Any, conversation_key: str) -> str:
+    """/model → interactive picker card. Falls back to the text list if the
+    channel can't send cards (channel-less agent, send failure)."""
+    from connectclaw.model_card import provider_level_card
+
+    channel = getattr(agent, "_channel", None)
+    if channel is None:
+        return _model_list(agent)
+    msg_id = await channel.send_card(conversation_key, provider_level_card(agent))
+    if not msg_id:
+        return _model_list(agent)
+    return ""  # the card IS the response
 
 
 async def _model_add(agent: Any, conversation_key: str, partial, name_hint: str = "") -> str:
@@ -470,6 +500,7 @@ async def _model_edit(agent: Any, conversation_key: str, name: str, pairs: dict)
         "model_id": pairs.get("model_id", cur.model_id),
         "api_key": pairs.get("api_key", cur.api_key),
         "desc": pairs.get("desc", cur.desc),
+        "provider": pairs.get("provider", cur.provider),
         "reasoning": pairs.get("reasoning", str(cur.reasoning).lower()),
         "context_window": pairs.get("context_window", str(cur.context_window)),
         "max_tokens": pairs.get("max_tokens", str(cur.max_tokens)),
@@ -486,6 +517,7 @@ def _overlay(p, pairs: dict):
     if "model_id" in pairs: p.model_id = pairs["model_id"]
     if "api_key" in pairs: p.api_key = pairs["api_key"]
     if "desc" in pairs: p.desc = pairs["desc"]
+    if "provider" in pairs: p.provider = pairs["provider"]
     if "reasoning" in pairs: p.reasoning = _MODEL_BOOLS.get(pairs["reasoning"].lower(), p.reasoning)
     for k in ("context_window", "max_tokens"):
         if k in pairs:

@@ -51,6 +51,9 @@ class FeishuChannel(Channel):
         self._running = False
         self._stop_event: asyncio.Event = asyncio.Event()
         self._auth_requests: dict[str, AuthRequest] = {}
+        # /model picker card clicks (kind="model_switch") dispatch here; wired
+        # in main.py. Async fn(value: dict, chat_id: str, message_id: str).
+        self._model_card_handler = None
         # Per-conversation locks: messages of the SAME chat are processed in
         # arrival order (a /forget must land before the follow-up message reads
         # the session), while different chats still run concurrently.
@@ -313,6 +316,24 @@ class FeishuChannel(Channel):
             return result.message_id or ""
         logger.error("send_card failed: %s", result.error)
         return ""
+
+    async def update_card(self, message_id: str, card: dict) -> bool:
+        """Replace an already-sent card in place (picker level transitions)."""
+        if self._sdk is None:
+            logger.error("update_card: not connected")
+            return False
+        try:
+            result = await self._sdk.update_card(message_id, card)
+        except Exception as e:
+            logger.error("update_card failed: %s", e)
+            return False
+        if not result.ok:
+            logger.error("update_card failed: %s", result.error)
+        return result.ok
+
+    def set_model_card_handler(self, handler) -> None:
+        """Register the async callback for /model picker card clicks."""
+        self._model_card_handler = handler
 
     # ── Media sending (images / files to the user) ─────────
 
@@ -649,6 +670,23 @@ class FeishuChannel(Channel):
                 return
         if not isinstance(action_value, dict):
             logger.warning("[AUTH] cardAction value is not a dict: %s", type(action_value).__name__)
+            return
+
+        # /model picker cards carry kind="model_switch" — dispatch to the
+        # registered handler (wired in main.py) and stay out of the auth path.
+        if action_value.get("kind") == "model_switch":
+            if self._model_card_handler is None:
+                logger.warning("model_switch card click but no handler wired")
+                return
+            # We're inside the SDK bg loop's _invoke; the handler awaits
+            # model switching + update_card. Task so the click ACK returns fast.
+            asyncio.create_task(
+                self._model_card_handler(
+                    action_value,
+                    getattr(event, "chat_id", "") or "",
+                    getattr(event, "message_id", "") or "",
+                )
+            )
             return
 
         rid = action_value.get("request_id", "")
