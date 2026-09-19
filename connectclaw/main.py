@@ -192,6 +192,17 @@ async def main(argv: list[str] | None = None) -> None:
     channel = FeishuChannel(config.feishu)
     coding_agent = CodingAgent(config, channel=channel)
 
+    # /model picker card clicks → hot-switch dispatcher (see model_card.py).
+    # Runs on the SDK bg loop — same loop as message handling, so touching
+    # the agent is safe.
+    from connectclaw.model_card import on_model_card_action
+
+    channel.set_model_card_handler(
+        lambda value, chat_id, message_id: on_model_card_action(
+            coding_agent, value, chat_id, message_id
+        )
+    )
+
     # ── Restart event（供 /restart 命令触发进程重启）──
     # 监控协程只负责「打信号 + 让 channel 主循环退出」，绝不自己调
     # sys.exit —— 子任务里的 SystemExit 会被 asyncio 吞成 task 异常，
