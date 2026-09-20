@@ -54,10 +54,19 @@ class MemoryStore:
                 embedding BLOB,
                 source_session TEXT,
                 strength REAL DEFAULT 1.0,
-                metadata TEXT DEFAULT '{}'
+                metadata TEXT DEFAULT '{}',
+                last_decayed_at REAL
             )
             """
         )
+        # Migration for DBs created before the decay-anchor column existed.
+        # Existing rows anchor at migration time, so the first post-migration
+        # dream only applies the days elapsed since then — not each row's full
+        # age again (the old double-decay bug).
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(memories)")}
+        if "last_decayed_at" not in cols:
+            conn.execute("ALTER TABLE memories ADD COLUMN last_decayed_at REAL")
+            conn.execute("UPDATE memories SET last_decayed_at = ?", (time.time(),))
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_mem_type ON memories(type)"
         )
@@ -87,8 +96,8 @@ class MemoryStore:
             """INSERT OR REPLACE INTO memories
                (id, type, content, detail, category, tags, importance,
                 created_at, last_accessed, access_count, embedding,
-                source_session, strength, metadata)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                source_session, strength, metadata, last_decayed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 entry.id,
                 entry.type.value if isinstance(entry.type, MemoryType) else entry.type,
@@ -104,6 +113,7 @@ class MemoryStore:
                 entry.source_session,
                 entry.strength,
                 json.dumps(entry.metadata, ensure_ascii=False),
+                entry.last_decayed_at,
             ),
         )
         conn.commit()
@@ -182,7 +192,7 @@ class MemoryStore:
         return [self._row_to_entry(r) for r in rows]
 
     def list_persona(
-        self, *, min_importance: float = 0.7, min_strength: float = 0.1, limit: int = 10
+        self, *, min_importance: float = 0.85, min_strength: float = 0.1, limit: int = 10
     ) -> list[MemoryEntry]:
         """Stable identity facts to inject EVERY turn, regardless of query.
 
@@ -306,6 +316,7 @@ class MemoryStore:
             source_session=row[11],
             strength=row[12],
             metadata=json.loads(row[13]) if row[13] else {},
+            last_decayed_at=row[14] if len(row) > 14 else None,
         )
 
     def search_ids_by_prefix(self, prefix: str) -> list[str]:

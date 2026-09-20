@@ -183,19 +183,29 @@ class MemoryConsolidator:
 
         all_memories = self._store.list_all(min_strength=0.0)
         for entry in all_memories:
-            age = now - entry.last_accessed
-            if age <= 0:
+            # Decay by the time elapsed since the LAST dream, anchored on
+            # last_decayed_at — NOT the full age since last_accessed. Applying
+            # the full-age factor on every dream decays old memories ~30x
+            # faster than the halflife intends (2^(-60d) re-multiplied daily).
+            anchor = entry.last_decayed_at or entry.last_accessed
+            elapsed = now - anchor
+            if elapsed <= 0:
                 continue
 
-            decay_factor = 2 ** (-age / halflife_seconds)
+            decay_factor = 2 ** (-elapsed / halflife_seconds)
             new_strength = entry.strength * decay_factor
 
             floor = entry.importance * 0.3
             new_strength = max(new_strength, floor)
 
-            if abs(new_strength - entry.strength) > 0.001:
+            changed = abs(new_strength - entry.strength) > 0.001
+            if changed:
                 entry.strength = new_strength
-                self._store.update(entry)
+            # Persist the anchor even when the strength hit its floor —
+            # otherwise the next dream would re-apply the whole elapsed span.
+            entry.last_decayed_at = now
+            self._store.update(entry)
+            if changed:
                 count += 1
 
         return count

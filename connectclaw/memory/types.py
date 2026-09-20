@@ -35,6 +35,10 @@ class MemoryEntry:
     source_session: str | None = None
     strength: float = 1.0
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Anchor for dream decay: strength decays over the time elapsed since this
+    # timestamp, NOT since last_accessed (which touch() keeps moving forward).
+    # NULL → falls back to last_accessed (right for never-dreamed entries).
+    last_decayed_at: float | None = None
 
 
 @dataclass

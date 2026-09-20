@@ -442,7 +442,7 @@ class CodingAgent:
                             )
                         )
                 except Exception as e:
-                    logger.debug("Memory extraction trigger failed: %s", e)
+                    logger.warning("Memory extraction trigger failed: %s", e)
 
             return resp
 
@@ -452,6 +452,30 @@ class CodingAgent:
             raise
 
     async def new_session(self, conversation_key: str) -> None:
+        # Fallback extraction before the context is wiped: a short conversation
+        # may never hit the per-turn throttle, so /new is its last chance to
+        # leave anything in memory. fire-and-forget — /new must stay snappy.
+        harness = self._conversations.get(conversation_key)
+        if harness and self._memory.enabled:
+            try:
+                entries = await harness.session.get_path_to_root()
+                recent_messages = [
+                    e.message
+                    for e in entries[-20:]
+                    if hasattr(e, "type") and e.type == "message"
+                ]
+                if recent_messages:
+                    asyncio.create_task(
+                        self._memory.force_learn(
+                            recent_messages,
+                            self._model,
+                            api_key=self._config.llm.api_key or None,
+                            conversation_key=conversation_key,
+                            session_id=harness.session.session_id,
+                        )
+                    )
+            except Exception as e:
+                logger.warning("Memory pre-/new extraction failed: %s", e)
         if conversation_key in self._conversations:
             del self._conversations[conversation_key]
         await self._session_repo.forget_chat(conversation_key)

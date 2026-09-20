@@ -80,6 +80,35 @@ def test_decay_is_by_last_accessed_not_created(consolidator, store):
     assert store.get(e.id).strength > 0.95
 
 
+def test_repeated_dreams_decay_incrementally(consolidator, store):
+    """The second dream, seconds later, must add only seconds' worth of decay
+    on top of the first — not re-apply the full age (the old code multiplied
+    2^(-age/halflife) into strength on EVERY dream, turning the 30-day
+    halflife into 'one dream per halflife' for anything old)."""
+    e = _make(store, strength=1.0, importance=0.2,
+              last_accessed=time.time() - 30 * 86400)
+    consolidator.apply_decay_only()
+    after_first = store.get(e.id).strength
+    assert after_first == pytest.approx(0.5, abs=0.05)
+
+    consolidator.apply_decay_only()  # second dream moments later
+    after_second = store.get(e.id).strength
+    assert after_second > after_first * 0.99  # ~1 day of decay, not 30
+
+
+def test_decay_anchor_persisted_when_floored(consolidator, store):
+    """A memory whose decay hit its floor must still advance its decay
+    anchor — otherwise every dream re-decays the whole elapsed span."""
+    e = _make(store, strength=0.2, importance=0.8,
+              last_accessed=time.time() - 365 * 86400)
+    consolidator.apply_decay_only()
+    anchored = store.get(e.id).last_decayed_at
+    assert anchored is not None and anchored > time.time() - 60
+    s1 = store.get(e.id).strength
+    consolidator.apply_decay_only()
+    assert store.get(e.id).strength == pytest.approx(s1, abs=0.005)
+
+
 def test_used_memory_is_strengthened(consolidator, store):
     """The 'used → not forgotten' guarantee: access_count > 0 boosts strength.
 
