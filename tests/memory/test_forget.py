@@ -57,8 +57,9 @@ def test_forget_by_keyword_deletes_matches(mem):
 
 
 def test_forget_by_keyword_protects_persona(mem):
-    # importance 0.8 semantic = persona-grade, protected
-    _add(mem, "请叫我老板", importance=0.8)
+    # importance >= 0.85 semantic = persona-grade, protected (0.8 config
+    # snapshots are deliberately NOT persona — they must stay forgettable)
+    _add(mem, "请叫我老板", importance=0.9)
     _add(mem, "老板喜欢深色", importance=0.4)
     n = asyncio.run(mem.forget_by_keyword("老板"))
     assert n == 1  # only the non-persona one

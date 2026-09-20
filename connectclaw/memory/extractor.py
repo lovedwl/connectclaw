@@ -47,6 +47,11 @@ async def extract_memories(
 
     text = await _call_llm(context, model, api_key=api_key)
     if not text:
+        # The LLM call yields "" on provider errors (encoded as error events,
+        # never raised). Stay silent to the user but log loudly enough to be
+        # seen at INFO — empty-text failures previously looked like "nothing
+        # worth remembering" and hid days-long extraction outages.
+        logger.warning("Memory extraction: LLM returned empty text (provider error?)")
         return []
 
     entries = _parse_extraction_result(text, source_session=source_session)

@@ -59,9 +59,12 @@ class RetrievalConfig:
     min_similarity: float = 0.48
     # Persona injection: high-importance semantic memories (how to address the
     # user, tone, standing preferences) are injected EVERY turn, bypassing the
-    # similarity gate — so identity is present from the first "hi", not only when
-    # the user's message happens to match it.
-    persona_min_importance: float = 0.7
+    # similarity gate — so identity is present from the first "hi", not only
+    # when the user's message happens to match it. Set ABOVE the confirm_usage
+    # auto-boost ceiling (0.65): nothing may climb into the always-on block on
+    # its own — recall confirmations used to walk config-snapshot memories up
+    # to 0.8, hijacking all persona slots with soon-stale "facts".
+    persona_min_importance: float = 0.85
     persona_top_k: int = 8
 
 
@@ -112,10 +115,12 @@ class MemoryRetriever:
             # persona block (score==1.0) is always-injected; count it as used.
             if r.score == 1.0 or _content_referenced(content, reply_lower):
                 self._store.touch(r.entry.id)
-                # Auto-boost importance: memories confirmed as useful gradually
-                # climb toward the persona threshold (0.7), becoming always-on.
+                # Auto-boost importance for memories confirmed as useful. The
+                # 0.65 ceiling stays BELOW the persona threshold (0.85) — a
+                # repeatedly-confirmed memory must get ranked higher, but never
+                # promote itself into the every-turn persona block.
                 if r.score < 1.0:  # skip persona (already trusted)
-                    new_imp = min(0.8, r.entry.importance + 0.02)
+                    new_imp = min(0.65, r.entry.importance + 0.02)
                     if new_imp > r.entry.importance:
                         self._store.update_importance(r.entry.id, new_imp)
                         r.entry.importance = new_imp

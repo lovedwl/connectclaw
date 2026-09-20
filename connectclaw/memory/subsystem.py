@@ -26,8 +26,10 @@ from .types import MemoryEntry, MemoryType
 
 # Memories at or above this importance are persona-grade (identity, tone,
 # standing preferences) and are protected from bulk / agent-initiated removal
-# — only an explicit forget-by-id clears them.
-PERSONA_IMPORTANCE_FLOOR = 0.7
+# — only an explicit forget-by-id clears them. Must match
+# RetrievalConfig.persona_min_importance and stay above the confirm_usage
+# auto-boost ceiling so nothing promotes itself into persona protection.
+PERSONA_IMPORTANCE_FLOOR = 0.85
 
 logger = get_logger(__name__)
 
@@ -186,9 +188,12 @@ class MemorySubsystem:
         turns = self._turn_counter.get(conversation_key, 0) + 1
         self._turn_counter[conversation_key] = turns
 
-        if turns < self._config.extract_min_turns:
-            return 0
-        if turns % self._config.extract_interval_turns != 0:
+        # Fire at extract_min_turns, then every extract_interval_turns after:
+        # `min + k*interval` (3, 8, 13…). The old `turns % interval` pattern
+        # needed a full interval before the FIRST extraction and aligned poorly
+        # with short chats.
+        since_min = turns - self._config.extract_min_turns
+        if since_min < 0 or since_min % self._config.extract_interval_turns != 0:
             return 0
 
         # Extraction runs in a background task; isolate all failures so a bad
@@ -222,9 +227,10 @@ class MemorySubsystem:
 
             return len(new_entries)
         except Exception as e:
-            logger.debug("Memory: learn failed: %s", e)
+            # Extraction failing silently (debug) hid days-long outages: the
+            # only observable, "Memory: stored N" lines simply stopped.
+            logger.warning("Memory: learn failed: %s", e)
             return 0
-
 
     async def force_learn(
         self,
@@ -273,7 +279,7 @@ class MemorySubsystem:
                 )
             return len(new_entries)
         except Exception as e:
-            logger.debug("Memory: force_learn failed: %s", e)
+            logger.warning("Memory: force_learn failed: %s", e)
             return 0
 
     # ── Consolidation / Dreaming ──────────────────────────
