@@ -6,7 +6,7 @@ config.toml comments survive), and set_active updates ONLY the [llm] block.
 
 from __future__ import annotations
 
-from connectclaw.model_registry import ModelProfile, ModelsStore
+from connectclaw.model_registry import ModelProfile, ModelsStore, mask_key, normalize_url
 
 
 def _store(tmp_path):
@@ -104,3 +104,35 @@ def test_resolved_api_key_expands_env(tmp_path, monkeypatch):
     monkeypatch.setenv("MY_ESC_KEY", "sk-secret")
     p = ModelProfile(name="p", base_url="https://a", model_id="m", api_key="$MY_ESC_KEY")
     assert p.resolved_api_key() == "sk-secret"
+
+
+# ── URL normalization (chat input shapes) ──────────────────────
+# A pasted URL reaches the bot as a rich-text link, which the channel
+# flattens to markdown — httpx rejects that string outright ("Request URL is
+# missing an 'http://' or 'https://' protocol"), so commands must unwrap it.
+
+
+def test_normalize_url_unwraps_pasted_markdown_link():
+    assert normalize_url("[https://gw/v1](https://gw/v1)") == "https://gw/v1"
+    assert normalize_url("[网关](https://gw/v1/)") == "https://gw/v1"
+    assert normalize_url("看这个 [点我](https://gw/v1) 端点") == "https://gw/v1"
+
+
+def test_normalize_url_defaults_scheme_only_for_hosts():
+    assert normalize_url("gw.example.com/v1") == "https://gw.example.com/v1"
+    assert normalize_url("api.deepseek.com") == "https://api.deepseek.com"
+    # free-form words stay untouched so callers can still reject them
+    assert normalize_url("not-a-url") == "not-a-url"
+
+
+def test_normalize_url_trims_noise_and_strips_trailing_slash():
+    assert normalize_url("  `https://gw/v1/`  ") == "https://gw/v1"
+    assert normalize_url("<https://gw/v1>") == "https://gw/v1"
+    assert normalize_url("") == ""
+
+
+def test_mask_key_never_leaks_the_secret():
+    assert mask_key("") == "(无 key)"
+    assert mask_key("ak_LL6fcx8DFXnjwRrDpftmyvEVR1XoR") == "ak_LL6…1XoR"
+    assert "c8DFXnjwRrDpftmyvEVR" not in mask_key("ak_LL6fcx8DFXnjwRrDpftmyvEVR1XoR")
+    assert mask_key("short") == "sho…"

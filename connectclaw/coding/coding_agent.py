@@ -9,7 +9,9 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from dataclasses import replace
 from typing import Any
+from urllib.parse import urlparse
 
 from connectclaw.agent.harness.agent_harness import AgentHarness
 from connectclaw.logging import get_logger
@@ -23,7 +25,7 @@ from connectclaw.channel.feishu import FeishuChannel
 from connectclaw.config import Config
 from connectclaw.memory import MemorySubsystem
 from connectclaw.memory.subsystem import MemoryConfig as MemCfg
-from connectclaw.model_registry import ModelProfile, ModelsStore
+from connectclaw.model_registry import ModelProfile, ModelsStore, mask_key
 from connectclaw.provider.stream import stream_simple
 from connectclaw.provider.types import Context, Model, UserMessage
 
@@ -67,6 +69,14 @@ def final_response_text(result: Any) -> str:
     if result.error_message:
         return f"⚠️ 模型调用失败：{result.error_message}"
     return "(empty response)"
+
+
+def _url_host(url: str) -> str:
+    """Hostname of an endpoint URL, "" if it has none (used for identity checks)."""
+    try:
+        return (urlparse(url or "").hostname or "").lower()
+    except ValueError:
+        return ""
 
 
 class CodingAgent:
@@ -210,7 +220,7 @@ class CodingAgent:
             agents_dir=self._agents_dir,
             base_tools=list(self._tool_registry.values()),
             cwd=config.agent.cwd,
-            api_key=config.llm.api_key or None,
+            api_key_provider=lambda: self._config.llm.api_key or None,
             thinking_level=config.agent.thinking_level,  # type: ignore[arg-type]
             session_repo=self._session_repo,
         )
@@ -515,25 +525,89 @@ class CodingAgent:
             proxy=self._config.proxy.url,
         )
 
+    def _api_key_for(self, p: ModelProfile) -> str:
+        """The key a profile will actually authenticate with.
+
+        Its own resolved key. A keyless profile inherits the ACTIVE key only
+        when it points at the same host (another model_id on the same gateway);
+        inheriting across hosts is exactly how a foreign key ends up at a
+        gateway that then 403s it. /model test and /model set both route
+        through here so a profile can never test green and run red.
+        """
+        key = p.resolved_api_key()
+        if key:
+            return key
+        live = self._config.llm
+        if live.api_key and _url_host(p.base_url) == _url_host(live.base_url):
+            return live.api_key
+        return ""
+
     async def apply_model_profile(self, p: ModelProfile) -> str:
         """Live-swap every live conversation (and future sub-agents) to this
         profile, then persist it as the active [llm] in config.toml."""
         if not p.base_url or not p.model_id:
             raise ValueError("base_url 与 model_id 必填")
+        key = self._api_key_for(p)
         model = self._build_model_from_profile(p)
         self._model = model
         self._agents_tool.set_model(model)
         for harness in list(self._conversations.values()):
             await harness.set_model(model)
+        # The live [llm] config MUST follow the switch: every request resolves
+        # its key from there (harness, agents tool, memory extraction, dream),
+        # so a stale api_key sends the PREVIOUS provider's key to the new
+        # endpoint — gateways answer that with 403 (dots.ai:
+        # governance.dots_platform_key_not_allowed). Swapping the model alone is
+        # only half a switch: without this the new model works on restart only.
+        llm = self._config.llm
+        llm.api_key = key
+        llm.base_url = p.base_url
+        llm.model_id = p.model_id
+        llm.reasoning = p.reasoning
+        llm.context_window = p.context_window
+        llm.max_tokens = p.max_tokens
         ModelsStore().set_active(p)
+        warn = "" if key else "\n⚠️ 该 profile 没有 api_key，请求可能被网关拒绝（`/model edit ... api_key=...` 或直接在 [llm] 里补）"
         return (
             f"✅ 已切换并持久化：**{p.name}** `{p.model_id}`\n"
-            f"↳ {p.base_url}\n已应用到全部会话（无需重启）。"
+            f"↳ {p.base_url} · 🔑 {mask_key(key)}\n"
+            f"已应用到全部会话（无需重启）。{warn}"
         )
 
     async def test_model_profile(self, p: ModelProfile) -> tuple[bool, str]:
         """Escape verification: a minimal real generation against this profile
-        (same proxy chain as production). Returns (ok, detail)."""
+        (same proxy chain as production). Returns (ok, detail).
+
+        A 404 is retried once against ``{base}/v1``: the OpenAI-compatible
+        prefix is missing from most hand-typed gateway URLs, and reporting a
+        bare "404 page not found" leaves the user with nowhere to go."""
+        ok, detail = await self._probe_model_profile(p)
+        if ok:
+            return True, detail
+        base = p.base_url.rstrip("/")
+        if "404" in detail and not base.endswith("/v1"):
+            alt = f"{base}/v1"
+            alt_ok, _ = await self._probe_model_profile(replace(p, base_url=alt))
+            if alt_ok:
+                return False, (
+                    f"{detail}\n✅ 但 `{alt}` 实测可用 → 端点缺 `/v1` 前缀。\n"
+                    f"{self._fix_base_url_hint(p.name, alt)}"
+                )
+        if "404" in detail:
+            detail += "（HTTP 404：端点路径不对；多数网关的 OpenAI 兼容前缀是 `/v1`）"
+        return False, detail
+
+    @staticmethod
+    def _fix_base_url_hint(name: str, url: str) -> str:
+        """How to store a corrected base_url — a registry profile has a name;
+        the ACTIVE [llm] config does not (it's hand-edited in config.toml)."""
+        if name and not name.startswith("("):
+            return f"执行 `/model edit {name} base_url={url}` 后即可激活。"
+        return (f"当前激活配置来自 config.toml：把 `[llm] base_url` 改成 `{url}` 再 `/restart`"
+                f"（或先用 `/model add base_url={url} model_id=...` 存成 profile）。")
+
+    async def _probe_model_profile(self, p: ModelProfile) -> tuple[bool, str]:
+        """One minimal generation against the profile, as saved."""
         model = self._build_model_from_profile(p)
         context = Context(
             system_prompt="reply OK",
@@ -544,7 +618,7 @@ class CodingAgent:
         try:
             async for ev in stream_simple(
                 model, context,
-                api_key=p.resolved_api_key() or self._config.llm.api_key or None,
+                api_key=self._api_key_for(p) or None,
                 reasoning="off",
                 max_retries=1,
                 timeout_ms=20_000,
@@ -579,6 +653,11 @@ class CodingAgent:
 
     def pop_wizard(self, conversation_key: str) -> dict | None:
         return self._wizard.pop(conversation_key, None)
+
+    def has_wizard(self, conversation_key: str) -> bool:
+        """True while a /model add wizard awaits a reply (see the channel's
+        card gate: wizard answers are not agent turns, so they get no card)."""
+        return conversation_key in self._wizard
 
     # ── Operator bash escape (`!cmd` / `/bash cmd`) ─────────
     # Direct, sandboxed shell for whitelisted operators only — the config

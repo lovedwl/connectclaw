@@ -81,3 +81,30 @@ async def test_different_chats_stay_concurrent():
     await asyncio.gather(run("oc_a", "a", 0.05), run("oc_b", "b", 0.001))
     # 两个会话并行：b 的 in/out 都插在 a 的 out 之前。
     assert log.index("a:in") < log.index("b:in") < log.index("b:out") < log.index("a:out")
+
+
+# ── live card gate (wizard replies are not agent turns) ────────
+
+
+def test_card_suppressed_for_commands_and_wizard_replies():
+    """向导回复不该弹「思考中」卡片：卡片是立刻发的，没人会去更新它。"""
+    ch = _channel()
+    # 普通消息 → 有卡片
+    assert ch._suppress_card("oc", "你好") is False
+    # 命令 / operator escape → 无卡片（原有行为）
+    assert ch._suppress_card("oc", "/model add") is True
+    assert ch._suppress_card("oc", "!ls") is True
+    # 装上网关后，向导等待中的回复也走无卡片路径
+    ch.set_card_gate(lambda chat_id, text: chat_id == "oc_wizard")
+    assert ch._suppress_card("oc_wizard", "https://gw/v1") is True
+    assert ch._suppress_card("oc", "https://gw/v1") is False
+
+
+def test_card_gate_failure_never_breaks_message_handling():
+    ch = _channel()
+
+    def boom(chat_id, text):
+        raise RuntimeError("gate exploded")
+
+    ch.set_card_gate(boom)
+    assert ch._suppress_card("oc", "你好") is False

@@ -150,3 +150,94 @@ async def test_model_help_lists_escape_hints():
     for cmd in ("/model help", "/model -h", "/model unknownsub"):
         resp = await handle(cmd, conversation_key="oc", agent=fa)
         assert "/model" in resp and "test" in resp and "set" in resp
+
+
+async def test_wizard_accepts_pasted_link_and_stores_clean_url():
+    """粘贴的链接到这儿是 markdown（飞书富文本），要拆开而不是把人挡回去。"""
+    fa = _fa()
+    await handle("/model add", conversation_key="oc", agent=fa)
+    state = fa.wizard[1]
+    r1 = await run_model_wizard_step(
+        fa, state, "[https://note3-prev-api.askdiandian.com/v1](https://note3-prev-api.askdiandian.com/v1/)")
+    assert "model_id" in r1
+    assert state["fields"]["base_url"] == "https://note3-prev-api.askdiandian.com/v1"
+    r2 = await run_model_wizard_step(fa, state, "dots3-note-prev")
+    assert "api_key" in r2
+    r3 = await run_model_wizard_step(fa, state, "ak-123")
+    assert "已保存" in r3
+    saved = fa.profiles["dots3-note-prev"]
+    assert saved.base_url == "https://note3-prev-api.askdiandian.com/v1"
+
+
+async def test_model_edit_normalizes_base_url():
+    fa = _fa()
+    fa.save_model_profile(ModelProfile(name="e", base_url="https://a/v1", model_id="m", api_key="k"))
+    resp = await handle(
+        "/model edit e base_url=[https://gw](https://gw/v1/) ", conversation_key="oc", agent=fa)
+    # shlex split keeps the markdown intact as one token
+    assert fa.profiles["e"].base_url == "https://gw/v1", resp
+
+
+# ── /model verify: endpoint probing ────────────────────────────
+
+class _Resp:
+    def __init__(self, status: int, payload: dict | None = None):
+        self.status_code = status
+        self._payload = payload or {}
+
+    def json(self):
+        return self._payload
+
+
+def _fake_httpx(monkeypatch, routes: dict):
+    """Patch httpx.AsyncClient with a stub serving `routes`: url → _Resp."""
+    import httpx
+
+    seen: list[str] = []
+
+    class _Client:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url):
+            seen.append(url)
+            return routes.get(url, _Resp(404))
+
+    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+    return seen
+
+
+async def test_model_verify_unwraps_pasted_link(monkeypatch):
+    seen = _fake_httpx(monkeypatch, {
+        "https://gw.example.com/v1/models": _Resp(200, {"data": [{"id": "m1"}]}),
+    })
+    fa = _fa()
+    resp = await handle(
+        "/model verify [https://gw.example.com/v1](https://gw.example.com/v1/)",
+        conversation_key="oc", agent=fa,
+    )
+    assert seen == ["https://gw.example.com/v1/models"], resp
+    assert "m1" in resp
+
+
+async def test_model_verify_probes_v1_when_bare_endpoint_404s(monkeypatch):
+    seen = _fake_httpx(monkeypatch, {
+        "https://gw.example.com/v1/models": _Resp(200, {"data": [{"id": "m1"}]}),
+    })
+    fa = _fa()
+    resp = await handle("/model verify https://gw.example.com", conversation_key="oc", agent=fa)
+    assert seen == ["https://gw.example.com/models", "https://gw.example.com/v1/models"]
+    assert "缺 `/v1`" in resp and "https://gw.example.com/v1" in resp
+
+
+async def test_model_verify_rejects_non_url_without_http_call(monkeypatch):
+    seen = _fake_httpx(monkeypatch, {})
+    fa = _fa()
+    resp = await handle("/model verify not-a-url", conversation_key="oc", agent=fa)
+    assert seen == [] and "https://" in resp

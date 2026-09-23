@@ -203,6 +203,11 @@ async def main(argv: list[str] | None = None) -> None:
         )
     )
 
+    # A /model add wizard consumes the next plain replies, which are NOT agent
+    # turns — they must not get a live "thinking" card (it would sit there empty
+    # for every step of the wizard, which reads as a hung bot).
+    channel.set_card_gate(lambda chat_id, text: coding_agent.has_wizard(chat_id))
+
     # ── Restart event（供 /restart 命令触发进程重启）──
     # 监控协程只负责「打信号 + 让 channel 主循环退出」，绝不自己调
     # sys.exit —— 子任务里的 SystemExit 会被 asyncio 吞成 task 异常，
@@ -258,9 +263,11 @@ async def main(argv: list[str] | None = None) -> None:
     # Initialize memory if enabled
     if config.memory.enabled:
         await coding_agent.memory.initialize()
+        # Callables, not snapshots: a /model hot-switch must reach the periodic
+        # dream loop, which otherwise keeps using the startup model and key.
         await coding_agent.memory.schedule_dreaming(
-            coding_agent._model,
-            api_key=config.llm.api_key or None,
+            lambda: coding_agent._model,
+            api_key=lambda: coding_agent._config.llm.api_key or None,
         )
 
     async def on_message(

@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from connectclaw.agent.types import AgentTool, AgentToolResult, ThinkingLevel
 from connectclaw.coding.tools.named_agents import (
@@ -154,6 +154,7 @@ class AgentsTool(AgentTool):
         base_tools: list[AgentTool],
         cwd: str,
         api_key: str | None = None,
+        api_key_provider: Callable[[], str | None] | None = None,
         thinking_level: ThinkingLevel = "off",
         session_repo: Any = None,
     ):
@@ -162,8 +163,17 @@ class AgentsTool(AgentTool):
         self._base_tools = list(base_tools)  # the fixed primitive instances
         self._cwd = cwd
         self._api_key = api_key
+        # Resolved at CALL time when given, so a /model hot-switch reaches
+        # sub-agents: a key bound at construction is the previous provider's,
+        # which the new gateway rejects exactly like it rejects the main agent's.
+        self._api_key_provider = api_key_provider
         self._thinking_level = thinking_level
         self._session_repo = session_repo  # persist sub-agent transcripts
+
+    def _resolve_api_key(self) -> str | None:
+        if self._api_key_provider is not None:
+            return self._api_key_provider()
+        return self._api_key
 
     # ── Live re-scan (the immediacy mechanism) ──────────────
 
@@ -181,7 +191,7 @@ class AgentsTool(AgentTool):
             self._agents_dir,
             grantable,
             self._model,
-            api_key=self._api_key,
+            api_key=self._resolve_api_key(),
             thinking_level=self._thinking_level,  # type: ignore[arg-type]
             session_repo=self._session_repo,
             cwd=self._cwd,
@@ -499,7 +509,7 @@ class AgentsTool(AgentTool):
         return await run_subagent(
             spec,
             model=self._model,
-            api_key=self._api_key,
+            api_key=self._resolve_api_key(),
             thinking_level=self._thinking_level,
             on_progress=_on_progress,
             subagent_id=tid,
@@ -551,6 +561,7 @@ def create_agents_tool(
     base_tools: list[AgentTool],
     cwd: str,
     api_key: str | None = None,
+    api_key_provider: Callable[[], str | None] | None = None,
     thinking_level: ThinkingLevel = "off",
     session_repo: Any = None,
 ) -> AgentsTool:
@@ -560,6 +571,7 @@ def create_agents_tool(
         base_tools=base_tools,
         cwd=cwd,
         api_key=api_key,
+        api_key_provider=api_key_provider,
         thinking_level=thinking_level,
         session_repo=session_repo,
     )
