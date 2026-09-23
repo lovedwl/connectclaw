@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from connectclaw.logging import get_logger
 from connectclaw.provider.types import Model
@@ -320,9 +320,17 @@ class MemorySubsystem:
         }
 
     async def schedule_dreaming(
-        self, model: Model, *, api_key: str | None = None
+        self,
+        model: Model | Callable[[], Model],
+        *,
+        api_key: str | None | Callable[[], str | None] = None,
     ) -> None:
-        """Start a background task for periodic dreaming."""
+        """Start a background task for periodic dreaming.
+
+        ``model``/``api_key`` may be callables: the loop then resolves them per
+        run, so a /model hot-switch (or a rotated key) reaches dreaming instead
+        of it retrying with a dead endpoint/key for the process lifetime.
+        """
         if self._dream_task and not self._dream_task.done():
             return
 
@@ -332,7 +340,10 @@ class MemorySubsystem:
                     await asyncio.sleep(
                         self._config.dream_interval_hours * 3600
                     )
-                    await self.dream(model, api_key=api_key)
+                    await self.dream(
+                        model() if callable(model) else model,
+                        api_key=api_key() if callable(api_key) else api_key,
+                    )
                 except asyncio.CancelledError:
                     break
                 except Exception as e:

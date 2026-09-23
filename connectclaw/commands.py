@@ -294,11 +294,11 @@ def _parse_pairs(args: str) -> dict:
 
 
 def _profile_from_pairs(pairs: dict) -> dict:
-    from connectclaw.model_registry import ModelProfile
+    from connectclaw.model_registry import ModelProfile, normalize_url
 
     p = ModelProfile(
         name=pairs.get("name", ""),
-        base_url=pairs.get("base_url", ""),
+        base_url=normalize_url(pairs.get("base_url", "")),
         model_id=pairs.get("model_id", ""),
         api_key=pairs.get("api_key", ""),
         desc=pairs.get("desc", ""),
@@ -317,7 +317,7 @@ def _profile_from_pairs(pairs: dict) -> dict:
 
 MODEL_WIZARD_STEPS = ["base_url", "model_id", "api_key"]
 _MODEL_WIZARD_PROMPTS = {
-    "base_url": "① base_url（OpenAI 兼容端点，如 `https://api.deepseek.com` 或网关地址）：",
+    "base_url": "① base_url（OpenAI 兼容端点，多数网关是 `https://网关地址/v1`；粘贴的链接也可以）：",
     "model_id": "② model_id（模型名，如 `deepseek-v4-flash`）：",
     "api_key": "③ api_key（没有可回复 `无` 跳过）：",
 }
@@ -325,7 +325,7 @@ _MODEL_WIZARD_PROMPTS = {
 
 async def run_model_wizard_step(agent: Any, state: dict, text: str) -> str:
     """Feed one non-command reply into a pending /model add wizard."""
-    from connectclaw.model_registry import ModelProfile
+    from connectclaw.model_registry import ModelProfile, normalize_url
 
     idx = state.get("step", 0)
     if idx >= len(MODEL_WIZARD_STEPS):
@@ -334,13 +334,18 @@ async def run_model_wizard_step(agent: Any, state: dict, text: str) -> str:
     value = text.strip()
     if key == "api_key" and value in ("无", "none", "/skip"):
         value = ""
-    if key == "base_url" and not value.startswith(("http://", "https://")):
-        return "base_url 应以 `http(s)://` 开头，请重试：\n" + _MODEL_WIZARD_PROMPTS[key]
+    if key == "base_url":
+        # A pasted link arrives as markdown ([text](href)) — unwrap it instead
+        # of bouncing the user back with "应以 http(s):// 开头".
+        value = normalize_url(value)
+        if "://" not in value:
+            return (
+                "base_url 应以 `http(s)://` 开头（如 `https://api.deepseek.com` 或 "
+                "`https://网关/v1`），粘贴的链接也可以。请重试：\n" + _MODEL_WIZARD_PROMPTS[key]
+            )
     if key != "api_key" and not value:
         return _MODEL_WIZARD_PROMPTS[key]
     state["fields"][key] = value
-    if key == "base_url":
-        state["fields"]["base_url"] = value.rstrip("/")
     idx += 1
     state["step"] = idx
     if idx < len(MODEL_WIZARD_STEPS):
@@ -424,7 +429,7 @@ def _model_help() -> str:
         "· `/model test <name>` 对该模型发送最小请求实测（逃生校验）\n"
         "· `/model set <name>` 激活（热切换全部会话 + 写入 config.toml）\n"
         "· `/model edit <name> base_url=... model_id=... [provider=...]` / `/model rm <name>`\n"
-        "· `/model verify <base_url>` 查看端点自称的模型列表（*可能不完整，仅供参考*）\n"
+        "· `/model verify <base_url>` 查看端点自称的模型列表（`/models` 404 时自动补试 `/v1/models`；*可能不完整，仅供参考*）\n"
         "· `/model cancel` 取消进行中的添加向导\n"
         "无论当前模型是否可用，以上操作都能执行。"
     )
@@ -446,7 +451,7 @@ def _model_list(agent: Any) -> str:
                 mark = " ✅当前" if (active is not None
                                     and p.base_url == active.base_url
                                     and p.model_id == active.model_id
-                                    and p.api_key == active.api_key) else ""
+                                    and p.resolved_api_key() == active.api_key) else ""
                 desc = f" — {p.desc}" if p.desc else ""
                 lines.append(f"- **{p.name}** `{p.model_id}`{mark}{desc}")
     if active is not None:
@@ -513,7 +518,9 @@ async def _model_edit(agent: Any, conversation_key: str, name: str, pairs: dict)
 
 
 def _overlay(p, pairs: dict):
-    if "base_url" in pairs: p.base_url = pairs["base_url"].rstrip("/")
+    from connectclaw.model_registry import normalize_url
+
+    if "base_url" in pairs: p.base_url = normalize_url(pairs["base_url"])
     if "model_id" in pairs: p.model_id = pairs["model_id"]
     if "api_key" in pairs: p.api_key = pairs["api_key"]
     if "desc" in pairs: p.desc = pairs["desc"]
@@ -567,28 +574,51 @@ async def _model_set(agent: Any, name: str) -> str:
 
 
 async def _model_verify(agent: Any, url: str) -> str:
+    """Show the models an endpoint claims to serve.
+
+    Probes ``{base}/models`` and, when that 404s, ``{base}/v1/models``: a
+    missing OpenAI-compatible prefix is the most common reason a gateway 404s
+    its model API (the same 404 `/model test` reports).
+    """
     import httpx
 
-    if not url:
-        return "用法：`/model verify <base_url>`"
-    base = url.rstrip("/")
-    endpoint = f"{base}/models"
+    from connectclaw.model_registry import normalize_url
+
+    base = normalize_url(url)
+    if "://" not in base:
+        return ("请给出完整端点地址（含 `https://`，如 `https://api.deepseek.com` 或 "
+                "`https://网关/v1`；粘贴的链接也可以）。")
     proxy = getattr(agent, "_config", None) and agent._config.proxy.url or None
+    bases = [base] if base.endswith("/v1") else [base, f"{base}/v1"]
     try:
         async with httpx.AsyncClient(
             timeout=12, proxy=proxy or None, trust_env=False,
         ) as c:
-            r = await c.get(endpoint)
-        if r.status_code != 200:
-            return f"⚠️ `{endpoint}` → HTTP {r.status_code}（可能不是 OpenAI 兼容端点或无权限）"
-        ids = [m.get("id") for m in r.json().get("data", []) if isinstance(m, dict)]
-        if not ids:
-            return f"`{endpoint}` 返回空模型列表（网关可能不暴露，见 /model help 定位）"
-        head = "\n".join(f"- `{m}`" for m in ids[:40])
-        more = f"\n…共 {len(ids)} 个（列表可能不完整，可用性以 /model test 为准）" if len(ids) > 40 else ""
-        return f"`{base}` 自称提供 {len(ids)} 个模型：\n{head}{more}"
+            for i, candidate in enumerate(bases):
+                endpoint = f"{candidate}/models"
+                r = await c.get(endpoint)
+                if r.status_code == 404 and i < len(bases) - 1:
+                    continue  # bare endpoint 404s → the /v1 prefix is next
+                if r.status_code != 200:
+                    return f"⚠️ `{endpoint}` → HTTP {r.status_code}（可能不是 OpenAI 兼容端点或无权限）"
+                try:
+                    payload = r.json()
+                except Exception:  # noqa: BLE001 — non-JSON body: treat as empty
+                    payload = {}
+                ids = [m.get("id") for m in (payload.get("data") or []) if isinstance(m, dict)]
+                fix = ""
+                if candidate != base:
+                    # Tell the user the exact string to store — a 404 here is a
+                    # config bug they can fix with one /model edit.
+                    fix = (f"\n⚠️ `{base}` 返回 404，`{candidate}` 才有响应 → 端点缺 `/v1` 前缀，"
+                           f"执行 `/model edit <name> base_url={candidate}`")
+                if not ids:
+                    return f"`{endpoint}` 返回空模型列表（网关可能不暴露，见 /model help 定位）{fix}"
+                head = "\n".join(f"- `{m}`" for m in ids[:40])
+                more = f"\n…共 {len(ids)} 个（列表可能不完整，可用性以 /model test 为准）" if len(ids) > 40 else ""
+                return f"`{candidate}` 自称提供 {len(ids)} 个模型：\n{head}{more}{fix}"
     except Exception as e:  # noqa: BLE001
-        return f"❌ 无法访问 `{endpoint}`：{e}"
+        return f"❌ 无法访问 `{base}/models`：{e}"
 
 
 # ── Memory formatting helpers ──────────────────────────────────

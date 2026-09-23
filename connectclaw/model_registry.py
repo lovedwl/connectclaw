@@ -28,6 +28,44 @@ DEFAULT_REGISTRY = os.path.expanduser("~/.connectclaw/models.toml")
 # [llm] section regexp: a line exactly "[llm]" followed by non-section lines.
 _LLM_BLOCK_RE = re.compile(r"^\[llm\]\n(?:[^\[\n][^\n]*\n)*", re.M)
 
+# Markdown link pasted/typed into chat: [label](href). Feishu turns a pasted URL
+# into a rich-text link element, which the channel flattens back to markdown, so
+# this is common input for base_url / verify, not an exotic edge case.
+_MD_LINK_RE = re.compile(r"\[(?P<label>[^\]]*)\]\((?P<href>[^)]*)\)")
+# A bare host[:port][/path] — safe to prefix with a scheme. Deliberately
+# rejects free-form words ("not-a-url") so callers keep their validation.
+_BARE_HOST_RE = re.compile(r"^[A-Za-z0-9.\-]+(:\d+)?(/[^\s]*)?$")
+
+
+def normalize_url(raw: str) -> str:
+    """Normalize an endpoint string from chat into a usable URL.
+
+    Handles the two shapes users actually produce: a pasted markdown link
+    (``[https://gw](https://gw)`` — no HTTP client accepts that string) and a
+    bare host (``gw.example.com`` → ``https://gw.example.com``). The trailing
+    slash is dropped so ``f"{base}/v1"`` never doubles up. Returns "" for
+    empty input; a non-URL string is returned as-is (minus trimming) so
+    callers can still reject it.
+    """
+    s = (raw or "").strip().strip("`").strip()
+    link = _MD_LINK_RE.search(s)
+    if link:
+        s = (link.group("href") or link.group("label")).strip()
+    s = s.strip().strip("<>").strip().rstrip("/")
+    if s and "://" not in s and _BARE_HOST_RE.match(s) and "." in s.split("/")[0]:
+        s = f"https://{s}"
+    return s
+
+
+def mask_key(api_key: str) -> str:
+    """Short fingerprint of a key for display — never the whole secret."""
+    k = (api_key or "").strip()
+    if not k:
+        return "(无 key)"
+    if len(k) <= 12:
+        return k[:3] + "…"
+    return f"{k[:6]}…{k[-4:]}"
+
 
 @dataclass
 class ModelProfile:

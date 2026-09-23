@@ -82,10 +82,12 @@ def _card(title: str, template: str, elements: list[dict]) -> dict:
 
 
 def _is_active(p: ModelProfile, active: Any) -> bool:
+    # resolved_api_key: the active entry carries the EXPANDED key, a registry
+    # profile may hold "$ENV" — comparing raw values would drop the ✅ marker.
     return (active is not None
             and p.base_url == getattr(active, "base_url", None)
             and p.model_id == getattr(active, "model_id", None)
-            and p.api_key == getattr(active, "api_key", None))
+            and p.resolved_api_key() == getattr(active, "api_key", None))
 
 
 def provider_level_card(agent: Any) -> dict:

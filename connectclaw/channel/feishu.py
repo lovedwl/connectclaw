@@ -54,10 +54,19 @@ class FeishuChannel(Channel):
         # /model picker card clicks (kind="model_switch") dispatch here; wired
         # in main.py. Async fn(value: dict, chat_id: str, message_id: str).
         self._model_card_handler = None
+        # Predicate fn(chat_id, text) → True to skip the live thinking card for
+        # a message that is not an agent turn either (a /model add wizard reply:
+        # the card fires immediately and nothing would ever update it). Wired in
+        # main.py to the agent's wizard state.
+        self._card_gate = None
         # Per-conversation locks: messages of the SAME chat are processed in
         # arrival order (a /forget must land before the follow-up message reads
         # the session), while different chats still run concurrently.
         self._chat_locks: dict[str, asyncio.Lock] = {}
+
+    def set_card_gate(self, gate) -> None:
+        """Install a predicate suppressing the live card for non-agent turns."""
+        self._card_gate = gate
 
     # ── Per-conversation serialization ─────────────────────
 
@@ -81,6 +90,24 @@ class FeishuChannel(Channel):
         if is_media_placeholder(text):
             return False
         return text.startswith(("/", "!"))
+
+    def _suppress_card(self, chat_id: str, text: str) -> bool:
+        """True when this message is not an agent turn → no live card.
+
+        Extends the command check with the installed gate, which covers plain
+        replies consumed elsewhere (a pending /model add wizard answers each
+        step without running the agent — a card would fire and never update).
+        A gate that raises must not take message handling down with it.
+        """
+        if self._is_cmd(text):
+            return True
+        if self._card_gate is None:
+            return False
+        try:
+            return bool(self._card_gate(chat_id, text))
+        except Exception as e:  # noqa: BLE001
+            logger.debug("card gate failed: %s", e)
+            return False
 
     def _chat_lock(self, chat_id: str) -> asyncio.Lock:
         """The serialization lock for one conversation (created on demand).
@@ -144,7 +171,7 @@ class FeishuChannel(Channel):
             # `!`/`/bash` are raw execution, not an agent turn (no thinking).
             # Media placeholders (`![image](...)`) are NOT commands: they are
             # inbound images that must reach the agent as an agent turn.
-            is_cmd = self._is_cmd(text)
+            is_cmd = self._suppress_card(chat_id, text)
             # /stop is the one command that may NOT queue behind the lock
             interrupt = self._is_interrupt(text)
 
