@@ -95,7 +95,7 @@ class Sandbox:
         half = self.max_output_bytes // 2
         truncated = (
             output[:half]
-            + f"\n\n... ({len(output) - self.max_output_bytes} bytes truncated) ...\n\n"
+            + f"\n\n... （{len(output) - self.max_output_bytes} 字节已截断） ...\n\n"
             + output[-half:]
         )
         return truncated, True
@@ -319,7 +319,7 @@ async def _run_command(
             half = max_bytes // 2
             result.stdout = (
                 raw_stdout[:half]
-                + f"\n\n... ({len(raw_stdout) - max_bytes} bytes truncated) ...\n\n"
+                + f"\n\n... （{len(raw_stdout) - max_bytes} 字节已截断） ...\n\n"
                 + raw_stdout[-half:]
             )
             result.truncated = True
@@ -331,11 +331,11 @@ async def _run_command(
         result.wall_time_ms = (time.time() - t0) * 1000
 
     except FileNotFoundError:
-        result.stdout = f"sandbox error: command not found: {cmd_args[0]}"
+        result.stdout = f"沙箱错误：命令不存在：{cmd_args[0]}"
         result.exit_code = 127
         result.wall_time_ms = (time.time() - t0) * 1000
     except Exception as e:
-        result.stdout = f"sandbox error: {e}"
+        result.stdout = f"沙箱错误：{e}"
         result.exit_code = -1
         result.wall_time_ms = (time.time() - t0) * 1000
 

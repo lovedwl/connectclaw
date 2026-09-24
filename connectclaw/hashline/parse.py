@@ -90,36 +90,36 @@ def _diagnose_line_ref(ref: str) -> str:
     config_len = get_hash_length()
 
     if not core:
-        return f'[E_BAD_REF] Invalid line reference "{ref}". Expected "LINE#HASH" (e.g. "{example}").'
+        return f'[E_BAD_REF] 无效的行引用 "{ref}"。应为 "LINE#HASH"（例如 "{example}"）。'
     if re.match(r"^\d+\s*$", core):
-        return f'[E_BAD_REF] Invalid line reference "{ref}": missing hash, use "LINE#HASH" from read output (e.g. "{example}").'
+        return f'[E_BAD_REF] 无效的行引用 "{ref}"：缺少哈希，请使用 read 输出中的 "LINE#HASH"（例如 "{example}"）。'
     if re.match(r"^\d+\s*:", core):
-        return f'[E_BAD_REF] Invalid line reference "{ref}": wrong separator, use "LINE#HASH" instead of "LINE:...".'
+        return f'[E_BAD_REF] 无效的行引用 "{ref}"：分隔符错误，请使用 "LINE#HASH" 而不是 "LINE:..."。'
 
     hash_match = re.match(r"^(\d+)\s*#\s*([^\s:]+)(?:\s*:.*)?$", core)
     if hash_match:
         line = int(hash_match.group(1))
         hash_str = hash_match.group(2)
         if line < 1:
-            return f'[E_BAD_REF] Line number must be >= 1, got {line} in "{ref}".'
+            return f'[E_BAD_REF] 行号必须 >= 1，但在 "{ref}" 中得到 {line}。'
         if len(hash_str) != config_len:
             if (
                 HASH_ALPHABET_RE.match(hash_str)
                 and HASH_LENGTH_MIN <= len(hash_str) <= HASH_LENGTH_MAX
             ):
-                return f'[E_BAD_REF] Invalid line reference "{ref}": hash length is {config_len} in this session, but this anchor has {len(hash_str)} characters — it looks like an anchor from a stale context or a different configuration. Re-read the file to get current anchors.'
-            return f'[E_BAD_REF] Invalid line reference "{ref}": hash must be exactly {config_len} characters from {NIBBLE_STR} (e.g. "{example}").'
+                return f'[E_BAD_REF] 无效的行引用 "{ref}"：本会话的哈希长度为 {config_len}，但该锚点有 {len(hash_str)} 个字符 — 它看起来来自过期的上下文或不同的配置。请重新读取文件以获取当前锚点。'
+            return f'[E_BAD_REF] 无效的行引用 "{ref}"：哈希必须正好是来自 {NIBBLE_STR} 的 {config_len} 个字符（例如 "{example}"）。'
         if not HASH_ALPHABET_RE.match(hash_str):
-            return f'[E_BAD_REF] Invalid line reference "{ref}": hash uses invalid characters, hashes use alphabet {NIBBLE_STR} only.'
+            return f'[E_BAD_REF] 无效的行引用 "{ref}"：哈希包含无效字符，哈希只使用字母表 {NIBBLE_STR}。'
 
     missing_hash_match = re.match(r"^(\d+)\s*#\s*$", core)
     if missing_hash_match:
-        return f'[E_BAD_REF] Invalid line reference "{ref}": missing hash after "#", use "LINE#HASH" from read output.'
+        return f'[E_BAD_REF] 无效的行引用 "{ref}"：在 "#" 之后缺少哈希，请使用 read 输出中的 "LINE#HASH"。'
 
     if re.match(r"^0+\s*#", core):
-        return f'[E_BAD_REF] Line number must be >= 1, got 0 in "{ref}".'
+        return f'[E_BAD_REF] 行号必须 >= 1，但在 "{ref}" 中得到 0。'
 
-    return f'[E_BAD_REF] Invalid line reference "{trimmed or ref}". Expected "LINE#HASH" (e.g. "{example}").'
+    return f'[E_BAD_REF] 无效的行引用 "{trimmed or ref}"。应为 "LINE#HASH"（例如 "{example}"）。'
 
 
 def parse_anchor_ref(ref: str) -> Anchor:
@@ -135,7 +135,7 @@ def parse_anchor_ref(ref: str) -> Anchor:
 
     line = int(match.group(1))
     if line < 1:
-        raise ValueError(f'[E_BAD_REF] Line number must be >= 1, got {line} in "{ref}".')
+        raise ValueError(f'[E_BAD_REF] 行号必须 >= 1，但在 "{ref}" 中得到 {line}。')
 
     hash_str = match.group(2)
     config_len = get_hash_length()
@@ -145,20 +145,20 @@ def parse_anchor_ref(ref: str) -> Anchor:
             and HASH_LENGTH_MIN <= len(hash_str) <= HASH_LENGTH_MAX
         ):
             raise ValueError(
-                f'[E_BAD_REF] Invalid line reference "{ref}": hash length is {config_len} '
-                f"in this session, but this anchor has {len(hash_str)} characters — "
-                f"it looks like an anchor from a stale context or a different configuration. "
-                f"Re-read the file to get current anchors."
+                f'[E_BAD_REF] 无效的行引用 "{ref}"：本会话的哈希长度为 {config_len} '
+                f"但该锚点有 {len(hash_str)} 个字符 — "
+                f"它看起来来自过期的上下文或不同的配置。"
+                f"请重新读取文件以获取当前锚点。"
             )
         raise ValueError(
-            f'[E_BAD_REF] Invalid line reference "{ref}": hash must be exactly '
-            f'{config_len} characters from {NIBBLE_STR} (e.g. "{_example_anchor()}").'
+            f'[E_BAD_REF] 无效的行引用 "{ref}"：哈希必须正好是 '
+            f'来自 {NIBBLE_STR} 的 {config_len} 个字符（例如 "{_example_anchor()}"）。'
         )
 
     if not HASH_ALPHABET_RE.match(hash_str):
         raise ValueError(
-            f'[E_BAD_REF] Invalid line reference "{ref}": hash uses invalid '
-            f"characters, hashes use alphabet {NIBBLE_STR} only."
+            f'[E_BAD_REF] 无效的行引用 "{ref}"：哈希包含无效 '
+            f"字符，哈希只使用字母表 {NIBBLE_STR}。"
         )
 
     text_hint = match.group(3)
@@ -175,9 +175,9 @@ def _assert_no_display_prefixes(lines: list[str]) -> None:
             continue
         if _DISPLAY_PREFIX_RE.search(line) or _DISPLAY_PREFIX_PLUS_RE.search(line) or _DIFF_MINUS_RE.search(line):
             raise ValueError(
-                f'[E_INVALID_PATCH] "lines" must contain literal file content, '
-                f'not rendered "LINE#HASH:" or diff "+/-" prefixes. '
-                f"Offending line: {line!r}"
+                f'[E_INVALID_PATCH] "lines" 必须包含字面文件内容，'
+                f'而不是渲染后的 "LINE#HASH:" 或 diff "+/-" 前缀。'
+                f"有问题的行：{line!r}"
             )
 
 
@@ -196,61 +196,61 @@ def _assert_edit_item(edit: dict, index: int) -> None:
     unknown_keys = set(edit.keys()) - _ITEM_KEYS
     if unknown_keys:
         raise ValueError(
-            f"Edit {index} contains unknown or unsupported fields: {', '.join(sorted(unknown_keys))}."
+            f"编辑 {index} 包含未知或不支持的字段：{', '.join(sorted(unknown_keys))}。"
         )
 
     op = edit.get("op")
     if not isinstance(op, str):
-        raise ValueError(f'Edit {index} requires an "op" string.')
+        raise ValueError(f'编辑 {index} 需要 "op" 字符串。')
     if op not in ("replace", "append", "prepend", "replace_text"):
         raise ValueError(
-            f'[E_BAD_OP] Edit {index} uses unknown op "{op}". '
-            f'Expected "replace", "append", "prepend", or "replace_text".'
+            f'[E_BAD_OP] 编辑 {index} 使用了未知的 op "{op}"。'
+            f'应为 "replace"、"append"、"prepend" 或 "replace_text"。'
         )
 
     if "pos" in edit and not isinstance(edit["pos"], str):
-        raise ValueError(f'Edit {index} field "pos" must be a string when provided.')
+        raise ValueError(f'编辑 {index} 的字段 "pos" 提供时必须是字符串。')
     if "end" in edit and not isinstance(edit.get("end", ""), str):
-        raise ValueError(f'Edit {index} field "end" must be a string when provided.')
+        raise ValueError(f'编辑 {index} 的字段 "end" 提供时必须是字符串。')
     if "oldText" in edit and not isinstance(edit["oldText"], str):
-        raise ValueError(f'Edit {index} field "oldText" must be a string when provided.')
+        raise ValueError(f'编辑 {index} 的字段 "oldText" 提供时必须是字符串。')
     if "newText" in edit and not isinstance(edit.get("newText", ""), str):
-        raise ValueError(f'Edit {index} field "newText" must be a string when provided.')
+        raise ValueError(f'编辑 {index} 的字段 "newText" 提供时必须是字符串。')
     if "lines" in edit and not (
         isinstance(edit["lines"], list)
         and all(isinstance(item, str) for item in edit["lines"])
     ):
-        raise ValueError(f'Edit {index} field "lines" must be a string array.')
+        raise ValueError(f'编辑 {index} 的字段 "lines" 必须是字符串数组。')
 
     if op == "replace_text":
         if not isinstance(edit.get("oldText"), str) or not isinstance(edit.get("newText"), str):
             raise ValueError(
-                f'[E_BAD_OP] Edit {index} with op "replace_text" requires '
-                f'string "oldText" and "newText" fields.'
+                f'[E_BAD_OP] 使用 op "replace_text" 的编辑 {index} 需要 '
+                f'字符串 "oldText" 和 "newText" 字段。'
             )
         if "pos" in edit or "end" in edit or "lines" in edit:
             raise ValueError(
-                f'Edit {index} with op "replace_text" only supports "oldText" and "newText".'
+                f'使用 op "replace_text" 的编辑 {index} 只支持 "oldText" 和 "newText"。'
             )
         return
 
     if "lines" not in edit:
-        raise ValueError(f'Edit {index} requires a "lines" field.')
+        raise ValueError(f'编辑 {index} 需要一个 "lines" 字段。')
 
     if "oldText" in edit or "newText" in edit:
         raise ValueError(
-            f'Edit {index} with op "{op}" does not support "oldText" or "newText".'
+            f'使用 op "{op}" 的编辑 {index} 不支持 "oldText" 或 "newText"。'
         )
 
     if op == "replace" and not isinstance(edit.get("pos"), str):
         raise ValueError(
-            f'[E_BAD_OP] Edit {index} with op "replace" requires a "pos" anchor string.'
+            f'[E_BAD_OP] 使用 op "replace" 的编辑 {index} 需要一个 "pos" 锚点字符串。'
         )
 
     if op in ("append", "prepend") and "end" in edit:
         raise ValueError(
-            f'[E_BAD_OP] Edit {index} with op "{op}" does not support "end". '
-            f'Use "pos" or omit it for file boundary insertion.'
+            f'[E_BAD_OP] 使用 op "{op}" 的编辑 {index} 不支持 "end"。'
+            f'请使用 "pos"，或省略它以在文件边界插入。'
         )
 
 
@@ -371,19 +371,19 @@ def normalize_edit_request(input: object) -> object:
     if present_keys:
         for k in present_keys:
             if not isinstance(record[k], str):
-                raise ValueError(f'Edit request field "{k}" must be a string.')
+                raise ValueError(f'编辑请求字段 "{k}" 必须是字符串。')
 
         has_camel = "oldText" in record or "newText" in record
         has_snake = "old_text" in record or "new_text" in record
         if has_camel and has_snake:
             raise ValueError(
-                "Edit request cannot mix legacy camelCase and snake_case fields. "
-                "Use either oldText/newText or old_text/new_text."
+                "编辑请求不能混用旧的 camelCase 和 snake_case 字段。"
+                "请使用 oldText/newText 或 old_text/new_text 其中之一。"
             )
         if has_camel and not ("oldText" in record and "newText" in record):
-            raise ValueError("Legacy top-level replace requires both oldText and newText.")
+            raise ValueError("旧的顶层替换需要同时提供 oldText 和 newText。")
         if has_snake and not ("old_text" in record and "new_text" in record):
-            raise ValueError("Legacy top-level replace requires both old_text and new_text.")
+            raise ValueError("旧的顶层替换需要同时提供 old_text 和 new_text。")
 
     has_edits = "edits" in record
 

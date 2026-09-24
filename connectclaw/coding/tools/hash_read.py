@@ -89,13 +89,13 @@ class HashReadTool(AgentTool):
         # Check file exists
         if not os.path.isfile(absolute_path):
             return AgentToolResult(
-                content=[{"type": "text", "text": f"Error: File not found: {file_path}"}],
+                content=[{"type": "text", "text": f"错误：文件不存在：{file_path}"}],
             )
 
         # Check is not a directory
         if os.path.isdir(absolute_path):
             return AgentToolResult(
-                content=[{"type": "text", "text": f"Error: Path is a directory: {file_path}"}],
+                content=[{"type": "text", "text": f"错误：路径是目录：{file_path}"}],
             )
 
         # Read file
@@ -106,12 +106,12 @@ class HashReadTool(AgentTool):
             return AgentToolResult(
                 content=[{
                     "type": "text",
-                    "text": f"Error: File is binary or not UTF-8: {file_path}. Use the read tool for binary inspection.",
+                    "text": f"错误：文件为二进制或非 UTF-8：{file_path}。请使用 read 工具进行二进制检查。",
                 }],
             )
         except Exception as e:
             return AgentToolResult(
-                content=[{"type": "text", "text": f"Error reading file: {e}"}],
+                content=[{"type": "text", "text": f"读取文件错误：{e}"}],
             )
 
         # Strip BOM, normalize line endings
@@ -136,14 +136,14 @@ class HashReadTool(AgentTool):
 
         if total_lines == 0:
             msg = (
-                "File is empty. Use hash_edit with prepend or append "
-                "and omit pos to insert content."
+                "文件为空。请使用 hash_edit 的 prepend 或 append "
+                "并省略 pos 以插入内容。"
             )
             if offset > 1:
                 msg = (
-                    f"Offset {offset} is beyond end of file (0 lines total). "
-                    f"The file is empty. Use hash_edit with prepend or append "
-                    f"and omit pos to insert content."
+                    f"偏移量 {offset} 超出文件末尾（共 0 行）。"
+                    f"文件为空。请使用 hash_edit 的 prepend 或 append "
+                    f"并省略 pos 以插入内容。"
                 )
             return AgentToolResult(content=[{"type": "text", "text": msg}])
 
@@ -152,10 +152,10 @@ class HashReadTool(AgentTool):
                 content=[{
                     "type": "text",
                     "text": (
-                        f"Offset {offset} is beyond end of file "
-                        f"({total_lines} lines total). "
-                        f"Use offset=1 to read from the start, "
-                        f"or offset={total_lines} to read the last line."
+                        f"偏移量 {offset} 超出文件末尾"
+                        f"（共 {total_lines} 行）。"
+                        f"使用 offset=1 从头读取，"
+                        f"或 offset={total_lines} 读取最后一行。"
                     ),
                 }]
             )
@@ -189,10 +189,10 @@ class HashReadTool(AgentTool):
                         content=[{
                             "type": "text",
                             "text": (
-                                f"[Line {start_idx + 1} exceeds "
-                                f"{_format_size(MAX_BYTES)}. "
-                                f"Hashline output requires full lines; "
-                                f"cannot compute hashes for a truncated preview.]"
+                                f"[第 {start_idx + 1} 行超出 "
+                                f"{_format_size(MAX_BYTES)}。"
+                                f"Hashline 输出需要完整行；"
+                                f"无法为已截断的预览计算哈希。]"
                             ),
                         }]
                     )
@@ -209,26 +209,26 @@ class HashReadTool(AgentTool):
         if truncated:
             if raw_mode:
                 output += (
-                    f"\n\n[Showing lines {offset}-{end_idx} of {total_lines}"
-                    f" ({_format_size(MAX_BYTES)} limit)."
-                    f" Use offset={end_idx + 1} to continue.]"
+                    f"\n\n[显示第 {offset}-{end_idx} 行，共 {total_lines} 行"
+                    f"（限制 {_format_size(MAX_BYTES)}）。"
+                    f" 使用 offset={end_idx + 1} 继续。]"
                 )
             else:
                 output += (
-                    f"\n\n[Showing lines {offset}-{end_idx} of {total_lines}"
-                    f" ({_format_size(MAX_BYTES)} limit)."
-                    f" Use offset={end_idx + 1} to continue.]"
+                    f"\n\n[显示第 {offset}-{end_idx} 行，共 {total_lines} 行"
+                    f"（限制 {_format_size(MAX_BYTES)}）。"
+                    f" 使用 offset={end_idx + 1} 继续。]"
                 )
         elif end_idx < total_lines:
             output += (
-                f"\n\n[Showing lines {offset}-{end_idx} of {total_lines}."
-                f" Use offset={end_idx + 1} to continue.]"
+                f"\n\n[显示第 {offset}-{end_idx} 行，共 {total_lines} 行。"
+                f" 使用 offset={end_idx + 1} 继续。]"
             )
 
         # Add UTF-8 decode warning
         had_utf8_errors = bom != ""  # simplify: BOM presence is the main signal
         if had_utf8_errors:
-            output += "\n\n[Non-UTF-8 bytes shown as U+FFFD; editing rewrites the file as UTF-8.]"
+            output += "\n\n[非 UTF-8 字节显示为 U+FFFD；编辑会将文件重写为 UTF-8。]"
 
         # Record snapshot for stale-anchor recovery (hashed reads only)
         if not raw_mode:

@@ -569,7 +569,7 @@ class FeishuChannel(Channel):
         }
 
     async def send_error(self, conversation_key: str, error: str) -> str:
-        return await self.send_message(conversation_key, f"Error: {error[:500]}")
+        return await self.send_message(conversation_key, f"错误：{error[:500]}")
 
     async def download_resource(
         self, file_key: str, resource_type: str = "image", message_id: str = "",
@@ -589,10 +589,10 @@ class FeishuChannel(Channel):
     ) -> bool:
         return await self._request_auth(
             conversation_key=conversation_key,
-            title="Bash Authorization",
+            title="Bash 命令授权",
             template="warning",
             command=command,
-            description="The assistant wants to execute:",
+            description="助手想要执行以下命令：",
             timeout=timeout,
         )
 
@@ -601,10 +601,10 @@ class FeishuChannel(Channel):
     ) -> bool:
         return await self._request_auth(
             conversation_key=conversation_key,
-            title="Sandbox Escape",
+            title="沙箱逃逸授权",
             template="danger",
             command=command,
-            description="The assistant needs to run outside the sandbox:",
+            description="助手需要在沙箱之外运行以下命令：",
             timeout=timeout,
         )
 
@@ -646,16 +646,16 @@ class FeishuChannel(Channel):
         """Replace the auth card with a resolved state (no buttons)."""
         if timed_out:
             header_color = "grey"
-            status_text = "⏰ Timed out"
-            status_detail = f"Authorization request expired.\n\n**Command:**\n```\n{command}\n```"
+            status_text = "⏰ 已超时"
+            status_detail = f"授权请求已超时。\n\n**命令：**\n```\n{command}\n```"
         elif approved:
             header_color = "green"
-            status_text = "✅ Approved"
-            status_detail = f"Command will be executed.\n\n**Command:**\n```\n{command}\n```"
+            status_text = "✅ 已批准"
+            status_detail = f"命令将被执行。\n\n**命令：**\n```\n{command}\n```"
         else:
             header_color = "red"
-            status_text = "❌ Denied"
-            status_detail = f"Command will NOT be executed.\n\n**Command:**\n```\n{command}\n```"
+            status_text = "❌ 已拒绝"
+            status_detail = f"命令将不会被执行。\n\n**命令：**\n```\n{command}\n```"
 
         resolved_card = {
             "schema": "2.0",
@@ -668,7 +668,7 @@ class FeishuChannel(Channel):
                 "elements": [
                     {"tag": "markdown", "content": status_detail},
                     {"tag": "markdown",
-                     "content": f"<font color='grey'>Request: {request_id}</font>"},
+                     "content": f"<font color='grey'>请求编号：{request_id}</font>"},
                 ],
             },
         }
@@ -880,7 +880,7 @@ def _build_card(
             "elements": [
                 {
                     "tag": "markdown",
-                    "content": f"{description}\n\n**Command:**\n```\n{command}\n```\n\nAllow?",
+                    "content": f"{description}\n\n**命令：**\n```\n{command}\n```\n\n是否允许？",
                 },
                 {"tag": "hr"},
                 {
@@ -891,7 +891,7 @@ def _build_card(
                             "elements": [
                                 {
                                     "tag": "button",
-                                    "text": {"tag": "plain_text", "content": "✅ Approve"},
+                                    "text": {"tag": "plain_text", "content": "✅ 批准"},
                                     "type": "primary",
                                     "value": {
                                         "action": "approve",
@@ -905,7 +905,7 @@ def _build_card(
                             "elements": [
                                 {
                                     "tag": "button",
-                                    "text": {"tag": "plain_text", "content": "❌ Deny"},
+                                    "text": {"tag": "plain_text", "content": "❌ 拒绝"},
                                     "type": "danger",
                                     "value": {
                                         "action": "deny",
@@ -918,7 +918,7 @@ def _build_card(
                 },
                 {
                     "tag": "markdown",
-                    "content": f"<font color='grey'>Request: {request_id} | Expires 60s</font>",
+                    "content": f"<font color='grey'>请求编号：{request_id} | 60 秒后过期</font>",
                 },
             ],
         },

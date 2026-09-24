@@ -250,7 +250,7 @@ class AgentsTool(AgentTool):
             return await self._do_run(params, signal, on_update)
         return AgentToolResult(content=[{
             "type": "text",
-            "text": f"Unknown action '{action}'. Use one of: list | describe | run | create.",
+            "text": f"未知 action '{action}'。可用值：list | describe | run | create。",
         }])
 
     # ── describe ────────────────────────────────────────────
@@ -258,17 +258,17 @@ class AgentsTool(AgentTool):
     def _do_describe(self, name: str) -> AgentToolResult:
         name = name.strip()
         if not name:
-            return AgentToolResult(content=[{"type": "text", "text": "describe needs `name`."}])
+            return AgentToolResult(content=[{"type": "text", "text": "describe 需要 `name`。"}])
         meta = parse_agent_file(Path(self._agents_dir) / f"{name}.md")
         if not meta:
             return AgentToolResult(content=[{
-                "type": "text", "text": f"Agent '{name}' not found. Use action=list to see what exists.",
+                "type": "text", "text": f"未找到 agent '{name}'。可用 action=list 查看现有 agent。",
             }])
         text = (
             f"# {meta['name']}\n"
-            f"desc: {meta['desc']}\n"
-            f"tools: {meta['tools'] or '(none)'}\n\n"
-            f"## instructions\n{meta['instructions']}"
+            f"描述：{meta['desc']}\n"
+            f"工具：{meta['tools'] or '（无）'}\n\n"
+            f"## 指令\n{meta['instructions']}"
         )
         return AgentToolResult(content=[{"type": "text", "text": text}])
 
@@ -278,12 +278,12 @@ class AgentsTool(AgentTool):
         name = (params.get("name") or "").strip()
         if not name or not _NAME_RE.match(name):
             return AgentToolResult(content=[{
-                "type": "text", "text": "Invalid agent name. Use letters, digits, '_' or '-' only.",
+                "type": "text", "text": "agent 名称无效。仅可使用字母、数字、'_' 或 '-'。",
             }])
         instructions = (params.get("instructions") or "").strip()
         if not instructions:
             return AgentToolResult(content=[{
-                "type": "text", "text": "instructions is required (the agent's system prompt).",
+                "type": "text", "text": "instructions 为必填（agent 的系统提示词）。",
             }])
         desc = params.get("desc", "") or ""
         tools = params.get("tools") or []
@@ -295,7 +295,7 @@ class AgentsTool(AgentTool):
             Path(self._agents_dir).mkdir(parents=True, exist_ok=True)
             (Path(self._agents_dir) / f"{name}.md").write_text(content, encoding="utf-8")
         except OSError as e:
-            return AgentToolResult(content=[{"type": "text", "text": f"Failed to write agent: {e}"}])
+            return AgentToolResult(content=[{"type": "text", "text": f"写入 agent 失败：{e}"}])
 
         return AgentToolResult(content=[{
             "type": "text",
@@ -325,7 +325,7 @@ class AgentsTool(AgentTool):
             else:
                 return AgentToolResult(content=[{
                     "type": "text",
-                    "text": "run needs `agent`+`prompt` (single) or `tasks` (DAG).",
+                    "text": "run 需要 `agent`+`prompt`（单个）或 `tasks`（DAG）。",
                 }])
 
         # Resolve the fleet's tool/agent universe ONCE per call, from a fresh
@@ -343,7 +343,7 @@ class AgentsTool(AgentTool):
                 if dep not in id_to_task:
                     return AgentToolResult(content=[{
                         "type": "text",
-                        "text": f"Task '{t['id']}' depends on unknown task '{dep}'.",
+                        "text": f"任务 '{t['id']}' 依赖未知任务 '{dep}'。",
                     }])
 
         # Per-call state (keep local — this tool is a singleton).
@@ -418,7 +418,7 @@ class AgentsTool(AgentTool):
                     fleet[tid].update(status="error", action="依赖失败,跳过")
                     results[tid] = {
                         "name": _label(t), "output": "",
-                        "error": "skipped: dependency failed", "steps": 0,
+                        "error": "已跳过：依赖失败", "steps": 0,
                     }
                     outputs[tid] = ""
                     done_ids.add(tid)
@@ -439,7 +439,7 @@ class AgentsTool(AgentTool):
                         fleet[t["id"]].update(status="error", action="循环依赖")
                         results[t["id"]] = {
                             "name": _label(t), "output": "",
-                            "error": "unresolved dependency cycle", "steps": 0,
+                            "error": "未解析的依赖环", "steps": 0,
                         }
                         done_ids.add(t["id"])
                         failed_ids.add(t["id"])
@@ -485,7 +485,7 @@ class AgentsTool(AgentTool):
             if found is None:
                 fleet[tid].update(status="error", action="未找到 agent")
                 return {"name": agent_name, "output": "",
-                        "error": f"named agent '{agent_name}' not found", "steps": 0}
+                        "error": f"未找到 agent '{agent_name}'", "steps": 0}
             spec = {
                 "name": agent_name,
                 "system_prompt": getattr(found, "instructions", TASK_SYSTEM_PROMPT),
@@ -498,7 +498,7 @@ class AgentsTool(AgentTool):
             if not tools:
                 fleet[tid].update(status="error", action="无有效工具")
                 return {"name": _label(task), "output": "",
-                        "error": f"no valid tools: {tool_names}", "steps": 0}
+                        "error": f"无有效工具：{tool_names}", "steps": 0}
             spec = {
                 "name": _label(task),
                 "system_prompt": TASK_SYSTEM_PROMPT,
@@ -540,14 +540,14 @@ def _aggregate(tasks: list[dict], results: dict[str, dict]) -> AgentToolResult:
         tid = t["id"]
         res = results.get(tid)
         if res is None:
-            status, body = "SKIPPED", "(not run)"
+            status, body = "跳过", "（未运行）"
         elif res.get("error"):
-            status, body = "ERROR", res["error"]
+            status, body = "错误", res["error"]
         else:
-            status, body = "OK", res.get("output", "(no output)")
+            status, body = "成功", res.get("output", "（无输出）")
             success += 1
         parts.append(f"## [{tid}] {_label(t)}: {status}\n{body}")
-    header = f"Completed {success}/{len(tasks)} tasks:\n\n"
+    header = f"已完成 {success}/{len(tasks)} 个任务：\n\n"
     return AgentToolResult(
         content=[{"type": "text", "text": header + "\n\n---\n\n".join(parts)}],
         details={"results": results, "success": success, "total": len(tasks)},

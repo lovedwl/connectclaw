@@ -64,7 +64,7 @@ class MemoryTool(AgentTool):
         if not getattr(self._memory, "enabled", False):
             return AgentToolResult(content=[{
                 "type": "text",
-                "text": "Memory subsystem is disabled.",
+                "text": "记忆系统已禁用。",
             }])
 
         action = params.get("action", "").strip()
@@ -72,7 +72,7 @@ class MemoryTool(AgentTool):
         if not keyword:
             return AgentToolResult(content=[{
                 "type": "text",
-                "text": "keyword is required.",
+                "text": "keyword 为必填项。",
             }])
 
         if action == "search":
@@ -81,7 +81,7 @@ class MemoryTool(AgentTool):
             return await self._forget(keyword)
         return AgentToolResult(content=[{
             "type": "text",
-            "text": f"Unknown action: {action!r}. Use 'search' or 'forget'.",
+            "text": f"未知操作：{action!r}。请使用 'search' 或 'forget'。",
         }])
 
     # ── actions ───────────────────────────────────────────
@@ -91,9 +91,9 @@ class MemoryTool(AgentTool):
         if not entries:
             return AgentToolResult(content=[{
                 "type": "text",
-                "text": f"No memories match {keyword!r}.",
+                "text": f"没有匹配 {keyword!r} 的记忆。",
             }])
-        lines = [f"Found {len(entries)} memory(ies) matching {keyword!r}:"]
+        lines = [f"找到 {len(entries)} 条匹配 {keyword!r} 的记忆："]
         for e in entries[:30]:
             lines.append(
                 f"- id={e.id} type={e.type.value} importance={e.importance:.2f} "
@@ -107,11 +107,11 @@ class MemoryTool(AgentTool):
         candidates = self._memory._find_by_keyword(keyword)  # noqa: SLF001
         protected = sum(1 for e in candidates if self._memory._is_persona(e))  # noqa: SLF001
         softened = await self._memory.soften_by_keyword(keyword)
-        parts = [f"Soft-retired {softened} memory(ies) matching {keyword!r}."]
+        parts = [f"已软退役 {softened} 条匹配 {keyword!r} 的记忆。"]
         if protected:
             parts.append(
-                f"{protected} persona-grade memory(ies) were protected — "
-                "ask the user to remove those with /forget id <id>."
+                f"{protected} 条 persona 级记忆受到保护 —— "
+                "请用户使用 /forget id <id> 移除它们。"
             )
-        parts.append("Retired memories stop being recalled and are cleaned up on the next /dream cycle.")
+        parts.append("已退役的记忆将不再被召回，并会在下一个 /dream 周期中清理。")
         return AgentToolResult(content=[{"type": "text", "text": " ".join(parts)}])

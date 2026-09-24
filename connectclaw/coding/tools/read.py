@@ -57,7 +57,7 @@ class ReadTool(AgentTool):
         # Check file exists
         if not os.path.isfile(absolute_path):
             return AgentToolResult(
-                content=[{"type": "text", "text": f"Error: File not found: {file_path}"}],
+                content=[{"type": "text", "text": f"错误：文件不存在：{file_path}"}],
             )
 
         # Read file
@@ -66,7 +66,7 @@ class ReadTool(AgentTool):
                 content = await f.read()
         except Exception as e:
             return AgentToolResult(
-                content=[{"type": "text", "text": f"Error reading file: {e}"}],
+                content=[{"type": "text", "text": f"读取文件错误：{e}"}],
             )
 
         lines = content.split("\n")
@@ -97,10 +97,10 @@ class ReadTool(AgentTool):
         if len(output_lines) > MAX_LINES:
             output_lines = output_lines[:MAX_LINES]
             output = "\n".join(output_lines)
-            output += f"\n\n... (truncated at {MAX_LINES} lines, {total_lines} total)"
+            output += f"\n\n... （已在 {MAX_LINES} 行处截断，共 {total_lines} 行）"
 
         return AgentToolResult(
-            content=[{"type": "text", "text": output or "(empty file)"}],
+            content=[{"type": "text", "text": output or "（空文件）"}],
         )
 
     def _resolve_path(self, path: str) -> str:

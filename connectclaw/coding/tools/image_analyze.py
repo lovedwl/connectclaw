@@ -116,7 +116,7 @@ class ImageAnalyzeTool(AgentTool):
             return AgentToolResult(
                 content=[{
                     "type": "text",
-                    "text": f"Error: Image file not found: {image_path}",
+                    "text": f"错误：图片文件不存在：{image_path}",
                 }],
             )
 
@@ -127,8 +127,8 @@ class ImageAnalyzeTool(AgentTool):
             return AgentToolResult(
                 content=[{
                     "type": "text",
-                    "text": f"Error: Unsupported image format: {ext}. "
-                            f"Supported: {', '.join(self.MIME_MAP.keys())}",
+                    "text": f"错误：不支持的图片格式：{ext}。"
+                            f"支持：{', '.join(self.MIME_MAP.keys())}",
                 }],
             )
 
@@ -142,10 +142,10 @@ class ImageAnalyzeTool(AgentTool):
                 content=[{
                     "type": "text",
                     "text": (
-                        f"Image analysis is not configured (VISION_API_KEY not set). "
-                        f"Image: {image_path} ({file_size} bytes, {mime_type})\n"
-                        f"Question: {question}\n\n"
-                        f"To enable image analysis, set VISION_API_KEY in .env or config.toml."
+                        f"图片分析未配置（未设置 VISION_API_KEY）。"
+                        f"图片：{image_path}（{file_size} 字节，{mime_type}）\n"
+                        f"问题：{question}\n\n"
+                        f"要启用图片分析，请在 .env 或 config.toml 中设置 VISION_API_KEY。"
                     ),
                 }],
             )
@@ -194,7 +194,7 @@ class ImageAnalyzeTool(AgentTool):
                 max_tokens=1000,
             )
 
-            text = response.choices[0].message.content or "(no description)"
+            text = response.choices[0].message.content or "（无描述）"
 
             return AgentToolResult(
                 content=[{"type": "text", "text": text}],
@@ -210,8 +210,8 @@ class ImageAnalyzeTool(AgentTool):
                 content=[{
                     "type": "text",
                     "text": (
-                        f"Image analysis requires the openai package. "
-                        f"Image: {image_path}"
+                        f"图片分析需要 openai 包。"
+                        f"图片：{image_path}"
                     ),
                 }],
             )
@@ -219,7 +219,7 @@ class ImageAnalyzeTool(AgentTool):
             return AgentToolResult(
                 content=[{
                     "type": "text",
-                    "text": f"Image analysis failed: {e}",
+                    "text": f"图片分析失败：{e}",
                 }],
             )
 

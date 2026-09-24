@@ -158,11 +158,11 @@ class NamedAgentTool(AgentTool):
         )
         if res.get("error"):
             return AgentToolResult(
-                content=[{"type": "text", "text": f"[{self.name} error] {res['error']}"}],
+                content=[{"type": "text", "text": f"[{self.name} 错误] {res['error']}"}],
                 details={"steps": res.get("steps", 0)},
             )
         return AgentToolResult(
-            content=[{"type": "text", "text": res.get("output") or "(no output)"}],
+            content=[{"type": "text", "text": res.get("output") or "（无输出）"}],
             details={"steps": res.get("steps", 0)},
         )
 

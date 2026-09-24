@@ -28,7 +28,7 @@ def test_text_blocks_join_newlines():
 
 def test_empty_text_blocks_skipped():
     r = _result(content=[{"type": "text", "text": ""}])
-    assert final_response_text(r) == "(empty response)"
+    assert final_response_text(r) == "（空响应）"
 
 
 def test_thinking_fallback():
@@ -48,4 +48,4 @@ def test_error_passthrough_full():
 
 
 def test_truly_empty_marker():
-    assert final_response_text(_result()) == "(empty response)"
+    assert final_response_text(_result()) == "（空响应）"

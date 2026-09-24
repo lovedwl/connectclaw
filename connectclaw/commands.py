@@ -56,8 +56,8 @@ def _help_text(unknown: str = "") -> str:
     """Build a help listing for available commands."""
     lines = []
     if unknown:
-        lines.append(f"Unknown command: {unknown}\n")
-    lines.append("**Available commands:**")
+        lines.append(f"未知命令：{unknown}\n")
+    lines.append("**可用命令：**")
     for name, cmd in sorted(COMMANDS.items()):
         lines.append(f"- **{name}** — {cmd.description}")
     return "\n".join(lines)
@@ -98,16 +98,16 @@ COMMANDS: dict[str, Command] = {}
 # ── Built-in Commands ──────────────────────────────────────────
 
 
-@register("/stop", "interrupt the running agent loop")
+@register("/stop", "中断正在运行的 agent 循环")
 async def _stop(conversation_key: str, agent: Any, args: str = "") -> str:
     agent.abort(conversation_key)
-    return "⏹ Interrupted."
+    return "⏹ 已中断。"
 
 
-@register("/new", "start a fresh conversation (clear context)")
+@register("/new", "开启新会话（清空上下文）")
 async def _new(conversation_key: str, agent: Any, args: str = "") -> str:
     await agent.new_session(conversation_key)
-    return "🆕 Fresh conversation started."
+    return "🆕 新会话已开启。"
 
 
 @register(
