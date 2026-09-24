@@ -92,9 +92,9 @@ def _format_mismatch_error(
     ln_width = len(str(max_display))
     stale_refs = ", ".join(f"{m.line}#{m.expected}" for m in mismatches)
     out: list[str] = [
-        f"[E_STALE_ANCHOR] {len(mismatches)} stale anchor{'s' if len(mismatches) > 1 else ''}. "
-        f"Retry with the >>> LINE#HASH lines below; keep both endpoints for range replaces.",
-        f"Stale refs: {stale_refs}",
+        f"[E_STALE_ANCHOR] {len(mismatches)} 个过期锚点。"
+        f"请使用下面的 >>> LINE#HASH 行重试；范围替换请保留两端锚点。",
+        f"过期引用：{stale_refs}",
         "",
     ]
 
@@ -143,12 +143,12 @@ def _format_mismatch_error(
         )
         if has_any:
             out.append("")
-            out.append("Did you mean (content-matched candidates for stale anchors):")
+            out.append("你是不是想用（与内容匹配的过期锚点候选）：")
             for mismatch, result in per_anchor:
                 if result["kind"] == "overflow":
                     out.append(
-                        f"  {result['count']} similar lines found for "
-                        f"{mismatch.line}#{mismatch.expected} — re-read to disambiguate"
+                        f"  为以下锚点找到 {result['count']} 条相似行："
+                        f"{mismatch.line}#{mismatch.expected} — 重新读取以消除歧义"
                     )
                 else:
                     for line_num in result["lines"]:
@@ -156,7 +156,7 @@ def _format_mismatch_error(
                         line_content = file_lines[line_num - 1]
                         out.append(
                             f"  {line_num}#{fresh_hash}:{line_content}"
-                            f"   ← for stale {mismatch.line}#{mismatch.expected}"
+                            f"   ← 对应过期锚点 {mismatch.line}#{mismatch.expected}"
                         )
 
     return "\n".join(out)
@@ -233,19 +233,19 @@ def _preview_text(text: str) -> str:
 def _describe_edit(edit: HashlineEdit) -> str:
     if isinstance(edit, ReplaceEdit):
         if edit.end:
-            return f"replace {edit.pos.line}#{edit.pos.hash}-{edit.end.line}#{edit.end.hash}"
-        return f"replace {edit.pos.line}#{edit.pos.hash}"
+            return f"替换 {edit.pos.line}#{edit.pos.hash}-{edit.end.line}#{edit.end.hash}"
+        return f"替换 {edit.pos.line}#{edit.pos.hash}"
     elif isinstance(edit, AppendEdit):
         if edit.pos:
-            return f"append after {edit.pos.line}#{edit.pos.hash}"
-        return "append at EOF"
+            return f"在 {edit.pos.line}#{edit.pos.hash} 之后追加"
+        return "在文件末尾追加"
     elif isinstance(edit, PrependEdit):
         if edit.pos:
-            return f"prepend before {edit.pos.line}#{edit.pos.hash}"
-        return "prepend at BOF"
+            return f"在 {edit.pos.line}#{edit.pos.hash} 之前插入"
+        return "在文件开头插入"
     elif isinstance(edit, ReplaceTextEdit):
         return f'replace_text "{_preview_text(edit.oldText)}"'
-    return "unknown edit"
+    return "未知编辑"
 
 
 # ─── Phase 1: Anchor Validation ─────────────────────────────────────────────
@@ -268,8 +268,8 @@ def _validate_anchor_edits(
     def _validate(ref: Anchor) -> bool:
         if ref.line < 1 or ref.line > len(line_index.file_lines):
             raise ValueError(
-                f"[E_RANGE_OOB] Line {ref.line} does not exist "
-                f"(file has {line_index.visible_line_count} lines)"
+                f"[E_RANGE_OOB] 第 {ref.line} 行不存在"
+                f"（文件共有 {line_index.visible_line_count} 行）"
             )
         line = line_index.file_lines[ref.line - 1]
         actual = compute_line_hash(line_index.file_lines, ref.line - 1)
@@ -299,9 +299,9 @@ def _validate_anchor_edits(
                 if key not in accepted_fuzzy_refs:
                     accepted_fuzzy_refs.add(key)
                     warnings.append(
-                        f"Accepted fuzzy anchor validation at line {ref.line}: "
-                        f"exact hash mismatched, but the copied line content still "
-                        f"matched after whitespace/Unicode normalization."
+                        f"已接受第 {ref.line} 行的模糊锚点校验："
+                        f"精确哈希不匹配，但复制的行内容在空白/Unicode "
+                        f"规范化后仍然匹配。"
                     )
                 return True
 
@@ -316,8 +316,8 @@ def _validate_anchor_edits(
             if edit.end:
                 if edit.pos.line > edit.end.line:
                     raise ValueError(
-                        f"[E_BAD_OP] Range start line {edit.pos.line} must be "
-                        f"<= end line {edit.end.line}"
+                        f"[E_BAD_OP] 范围起始行 {edit.pos.line} 必须 "
+                        f"<= 结束行 {edit.end.line}"
                     )
                 start_ok = _validate(edit.pos)
                 end_ok = _validate(edit.end)
@@ -333,10 +333,10 @@ def _validate_anchor_edits(
             end_line = edit.end.line if edit.end else edit.pos.line
             if not edit.end and len(edit.lines) > 1:
                 warnings.append(
-                    f"Single-anchor replace at {_describe_edit(edit)} swapped only "
-                    f"line {edit.pos.line}, but you supplied {len(edit.lines)} replacement "
-                    f'lines. If you meant to replace a range, add "end". If you meant '
-                    f"to expand one line into many, ignore this."
+                    f"在 {_describe_edit(edit)} 处的单锚点替换只替换了 "
+                    f"第 {edit.pos.line} 行，但你提供了 {len(edit.lines)} 行替换 "
+                    f'内容。如果你想替换一个范围，请添加 "end"。如果你想 '
+                    f"把一行扩展为多行，请忽略此提示。"
                 )
 
             # Boundary duplication warnings
@@ -349,9 +349,9 @@ def _validate_anchor_edits(
                 and edit.lines[-1].strip() == next_line.strip()
             ):
                 warnings.append(
-                    f"Potential boundary duplication after {_describe_edit(edit)}: "
-                    f"the replacement ends with a line that matches the next surviving "
-                    f"line after trim."
+                    f"{_describe_edit(edit)} 之后可能存在边界重复："
+                    f"替换内容的最后一行在去除空白后与后面保留下来的 "
+                    f"行相同。"
                 )
 
             prev_line = line_index.file_lines[edit.pos.line - 2] if edit.pos.line > 1 else None
@@ -363,9 +363,9 @@ def _validate_anchor_edits(
                 and edit.lines[0].strip() == prev_line.strip()
             ):
                 warnings.append(
-                    f"Potential boundary duplication before {_describe_edit(edit)}: "
-                    f"the replacement starts with a line that matches the preceding "
-                    f"surviving line after trim."
+                    f"{_describe_edit(edit)} 之前可能存在边界重复："
+                    f"替换内容的第一行在去除空白后与前面保留下来的 "
+                    f"行相同。"
                 )
 
         elif isinstance(edit, AppendEdit):
@@ -373,8 +373,8 @@ def _validate_anchor_edits(
                 continue
             if len(edit.lines) == 0:
                 raise ValueError(
-                    "[E_BAD_OP] Append with empty lines payload. "
-                    "Provide content to insert or remove the edit."
+                    "[E_BAD_OP] append 操作的 lines 为空。"
+                    "请提供要插入的内容，或移除该编辑。"
                 )
             _warn_duplicate_insert("append", edit, line_index, warnings)
 
@@ -383,8 +383,8 @@ def _validate_anchor_edits(
                 continue
             if len(edit.lines) == 0:
                 raise ValueError(
-                    "[E_BAD_OP] Prepend with empty lines payload. "
-                    "Provide content to insert or remove the edit."
+                    "[E_BAD_OP] prepend 操作的 lines 为空。"
+                    "请提供要插入的内容，或移除该编辑。"
                 )
             _warn_duplicate_insert("prepend", edit, line_index, warnings)
 
@@ -439,10 +439,10 @@ def _warn_duplicate_insert(
         return
 
     warnings.append(
-        f"Potential duplicate insert at {_describe_edit(edit)}: "
-        f"the inserted lines are identical to the lines already adjacent "
-        f"to the insertion point. If a previous edit call already applied "
-        f"this insert, do not resend it."
+        f"{_describe_edit(edit)} 处可能存在重复插入："
+        f"插入的行与插入点旁边已有的行完全 "
+        f"相同。如果之前的编辑调用已经应用了 "
+        f"这次插入，请不要重复发送。"
     )
 
 
@@ -474,15 +474,15 @@ def _warn_bare_hash_prefix_lines(
 
     if match_count > 0 or len(suspects) >= 2:
         match_hint = (
-            f" {match_count} prefix(es) match existing line hashes in this file."
+            f" 有 {match_count} 个前缀与本文件中已有的行哈希匹配。"
             if match_count > 0
             else ""
         )
         warnings.append(
-            f"{len(suspects)} edit line(s) start with a hash and ':' "
-            f'(e.g. {suspects[0][0]!r}).{match_hint} If you copied these from '
-            f'"read" output, they are hash prefixes, not file content — resend '
-            f'"lines" as literal content.'
+            f"{len(suspects)} 个编辑行以哈希和 ':' "
+            f'开头（例如 {suspects[0][0]!r}）。{match_hint} 如果你是从 '
+            f'"read" 输出中复制的，它们是哈希前缀而非文件内容 — 请将 '
+            f'"lines" 作为字面内容重新发送。'
         )
 
 
@@ -501,8 +501,8 @@ def _maybe_warn_suspicious_unicode(edits: list[HashlineEdit], warnings: list[str
             continue
         if any(_suspicious_re.search(line) for line in edit.lines):
             warnings.append(
-                "Detected literal \\uDDDD in edit content; no autocorrection applied. "
-                "Verify whether this should be a real Unicode escape or plain text."
+                "在编辑内容中检测到字面量 \\uDDDD；未进行自动修正。 "
+                "请确认这应该是一个真正的 Unicode 转义还是纯文本。"
             )
 
 
@@ -683,7 +683,7 @@ def _find_exact_unique_text_match(
     old_text: str,
 ) -> dict:
     if not old_text:
-        raise ValueError("[E_BAD_OP] replace_text requires non-empty oldText.")
+        raise ValueError("[E_BAD_OP] replace_text 需要非空的 oldText。")
 
     matches: list[int] = []
     from_idx = 0
@@ -697,19 +697,19 @@ def _find_exact_unique_text_match(
     for j in range(1, len(matches)):
         if matches[j] - matches[j - 1] < len(old_text):
             raise ValueError(
-                "[E_MULTI_MATCH] replace_text found overlapping exact matches; "
-                "re-read and use hashline edits."
+                "[E_MULTI_MATCH] replace_text 找到重叠的精确匹配；"
+                "请重新读取并使用 hashline 编辑。"
             )
 
     if not matches:
         raise ValueError(
-            "[E_NO_MATCH] replace_text found no exact unique match in the current file."
+            "[E_NO_MATCH] replace_text 在当前文件中找不到精确且唯一的匹配。"
         )
 
     if len(matches) > 1:
         raise ValueError(
-            "[E_MULTI_MATCH] replace_text found multiple exact matches in the "
-            "current file. Re-read and use hashline edits."
+            "[E_MULTI_MATCH] replace_text 在当前文件中找到多个精确匹配。"
+            "请重新读取并使用 hashline 编辑。"
         )
 
     return {"start": matches[0], "end": matches[0] + len(old_text)}
@@ -724,20 +724,20 @@ def _assert_no_conflicting_spans(spans: list[ResolvedEditSpan]) -> None:
             if isinstance(left, InsertSpan) and isinstance(right, InsertSpan):
                 if left.boundary == right.boundary:
                     raise ValueError(
-                        f"[E_EDIT_CONFLICT] Conflicting edits in a single request: "
-                        f"edit {left.index} ({left.label}) and edit {right.index} "
-                        f"({right.label}) target the same insertion boundary. "
-                        f"Merge them into one non-overlapping change or split the request."
+                        f"[E_EDIT_CONFLICT] 单个请求中存在冲突的编辑："
+                        f"编辑 {left.index}（{left.label}）与编辑 {right.index} "
+                        f"（{right.label}）指向同一插入边界。"
+                        f"请将它们合并为一个不重叠的修改，或拆分请求。"
                     )
                 continue
 
             if left.kind == "replace" and right.kind == "replace":
                 if left.start < right.end and right.start < left.end:
                     raise ValueError(
-                        f"[E_EDIT_CONFLICT] Conflicting edits in a single request: "
-                        f"edit {left.index} ({left.label}) and edit {right.index} "
-                        f"({right.label}) overlap on the same original line range. "
-                        f"Merge them into one non-overlapping change or split the request."
+                        f"[E_EDIT_CONFLICT] 单个请求中存在冲突的编辑："
+                        f"编辑 {left.index}（{left.label}）与编辑 {right.index} "
+                        f"（{right.label}）在同一原始行范围上重叠。"
+                        f"请将它们合并为一个不重叠的修改，或拆分请求。"
                     )
                 continue
 
@@ -746,10 +746,10 @@ def _assert_no_conflicting_spans(spans: list[ResolvedEditSpan]) -> None:
             ins = left if left.kind == "insert" else right
             if ins.start >= rep.start and ins.start < rep.end:
                 raise ValueError(
-                    f"[E_EDIT_CONFLICT] Conflicting edits in a single request: "
-                    f"edit {left.index} ({left.label}) and edit {right.index} "
-                    f"({right.label}) cannot be applied together because one inserts "
-                    f"inside a replaced original range. Merge them or split the request."
+                    f"[E_EDIT_CONFLICT] 单个请求中存在冲突的编辑："
+                    f"编辑 {left.index}（{left.label}）与编辑 {right.index} "
+                    f"（{right.label}）无法一起应用，因为其中一个插入到了 "
+                    f"被替换的原始范围内。请合并它们或拆分请求。"
                 )
 
 
@@ -813,8 +813,8 @@ def _assemble_edit_result(
 def _assert_does_not_empty_file(original: str, result: str) -> None:
     if len(original) > 0 and len(result) == 0:
         raise ValueError(
-            "[E_WOULD_EMPTY] Refusing to empty a non-empty file through edit. "
-            "If intentional, use the write tool or bash."
+            "[E_WOULD_EMPTY] 拒绝通过编辑清空一个非空文件。"
+            "如果是有意为之，请使用 write 工具或 bash。"
         )
 
 
@@ -915,9 +915,9 @@ def execute_edit_pipeline(
                 first_changed_line=changed_range[0] if changed_range else None,
                 last_changed_line=changed_range[1] if changed_range else None,
                 warnings=[
-                    "Recovered stale anchors by replaying this edit against a recent "
-                    "read of this file and merging onto the current content (exact merge, "
-                    "no relocation). Review the diff to confirm the result.",
+                    "已通过将本次编辑在最近一次读取的文件版本上重放，并合并到当前内容"
+                    "（精确合并，不进行位置迁移），从而恢复了过期锚点。"
+                    "请检查差异以确认结果。",
                     *(snapshot_result.warnings or []),
                 ],
                 noop_edits=snapshot_result.noop_edits,
@@ -926,14 +926,14 @@ def execute_edit_pipeline(
 
         if any_anchor_valid:
             suffix = (
-                "\n(Recovery attempted: your anchors match an older read of this file, "
-                "but replaying that edit conflicts with changes made since. "
-                "Re-read to get current anchors.)"
+                "\n（已尝试恢复：你的锚点匹配该文件较早的一次读取，"
+                "但重放该编辑与之后的改动发生冲突。"
+                "请重新读取以获取当前锚点。）"
             )
         else:
             suffix = (
-                "\n(Your anchors do not match any recent read of this file — "
-                "they may be from a stale context or copied incorrectly. "
-                "Re-read before editing.)"
+                "\n（你的锚点不匹配该文件任何一次最近的读取 — "
+                "它们可能来自过期的上下文或复制有误。"
+                "编辑前请重新读取。）"
             )
         raise ValueError(msg + suffix)

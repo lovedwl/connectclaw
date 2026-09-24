@@ -130,7 +130,7 @@ class HashEditTool(AgentTool):
             normalized = normalize_edit_request({"path": raw_path, "edits": raw_edits})
         except ValueError as e:
             return AgentToolResult(
-                content=[{"type": "text", "text": f"Error: {e}"}],
+                content=[{"type": "text", "text": f"错误：{e}"}],
                 details={"error": str(e)},
             )
 
@@ -147,17 +147,17 @@ class HashEditTool(AgentTool):
 
         if not os.path.isfile(absolute_path):
             return AgentToolResult(
-                content=[{"type": "text", "text": f"Error: File not found: {path}. Use the write tool to create new files."}],
+                content=[{"type": "text", "text": f"错误：文件不存在：{path}。请使用 write 工具创建新文件。"}],
             )
 
         if os.path.isdir(absolute_path):
             return AgentToolResult(
-                content=[{"type": "text", "text": f"Error: Path is a directory: {path}"}],
+                content=[{"type": "text", "text": f"错误：路径是目录：{path}"}],
             )
 
         if not isinstance(edits_raw, list) or len(edits_raw) == 0:
             return AgentToolResult(
-                content=[{"type": "text", "text": "Error: No edits provided."}],
+                content=[{"type": "text", "text": "错误：未提供任何编辑。"}],
             )
 
         # ── Read file ─────────────────────────────────────
@@ -168,12 +168,12 @@ class HashEditTool(AgentTool):
             return AgentToolResult(
                 content=[{
                     "type": "text",
-                    "text": f"Error: File is binary or not UTF-8: {path}. Hashline edit only supports text files.",
+                    "text": f"错误：文件为二进制或非 UTF-8：{path}。Hashline 编辑仅支持文本文件。",
                 }],
             )
         except Exception as e:
             return AgentToolResult(
-                content=[{"type": "text", "text": f"Error reading file: {e}"}],
+                content=[{"type": "text", "text": f"读取文件错误：{e}"}],
             )
 
         bom, raw_text = strip_bom(content)
@@ -182,8 +182,8 @@ class HashEditTool(AgentTool):
         if has_mixed_line_endings(raw_text):
             ending_label = "CRLF" if original_ending == "\r\n" else "LF"
             mixed_ending_warning = (
-                f"File had mixed line endings (CRLF and LF); "
-                f"this edit rewrote it uniformly as {ending_label}."
+                f"文件的换行符混合（CRLF 和 LF）；"
+                f"本次编辑已将其统一重写为 {ending_label}。"
             )
 
         original_normalized = normalize_to_lf(raw_text)
@@ -193,7 +193,7 @@ class HashEditTool(AgentTool):
             parsed_edits = resolve_edit_anchors(edits_raw)
         except ValueError as e:
             return AgentToolResult(
-                content=[{"type": "text", "text": f"Error: {e}"}],
+                content=[{"type": "text", "text": f"错误：{e}"}],
             )
 
         # ── Duplicate-edit guard ──────────────────────────
@@ -205,11 +205,11 @@ class HashEditTool(AgentTool):
                     content=[{
                         "type": "text",
                         "text": (
-                            f"[E_DUPLICATE_EDIT] This exact edit was already applied "
-                            f"to {path} by your previous edit call — the file already "
-                            f"contains this change. Do NOT resend the same payload: "
-                            f"that would duplicate the inserted lines. Re-read the "
-                            f"file to see the current state before editing again."
+                            f"[E_DUPLICATE_EDIT] 你上一次编辑调用已"
+                            f"将完全相同的编辑应用到 {path} —— "
+                            f"文件中已包含此更改。不要重复发送"
+                            f"相同的载荷：那会重复插入这些行。"
+                            f"再次编辑前请重新读取文件以查看当前状态。"
                         ),
                     }],
                 )
@@ -221,7 +221,7 @@ class HashEditTool(AgentTool):
             )
         except ValueError as e:
             return AgentToolResult(
-                content=[{"type": "text", "text": f"Error: {e}"}],
+                content=[{"type": "text", "text": f"错误：{e}"}],
                 details={"error": str(e)},
             )
 
@@ -233,29 +233,29 @@ class HashEditTool(AgentTool):
                     content=[{
                         "type": "text",
                         "text": (
-                            f"[E_NOOP_LOOP] Edit to {path} was a byte-identical "
-                            f"no-op {noop_count} times in a row. STOP re-sending "
-                            f"this payload. Re-read the file — the content you are "
-                            f"trying to write already exists, or your anchors point "
-                            f"at the wrong lines."
+                            f"[E_NOOP_LOOP] 对 {path} 的编辑已"
+                            f"连续 {noop_count} 次为字节完全相同的"
+                            f"空操作。停止重复发送此载荷。"
+                            f"重新读取文件 —— 你要写入的内容已存在，"
+                            f"或你的锚点指向了错误的行。"
                         ),
                     }],
                 )
             # Build noop response
             noop_detail = (
                 "\n".join(
-                    f"Edit {n.edit_index}: replacement for {n.loc} is identical "
-                    f"to current content:\n  {n.loc}: {n.current_content}"
+                    f"编辑 {n.edit_index}：{n.loc} 的替换内容与当前内容完全相同："
+                    f"\n  {n.loc}: {n.current_content}"
                     for n in result.noop_edits
                 )
                 if result.noop_edits
-                else "The edits produced identical content."
+                else "这些编辑产生了完全相同的内容。"
             )
-            warning_text = "\n\nWarnings:\n" + "\n".join(result.warnings) if result.warnings else ""
+            warning_text = "\n\n警告：\n" + "\n".join(result.warnings) if result.warnings else ""
             return AgentToolResult(
                 content=[{
                     "type": "text",
-                    "text": f"No changes made to {path}\nClassification: noop\n{noop_detail}{warning_text}",
+                    "text": f"未对 {path} 做任何更改\n分类：noop\n{noop_detail}{warning_text}",
                 }],
                 details={
                     "diff": "",
@@ -275,7 +275,7 @@ class HashEditTool(AgentTool):
             await _write_file_atomically(absolute_path, output_text)
         except Exception as e:
             return AgentToolResult(
-                content=[{"type": "text", "text": f"Error writing file: {e}"}],
+                content=[{"type": "text", "text": f"写入文件错误：{e}"}],
             )
 
         record_applied_edit(absolute_path, payload_key)
@@ -301,16 +301,16 @@ class HashEditTool(AgentTool):
             formatted = format_hashline_region(
                 result_lines, anchor_range[0], anchor_range[1]
             )
-            block = f"--- Anchors {anchor_range[0]}-{anchor_range[1]} ---\n{formatted}"
+            block = f"--- 锚点 {anchor_range[0]}-{anchor_range[1]} ---\n{formatted}"
             if len(block.encode("utf-8")) > CHANGED_ANCHOR_TEXT_BUDGET_BYTES:
-                anchors_text = "Anchors omitted; use hash_read for subsequent edits."
+                anchors_text = "已省略锚点；后续编辑请使用 hash_read。"
             else:
                 anchors_text = block
         else:
             anchors_text = "Anchors omitted; use hash_read for subsequent edits."
 
-        warning_block = "\n\nWarnings:\n" + "\n".join(warnings) if warnings else ""
-        response_text = f"Edit applied successfully to {path}.\n\n{anchors_text}{warning_block}"
+        warning_block = "\n\n警告：\n" + "\n".join(warnings) if warnings else ""
+        response_text = f"编辑已成功应用到 {path}。\n\n{anchors_text}{warning_block}"
 
         return AgentToolResult(
             content=[{"type": "text", "text": response_text}],

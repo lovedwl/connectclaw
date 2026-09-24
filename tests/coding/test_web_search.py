@@ -184,7 +184,7 @@ async def test_web_fetch_prompt_degrades_without_model(fetch_page):
     result = await tool.execute("tc", {"url": "https://a.com", "prompt": "life?"})
     text = result.content[0]["text"]
     assert "PAGE CONTENT" in text
-    assert "prompt extraction unavailable" in text
+    assert "prompt 提取不可用" in text
     assert result.details["extracted"] is False
 
 

@@ -144,8 +144,8 @@ class BashTool(AgentTool):
                 content=[{
                     "type": "text",
                     "text": (
-                        f"Command blocked for safety: `{command}`\n"
-                        f"This command matches dangerous patterns and cannot be executed."
+                        f"命令因安全原因被阻止：`{command}`\n"
+                        f"该命令匹配危险模式，无法执行。"
                     ),
                 }],
             )
@@ -171,7 +171,7 @@ class BashTool(AgentTool):
 
         # Timeout header
         if result.timed_out:
-            parts.append(f"Command timed out after {timeout}s: `{command}`")
+            parts.append(f"命令在 {timeout}s 后超时：`{command}`")
 
         # stdout (always include, even if empty — avoids confusion)
         if result.stdout:
@@ -182,7 +182,7 @@ class BashTool(AgentTool):
             parts.append("[stderr]\n" + result.stderr.rstrip())
 
         # Exit code summary
-        parts.append(f"[exit code: {result.exit_code}]")
+        parts.append(f"[退出码：{result.exit_code}]")
 
         output = "\n\n".join(parts)
 

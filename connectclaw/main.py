@@ -343,7 +343,7 @@ async def main(argv: list[str] | None = None) -> None:
             return response
         except Exception as e:
             logger.error("[%s] Error: %s", conversation_key[:8], e)
-            return f"Error: {e}"
+            return f"错误：{e}"
 
     # Handle graceful shutdown on SIGINT / Ctrl+C
     loop = asyncio.get_running_loop()

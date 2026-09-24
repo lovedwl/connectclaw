@@ -244,7 +244,7 @@ class AttachImageTool(AgentTool):
         image_id = (params.get("image_id") or "").strip()
         if not image_id:
             return AgentToolResult(
-                content=[{"type": "text", "text": "Error: 需要 image_id 参数（或 list_images=true）。"}],
+                content=[{"type": "text", "text": "错误：需要 image_id 参数（或 list_images=true）。"}],
                 details={"is_error": True},
             )
 
@@ -252,7 +252,7 @@ class AttachImageTool(AgentTool):
         if item is None:
             return AgentToolResult(
                 content=[{"type": "text",
-                          "text": f"Error: 找不到图片 id={image_id}。可用 list_images=true 查看全部。"}],
+                          "text": f"错误：找不到图片 id={image_id}。可用 list_images=true 查看全部。"}],
                 details={"is_error": True},
             )
 

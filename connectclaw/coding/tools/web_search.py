@@ -121,7 +121,7 @@ class WebSearchTool(AgentTool):
         except Exception as e:  # noqa: BLE001
             logger.warning("web_search failed: %s", e)
             return AgentToolResult(
-                content=[{"type": "text", "text": f"Web search failed: {e}"}],
+                content=[{"type": "text", "text": f"搜索失败：{e}"}],
             )
 
 
@@ -198,7 +198,7 @@ class WebFetchTool(AgentTool):
         except Exception as e:  # noqa: BLE001
             logger.warning("web_fetch failed: %s", e)
             return AgentToolResult(
-                content=[{"type": "text", "text": f"Web fetch failed: {e}"}],
+                content=[{"type": "text", "text": f"抓取失败：{e}"}],
             )
 
         if not prompt:
@@ -214,7 +214,7 @@ class WebFetchTool(AgentTool):
                 details={"url": url, "prompt": prompt, "extracted": True},
             )
         # Extraction unavailable or failed — degrade to the raw page, marked.
-        note = "(prompt extraction unavailable — raw page content returned)"
+        note = "（prompt 提取不可用 — 返回原始页面内容）"
         return AgentToolResult(
             content=[{"type": "text", "text": f"{note}\n\n{text}"}],
             details={"url": url, "chars": len(text), "extracted": False},

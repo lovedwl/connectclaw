@@ -68,7 +68,7 @@ def final_response_text(result: Any) -> str:
         return thinking_blocks[-1][:2000]
     if result.error_message:
         return f"⚠️ 模型调用失败：{result.error_message}"
-    return "(empty response)"
+    return "（空响应）"
 
 
 def _url_host(url: str) -> str:
@@ -345,7 +345,7 @@ class CodingAgent:
             )
         except asyncio.CancelledError:
             logger.info("[%s] Task cancelled by /stop", conversation_key[:8])
-            return "⏹ Interrupted."
+            return "⏹ 已中断。"
         finally:
             if task is not None and self._running_tasks.get(conversation_key) is task:
                 del self._running_tasks[conversation_key]
@@ -404,7 +404,7 @@ class CodingAgent:
 
             result = await harness.prompt(prompt_text, images=images)
             if result is None:
-                return "No response generated."
+                return "未生成任何回复。"
 
             # Debug: log the full result
             logger.debug("[CODING] stop_reason=%s content_blocks=%d",
@@ -458,7 +458,7 @@ class CodingAgent:
 
         except RuntimeError as e:
             if "busy" in str(e).lower():
-                return "I'm still processing your previous request. Please wait."
+                return "我正在处理你上一条请求，请稍候。"
             raise
 
     async def new_session(self, conversation_key: str) -> None:
@@ -782,14 +782,14 @@ class CodingAgent:
                         abs_path = os.path.abspath(file_path)
                         cwd_abs = os.path.abspath(self._config.agent.cwd)
                         if not abs_path.startswith(cwd_abs + os.sep) and abs_path != cwd_abs:
-                            notes.append("🚀 Write sandbox escape authorization")
+                            notes.append("🚀 写操作沙箱逃逸授权")
                             approved = await self.request_unsandboxed_auth(
-                                key, f"Write to {file_path}"
+                                key, f"写入 {file_path}"
                             )
                             if not approved:
-                                notes.append("  → ❌ Denied by user")
-                                return {"block": True, "reason": "User denied sandbox escape"}
-                            notes.append("  → ✅ Approved by user")
+                                notes.append("  → ❌ 用户已拒绝")
+                                return {"block": True, "reason": "用户拒绝了沙箱逃逸"}
+                            notes.append("  → ✅ 用户已批准")
                             # Mark args so write tool knows it's approved
                             args["_unsandboxed_retry"] = True
                             tool_call["arguments"] = args
@@ -801,12 +801,12 @@ class CodingAgent:
                     # with open network by default (see sandbox redesign).
                     check = self._bash_guard.check(command)
                     if check == "SUSPICIOUS":
-                        notes.append("🔐 Bash authorization")
+                        notes.append("🔐 Bash 命令授权")
                         approved = await self._request_bash_auth(key, command)
                         if not approved:
-                            notes.append("  → ❌ Denied by user")
-                            return {"block": True, "reason": "User denied command execution"}
-                        notes.append("  → ✅ Approved by user")
+                            notes.append("  → ❌ 用户已拒绝")
+                            return {"block": True, "reason": "用户拒绝执行命令"}
+                        notes.append("  → ✅ 用户已批准")
 
                 return None
 

@@ -153,7 +153,7 @@ class LightpandaEngine:
                     return r.json()["webSocketDebuggerUrl"]
                 except Exception:
                     await asyncio.sleep(0.15)
-        raise LightpandaError("Lightpanda CDP server did not become ready in time")
+        raise LightpandaError("Lightpanda CDP 服务未能及时就绪")
 
     async def close(self) -> None:
         if self._ws is not None:
@@ -177,7 +177,7 @@ class LightpandaEngine:
 
     async def _rpc(self, method: str, params: dict | None = None, sid: str | None = None) -> dict:
         if self._ws is None:
-            raise LightpandaError("engine not started")
+            raise LightpandaError("引擎未启动")
         async with self._lock:
             self._mid += 1
             mid = self._mid
@@ -358,7 +358,7 @@ def _squeeze_blanklines(text: str) -> str:
 def _cap(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
-    note = f"\n…[truncated to {max_chars} chars]"
+    note = f"\n…[已截断至 {max_chars} 字符]"
     return text[: max_chars - len(note)] + note
 
 
@@ -431,7 +431,7 @@ async def _ensure_server() -> str:
                     except Exception:
                         await asyncio.sleep(0.15)
             if ws_url is None:
-                raise LightpandaError("Lightpanda CDP server did not become ready in time")
+                raise LightpandaError("Lightpanda CDP 服务未能及时就绪")
         except BaseException:
             _kill_shared_proc()
             raise
@@ -477,8 +477,8 @@ async def _run_stateless(action, nav_timeout: int = DEFAULT_NAV_TIMEOUT) -> str:
                 except Exception:
                     pass
     raise LightpandaError(
-        "browser engine failed on this page (Lightpanda is Beta; heavy or "
-        f"JS-framework pages can crash it): {last}"
+        "浏览器引擎在此页面失败（Lightpanda 仍为 Beta；繁重或 "
+        f"JS 框架页面可能使其崩溃）：{last}"
     )
 
 
@@ -840,7 +840,7 @@ async def search_once(
             return _cap(_render_results(hits[:max_results]), max_chars)
         # RSS worked but the filters eliminated everything — a browser session
         # would return the same unfiltered list, so don't pay for one.
-        return "No search results matched the domain filters."
+        return "没有符合域名过滤条件的搜索结果。"
 
     url = _SEARCH_URL.format(q=urllib.parse.quote(query))
 

@@ -162,7 +162,7 @@ def test_tool_search_returns_matches(mem):
 def test_tool_search_no_match(mem):
     tool = MemoryTool(mem)
     res = asyncio.run(tool.execute("t1", {"action": "search", "keyword": "不存在"}))
-    assert "No memories" in res.content[0]["text"]
+    assert "没有匹配" in res.content[0]["text"]
 
 
 def test_tool_forget_soft_retires(mem):
@@ -170,7 +170,7 @@ def test_tool_forget_soft_retires(mem):
     tool = MemoryTool(mem)
     res = asyncio.run(tool.execute("t1", {"action": "forget", "keyword": "项目名"}))
     text = res.content[0]["text"]
-    assert "Soft-retired 1" in text
+    assert "已软退役 1" in text
     assert mem._store.get(e.id).strength == 0.0
 
 
@@ -179,20 +179,20 @@ def test_tool_forget_reports_persona_protection(mem):
     tool = MemoryTool(mem)
     res = asyncio.run(tool.execute("t1", {"action": "forget", "keyword": "老板"}))
     text = res.content[0]["text"]
-    assert "protected" in text
+    assert "受到保护" in text
     assert "/forget id" in text
 
 
 def test_tool_unknown_action(mem):
     tool = MemoryTool(mem)
     res = asyncio.run(tool.execute("t1", {"action": "nuke", "keyword": "x"}))
-    assert "Unknown action" in res.content[0]["text"]
+    assert "未知操作" in res.content[0]["text"]
 
 
 def test_tool_missing_keyword(mem):
     tool = MemoryTool(mem)
     res = asyncio.run(tool.execute("t1", {"action": "search", "keyword": ""}))
-    assert "keyword is required" in res.content[0]["text"]
+    assert "keyword 为必填项" in res.content[0]["text"]
 
 
 def test_tool_disabled_subsystem():
@@ -200,4 +200,4 @@ def test_tool_disabled_subsystem():
     m = MemorySubsystem(cfg)
     tool = MemoryTool(m)
     res = asyncio.run(tool.execute("t1", {"action": "search", "keyword": "x"}))
-    assert "disabled" in res.content[0]["text"]
+    assert "已禁用" in res.content[0]["text"]

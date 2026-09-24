@@ -72,9 +72,9 @@ class WriteTool(AgentTool):
                 content=[{
                     "type": "text",
                     "text": (
-                        f"Error: Can only write files within the working directory "
-                        f"({self._cwd}). '{file_path}' is outside. "
-                        f"Use /tmp paths inside cwd or write to the project directory."
+                        f"错误：只能写入工作目录（"
+                        f"{self._cwd}）内的文件。'{file_path}' 在目录之外。"
+                        f"请使用 cwd 内的 /tmp 路径，或写入项目目录。"
                     ),
                 }],
             )
@@ -87,8 +87,8 @@ class WriteTool(AgentTool):
                     content=[{
                         "type": "text",
                         "text": (
-                            f"Error: File '{file_path}' already exists but has not been read. "
-                            f"You must use the read tool to read the file first before writing to it."
+                            f"错误：文件 '{file_path}' 已存在但尚未读取。"
+                            f"写入前必须先用 read 工具读取该文件。"
                         ),
                     }],
                 )
@@ -114,7 +114,7 @@ class WriteTool(AgentTool):
             return AgentToolResult(
                 content=[{
                     "type": "text",
-                    "text": f"Successfully wrote {size} bytes ({lines} lines) to {file_path}",
+                    "text": f"成功写入 {size} 字节（{lines} 行）到 {file_path}",
                 }],
             )
         except Exception as e:
@@ -125,7 +125,7 @@ class WriteTool(AgentTool):
                 except Exception:
                     pass
             return AgentToolResult(
-                content=[{"type": "text", "text": f"Error writing file: {e}"}],
+                content=[{"type": "text", "text": f"写入文件错误：{e}"}],
             )
 
     def _resolve_path(self, path: str) -> str:

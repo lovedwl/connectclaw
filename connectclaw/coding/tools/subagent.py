@@ -153,7 +153,7 @@ def extract_assistant_text(messages: list[Any]) -> str:
         ]
         if texts:
             return "\n".join(texts)
-    return "(no assistant response)"
+    return "（无助手响应）"
 
 
 async def run_subagent(
