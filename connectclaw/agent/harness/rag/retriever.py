@@ -60,8 +60,13 @@ class Retriever:
         return results if results else passages[: self._top_n]
 
     async def retrieve_formatted(self, query: str) -> str:
-        """Retrieve chunks formatted as a context block. Returns '' if empty."""
+        """Retrieve chunks formatted as a context block. Returns '' if empty.
+
+        Wrapped in a tag so the block is identifiable: history copies get
+        downgraded to a placeholder (see connectclaw/injection.py).
+        """
         chunks = await self.retrieve(query)
         if not chunks:
             return ""
-        return "## Relevant Documentation\n\n" + "\n---\n".join(chunks)
+        body = "\n---\n".join(chunks)
+        return f"<retrieved-documents>\n## Relevant Documentation\n\n{body}\n</retrieved-documents>"

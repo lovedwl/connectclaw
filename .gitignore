@@ -19,6 +19,7 @@ sessions/
 .private/
 .claude/
 .pi-subagents/
+.zcode/
 
 # 本地依赖源码副本与二进制
 lightpanda

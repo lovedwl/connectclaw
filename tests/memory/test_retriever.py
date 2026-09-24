@@ -135,3 +135,40 @@ def test_content_referenced_short_content_whole_string():
 
 def test_content_referenced_single_common_word_not_enough():
     assert _content_referenced("用户的名字是张三", "我的天") is False
+
+
+# ── 注入格式：新鲜度前缀 ─────────────────────────────────────
+
+def test_format_for_prompt_includes_freshness_stamp(store, retriever):
+    """每条记忆要带 [日期 · 强度]。
+
+    库里本来就有 created_at / strength，但过去一个字都不输出——同主题的旧说法
+    与新说法于是以同等权威并列（实测「RAG 已启用」被注入 84 次、当天写的更正
+    只 1 次），模型没有任何依据判新旧，只能凭语序猜。
+    """
+    import asyncio
+    import time as _time
+
+    created = _time.mktime(_time.strptime("2026-07-27", "%Y-%m-%d"))
+    store.add(MemoryEntry(
+        type=MemoryType.SEMANTIC, content="当前激活LLM配置：dots3-note-prev",
+        importance=0.9, embedding=[1.0, 0.0, 0.0], created_at=created, strength=0.31,
+    ))
+
+    results = asyncio.run(retriever.retrieve("激活", query_embedding=[1.0, 0.0, 0.0]))
+    text = retriever._format_for_prompt(results)
+
+    expected_day = _time.strftime("%Y-%m-%d", _time.localtime(created))
+    assert f"[{expected_day} · 0.31]" in text
+    assert "强度" in text  # 表头解释了这两个数字的含义
+    assert text.startswith("<remembered-context>")
+    assert text.rstrip().endswith("</remembered-context>")
+
+
+def test_freshness_stamp_needs_created_at():
+    from connectclaw.memory.retriever import _freshness_stamp
+
+    assert _freshness_stamp(MemoryEntry(content="x", created_at=0.0)) == ""
+    stamp = _freshness_stamp(MemoryEntry(content="x", created_at=1_700_000_000, strength=None))
+    assert stamp.startswith("[") and stamp.endswith("] ")
+    assert "1.00" in stamp  # strength 缺失时按 1.0，不编造别的数

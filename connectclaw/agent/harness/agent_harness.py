@@ -248,7 +248,8 @@ class AgentHarness:
 
         if result:
             await self._session.append_compaction(
-                result.summary, result.first_kept_entry_id, result.tokens_before
+                result.summary, result.first_kept_entry_id, result.tokens_before,
+                merged_context=result.merged_context,
             )
 
         return {
@@ -316,7 +317,8 @@ class AgentHarness:
                 )
                 if result:
                     await self._session.append_compaction(
-                        result.summary, result.first_kept_entry_id, result.tokens_before
+                        result.summary, result.first_kept_entry_id, result.tokens_before,
+                        merged_context=result.merged_context,
                     )
                     if not prep.fits_budget:
                         logger.warning(

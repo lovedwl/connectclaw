@@ -22,6 +22,8 @@ from connectclaw.provider.types import Context, Model, UserMessage
 from .prompts import (
     CONSOLIDATION_PROMPT,
     CONSOLIDATION_SYSTEM_PROMPT,
+    CURATION_PROMPT,
+    CURATION_SYSTEM_PROMPT,
 )
 from .store import MemoryStore
 from .types import MemoryEntry, MemoryType
@@ -37,6 +39,9 @@ class ConsolidationConfig:
     max_episodic_age_days: float = 90.0
     min_episodes_for_dream: int = 5
     dream_batch_size: int = 30
+    # 整理（curation）：同主题冲突/过时/环境可读的事实，都在这一相处理
+    curation_enabled: bool = True
+    curation_batch_size: int = 80
 
 
 @dataclass
@@ -47,6 +52,8 @@ class ConsolidationReport:
     merged: int = 0
     deleted: int = 0
     cleaned: int = 0
+    curated: int = 0   # 被更正/合并的条目数
+    purged: int = 0     # 被清掉的过时条目数
 
 
 class MemoryConsolidator:
@@ -61,6 +68,7 @@ class MemoryConsolidator:
         model: Model,
         *,
         api_key: str | None = None,
+        env_facts: str = "",
     ) -> ConsolidationReport:
         """Run a full consolidation cycle — 'dreaming'.
 
@@ -68,7 +76,8 @@ class MemoryConsolidator:
         1. Apply time-based decay to all memories
         2. Boost frequently accessed memories
         3. Consolidate old episodic memories (LLM call)
-        4. Cleanup memories below strength threshold
+        4. Curate: resolve conflicts / drop stale / verify against env facts (LLM call)
+        5. Cleanup memories below strength threshold
         """
         report = ConsolidationReport()
 
@@ -106,6 +115,14 @@ class MemoryConsolidator:
                 report.merged,
                 report.deleted,
             )
+
+        # 整理相：解决同主题冲突、清理过时、按环境事实校验真伪、合并重复。
+        # 用户 2026-09-24 拍板：这些属于"后台思考"该做的事，而不是写记忆时猜。
+        if self._config.curation_enabled and model is not None:
+            curation = await self.curate(model, env_facts, api_key=api_key)
+            report.curated = curation.get("curated", 0)
+            report.purged = curation.get("purged", 0)
+            logger.info("Dream: curated %d, purged %d", report.curated, report.purged)
 
         report.cleaned = self._store.cleanup(self._config.decay_min_strength)
         logger.info("Dream: cleaned %d forgotten memories", report.cleaned)
@@ -280,6 +297,120 @@ class MemoryConsolidator:
         self._apply_consolidation(result, episodes)
         return result
 
+    async def curate(
+        self,
+        model: Model,
+        env_facts: str = "",
+        *,
+        api_key: str | None = None,
+    ) -> dict[str, int]:
+        """整理记忆：同主题冲突、过时条目、环境可读的事实、重复条目。
+
+        老账（2026-09-24 实测）：记忆库里「RAG已启用」被注入 84 次、而当天写的更正
+        只出现 1 次——同主题的旧说法与新说法以同等权威并存。这类治理放在**后台做梦**
+        里做：读全量记忆 + 环境事实快照，让模型给出 更正/遗忘/合并，再落库。
+
+        返回 ``{"curated": n, "purged": n}``。
+        """
+        if model is None:
+            # 没有可用模型时（例如"无 LLM 的做梦"）跳过整理相，不影响其它几相。
+            return {"curated": 0, "purged": 0}
+
+        memories = self._store.list_all(
+            min_strength=self._config.decay_min_strength,
+            limit=self._config.curation_batch_size,
+        )
+        if not memories:
+            return {"curated": 0, "purged": 0}
+
+        memories_text = "\n".join(
+            f"- [id={e.id}] {_stamp(e)} {e.content}"
+            + (f"\n  Detail: {e.detail}" if e.detail else "")
+            for e in memories
+        )
+        prompt_text = CURATION_PROMPT.format(
+            memories=memories_text,
+            env_facts=env_facts.strip() or "(未提供环境快照)",
+        )
+        context = Context(
+            system_prompt=CURATION_SYSTEM_PROMPT,
+            messages=[UserMessage(content=prompt_text, timestamp=time.time() * 1000)],
+        )
+
+        text = await _call_llm(context, model, api_key=api_key)
+        if not text:
+            logger.debug("Dream: curation 无输出（模型未返回内容）")
+            return {"curated": 0, "purged": 0}
+
+        result = _parse_json(text)
+        if not result:
+            logger.warning("Dream: curation 输出无法解析为 JSON，跳过")
+            return {"curated": 0, "purged": 0}
+        return self._apply_curation(result, memories)
+
+    def _apply_curation(
+        self, result: dict[str, Any], memories: list[MemoryEntry]
+    ) -> dict[str, int]:
+        """把整理决定落库。只认库里真实存在的 id，且绝不编造内容。"""
+        known = {e.id for e in memories}
+        now = time.time()
+        curated = purged = 0
+
+        for item in result.get("update", []) or []:
+            mid = str(item.get("id", ""))
+            content = str(item.get("content", "")).strip()
+            if mid not in known or not content:
+                continue
+            entry = self._store.get(mid)
+            if not entry or entry.content == content:
+                continue
+            entry.content = content
+            if "detail" in item and item.get("detail"):
+                entry.detail = str(item["detail"])
+            entry.last_accessed = now
+            self._store.update(entry)
+            curated += 1
+
+        for group in result.get("merge_groups", []) or []:
+            ids = [str(i) for i in (group.get("memory_ids") or []) if str(i) in known]
+            merged_content = str(group.get("merged_content", "")).strip()
+            if len(ids) < 2 or not merged_content:
+                continue
+            first = self._store.get(ids[0])
+            if not first:
+                continue
+            first.content = merged_content
+            first.last_accessed = now
+            self._store.update(first)
+            for mid in ids[1:]:
+                self._store.delete(mid)
+            curated += 1
+
+        for item in result.get("new_semantic", []) or []:
+            content = str(item.get("content", "")).strip()
+            if not content:
+                continue
+            self._store.add(MemoryEntry(
+                type=MemoryType.SEMANTIC,
+                content=content,
+                category=str(item.get("category", "") or ""),
+                importance=min(1.0, max(0.0, float(item.get("importance", 0.6) or 0.6))),
+                created_at=now,
+                last_accessed=now,
+                metadata={"curated": True, "reason": str(item.get("reason", ""))[:200]},
+            ))
+            curated += 1
+
+        for item in result.get("forget", []) or []:
+            # 兼容两种写法：字符串 id 或 {"id":..,"reason":..}
+            mid = str(item.get("id", "")) if isinstance(item, dict) else str(item)
+            if mid not in known:
+                continue
+            if self._store.delete(mid):
+                purged += 1
+
+        return {"curated": curated, "purged": purged}
+
     def _apply_consolidation(
         self, result: dict[str, Any], episodes: list[MemoryEntry]
     ) -> None:
@@ -366,6 +497,16 @@ async def _call_llm(
             break
     return final if final is not None else "".join(parts)
 
+
+
+def _stamp(entry: MemoryEntry) -> str:
+    """``[2026-07-27 · 0.31]`` —— 给 curation 的每条记忆带上时间与强度（判新旧用）。"""
+    try:
+        day = time.strftime("%Y-%m-%d", time.localtime(entry.created_at)) if entry.created_at else "?"
+    except (OverflowError, OSError, ValueError):
+        day = "?"
+    strength = entry.strength if entry.strength is not None else 1.0
+    return f"[{day} · {strength:.2f}]"
 
 def _parse_json(text: str) -> dict[str, Any]:
     """Parse JSON from LLM output, handling markdown blocks and extra text."""

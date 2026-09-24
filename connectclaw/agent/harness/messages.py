@@ -1,4 +1,14 @@
-"""Convert AgentMessage[] to LLM-compatible Message[]."""
+"""Convert AgentMessage[] to LLM-compatible Message[].
+
+**这里绝不能改写历史消息。** 注入上下文（记忆 / agents 清单）是随用户消息一起
+落盘、并作为下一轮的固定前缀存在的——上游按请求前缀缓存。一旦在这里把历史里的
+注入块降级或抹掉，前缀就正好在被改写的那一轮断开，之后每轮都要多付一整轮的
+未命中（2026-09-24 实测：平均命中率 77% → 61%，短会话 71% → 10%）。
+
+窗口要干净，靠的是**按需注入**：只在内容真的变化时才产生新的注入块，历史保持
+纯追加（见 connectclaw/injection.py 的 InjectionLedger）。不要走"事后改写历史"
+这条路。
+"""
 
 import time
 
@@ -14,7 +24,7 @@ def convert_to_llm(messages: list[AgentMessage]) -> list:
     - bashExecution → user message with formatted output
     - compactionSummary → user message in <summary> tags
     - branchSummary → user message in <summary> tags
-    - user/assistant/toolResult → pass through
+    - user/assistant/toolResult → pass through unchanged
     """
     results = []
     for m in messages:
