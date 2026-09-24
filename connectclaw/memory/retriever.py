@@ -364,13 +364,14 @@ class MemoryRetriever:
 
         return kept
 
-    def _format_for_prompt(self, results: list[SearchResult]) -> str:
-        """Format search results for context injection."""
-        if not results:
-            return ""
+    def render_item_lines(self, results: list[SearchResult]) -> list[tuple[str, str, str]]:
+        """``[(memory_id, 渲染后的条目文本, 原始内容)]``。
 
-        lines = ["<remembered-context>", "(Things you know from past interactions)"]
-
+        渲染文本是**增量比对**的单位：只要它没变，这一条就不必再注入一遍
+        （按需注入，见 connectclaw/injection.py）。Detail 跟在同一条里（带换行），
+        整条一起参与比对。
+        """
+        out: list[tuple[str, str, str]] = []
         for r in results:
             prefix = ""
             if r.entry.type == MemoryType.EPISODIC:
@@ -378,11 +379,50 @@ class MemoryRetriever:
             elif r.entry.type == MemoryType.PROCEDURAL:
                 prefix = "[pattern] "
 
+            line = f"- {_freshness_stamp(r.entry)}{prefix}{r.entry.content}"
             if r.detail_level == "full" and r.entry.detail:
-                lines.append(f"- {prefix}{r.entry.content}")
-                lines.append(f"  Detail: {r.entry.detail}")
-            else:
-                lines.append(f"- {prefix}{r.entry.content}")
+                line += f"\n  Detail: {r.entry.detail}"
+            out.append((r.entry.id, line, r.entry.content))
+        return out
 
-        lines.append("</remembered-context>")
-        return "\n".join(lines)
+    def format_block(self, lines: list[str], *, incremental: bool = False) -> str:
+        """把若干条目行包成一个可识别的注入块（``incremental`` 用增量表头）。"""
+        if not lines:
+            return ""
+        stamp_hint = (
+            "每条前缀 [日期 · 强度]：日期是记录时间，强度 0~1 是可信度——"
+            "同主题说法冲突时以日期较新者为准，强度低者存疑"
+        )
+        if incremental:
+            header = (
+                f"(记忆更新：以下只列出本次新增或发生变化的条目，未列出的按更早轮次里的"
+                f"说法沿用。{stamp_hint})"
+            )
+        else:
+            header = f"(Things you know from past interactions. {stamp_hint})"
+        return "\n".join(["<remembered-context>", header, *lines, "</remembered-context>"])
+
+    def _format_for_prompt(self, results: list[SearchResult]) -> str:
+        """完整块（首次注入 / 调试用）。
+
+        每条带上 ``[日期 · 强度]``。库里本来就存着 created_at / strength /
+        access_count，但过去一个字都不输出，于是同一主题的旧说法与新说法以
+        同等权威并列（实测「RAG 已启用」被注入 84 次，当天写的更正只 1 次），
+        模型没有任何依据判新旧，只能凭语序猜。日期给新旧，强度给可信度。
+        """
+        return self.format_block([line for _, line, _ in self.render_item_lines(results)])
+
+
+def _freshness_stamp(entry: MemoryEntry) -> str:
+    """``[2026-07-27 · 0.31] `` —— 记录日期与强度；拿不到时间就不显示（不编造）。"""
+    if not entry.created_at:
+        return ""
+    try:
+        day = time.strftime("%Y-%m-%d", time.localtime(entry.created_at))
+    except (OverflowError, OSError, ValueError):
+        return ""
+    try:
+        strength = 1.0 if entry.strength is None else float(entry.strength)
+    except (TypeError, ValueError):
+        strength = 1.0
+    return f"[{day} · {strength:.2f}] "

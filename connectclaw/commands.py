@@ -183,6 +183,7 @@ async def _dream(conversation_key: str, agent: Any, args: str = "") -> str:
                     "💤 **做梦完成**\n"
                     f"- 衰减 {result['decayed']} · 强化 {result['strengthened']} · "
                     f"新语义 {result['new_semantic']} · 合并 {result['merged']} · "
+                    f"整理 {result.get('curated', 0)} · 清过时 {result.get('purged', 0)} · "
                     f"清理 {result['cleaned']}"
                 )
         except Exception as e:

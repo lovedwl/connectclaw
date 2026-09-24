@@ -17,7 +17,7 @@ import aiofiles
 import aiofiles.os
 
 from connectclaw.agent.types import CompactionSummaryMessage
-from connectclaw.provider.types import Message, normalize_message
+from connectclaw.provider.types import Message, UserMessage, normalize_message
 
 
 # ── Session Entries ────────────────────────────────────────────
@@ -41,6 +41,9 @@ class CompactionEntry:
     summary: str = ""
     first_kept_entry_id: str = ""
     tokens_before: int = 0
+    # 被压缩的那段历史里散落的注入块，**squash 成一个当前状态块**后存在这里
+    # （git 合并语义）。见 connectclaw/injection.py 的 merge_injections。
+    merged_context: str = ""
 
 
 @dataclass
@@ -185,9 +188,15 @@ class JsonlSessionStorage:
         return entry_id
 
     async def append_compaction(
-        self, summary: str, first_kept_entry_id: str, tokens_before: int
+        self, summary: str, first_kept_entry_id: str, tokens_before: int,
+        merged_context: str = "",
     ) -> str:
-        """Append a compaction entry."""
+        """Append a compaction entry.
+
+        ``merged_context`` is the squashed injection state for the compacted
+        region (see connectclaw/injection.py); it rides along with the summary
+        so the model keeps its memories through compaction.
+        """
         entry_id = str(uuid.uuid4()).replace("-", "")[:12]
         entry = CompactionEntry(
             id=entry_id,
@@ -196,6 +205,7 @@ class JsonlSessionStorage:
             summary=summary,
             first_kept_entry_id=first_kept_entry_id,
             tokens_before=tokens_before,
+            merged_context=merged_context,
         )
         await self.append_entry(entry)
         return entry_id
@@ -392,30 +402,34 @@ def build_session_context(entries: list[SessionEntry]) -> SessionContext:
             messages.append(msg)
         elif entry.type == "compaction":
             compaction_summary = entry.summary
+            # 摘要 + （若有）被 squash 的注入状态块。两者都随压缩进入上下文。
+            prefix: list[Message] = [CompactionSummaryMessage(
+                summary=entry.summary,
+                tokens_before=entry.tokens_before,
+                timestamp=time.time() * 1000,
+            )]
+            merged = getattr(entry, "merged_context", "") or ""
+            if merged:
+                # 区域内散落的注入块被合并成一个"当前状态"（git squash 语义）：
+                # 压缩不会让模型丢掉记忆，注入账本也继续成立（不必重发）。
+                prefix.append(UserMessage(content=merged, timestamp=time.time() * 1000))
+
             if entry.first_kept_entry_id:
                 # New-style: keep messages from first_kept_entry onwards,
-                # replace everything before that with the summary
+                # replace everything before that with the summary (+merged state)
                 kept_idx = entry_to_idx.get(entry.first_kept_entry_id, len(messages))
                 kept = messages[kept_idx:]
-                messages = [CompactionSummaryMessage(
-                    summary=entry.summary,
-                    tokens_before=entry.tokens_before,
-                    timestamp=time.time() * 1000,
-                )] + kept
+                messages = prefix + kept
                 # Rebuild index map since indices shifted
+                shift = len(prefix)
                 new_map: dict[str, int] = {}
                 for eid, idx in entry_to_idx.items():
                     if idx >= kept_idx:
-                        new_map[eid] = idx - kept_idx + 1
+                        new_map[eid] = idx - kept_idx + shift
                 entry_to_idx = new_map
             else:
                 # Legacy compaction without first_kept_entry_id — clear all
-                messages = []
-                messages.append(CompactionSummaryMessage(
-                    summary=entry.summary,
-                    tokens_before=entry.tokens_before,
-                    timestamp=time.time() * 1000,
-                ))
+                messages = prefix
                 entry_to_idx = {}
         elif entry.type == "branch_summary":
             branch_summaries.append(entry.summary)

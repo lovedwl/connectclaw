@@ -181,6 +181,62 @@ class TestSubsystemRecallConfirm:
         n = mem.confirm_usage("好的，已切换到深色主题", results)
         assert n >= 1
 
+    def test_recall_is_incremental(self, mem):
+        """按需注入：首轮完整注入，之后无变化就**不注入**，换会话则重新注入。
+
+        2026-09-24 实测老设计：168 个用户轮 100% 带记忆块、同一句话平均被注入
+        34 次。增量注入就是为了消灭这种重复，同时保持历史纯追加（前缀缓存）。
+        """
+        for c in ["用户喜欢深色主题", "用户住在上海"]:
+            mem._store.add(MemoryEntry(type=MemoryType.SEMANTIC, content=c, importance=0.9))
+
+        first, results = asyncio.run(mem.recall("深色主题", session_id="s1"))
+        assert "<remembered-context>" in first
+        assert "深色主题" in first
+        assert results, "召回结果仍要给全量（confirm_usage 依赖它）"
+
+        second, results2 = asyncio.run(mem.recall("深色主题", session_id="s1"))
+        assert second == "", "条目没变化就不该重复注入"
+        assert results2, "但召回结果依然要返回"
+
+        # 新会话（例如 /new）→ 新账本 → 重新完整注入一次
+        fresh, _ = asyncio.run(mem.recall("深色主题", session_id="s2"))
+        assert "<remembered-context>" in fresh
+
+    def test_persona_is_incremental_too(self, mem):
+        """persona 保持"每轮都参与召回"，但注入同样走增量——不该每轮重发。
+
+        老设计实测：称呼/语言这类 persona 条目在 168/168 轮里被重复注入。
+        """
+        mem._store.add(MemoryEntry(type=MemoryType.SEMANTIC, content="用户要求全程中文",
+                                   importance=0.95))
+        first, results = asyncio.run(mem.recall("随便问一句", session_id="s1"))
+        assert "全程中文" in first, "persona 首轮要注入"
+        assert any("全程中文" in r.entry.content for r in results), "persona 仍参与召回"
+
+        again, _ = asyncio.run(mem.recall("换一句问题", session_id="s1"))
+        assert again == "", "persona 没变化就不该再注入一遍"
+
+    def test_recall_reinjects_changed_item(self, mem):
+        entry_id = mem._store.add(MemoryEntry(type=MemoryType.SEMANTIC, content="当前模型是 A"))
+        asyncio.run(mem.recall("当前模型", session_id="s1"))
+        assert asyncio.run(mem.recall("当前模型", session_id="s1"))[0] == ""
+
+        # 内容变了（= 被更正）→ 必须重新注入
+        mem._store.update(MemoryEntry(id=entry_id, type=MemoryType.SEMANTIC,
+                                      content="当前模型是 B", importance=0.9))
+        changed, _ = asyncio.run(mem.recall("当前模型", session_id="s1"))
+        assert "当前模型是 B" in changed
+
+    def test_recall_reports_forgotten_item(self, mem):
+        entry_id = mem._store.add(MemoryEntry(type=MemoryType.SEMANTIC, content="临时偏好：用红色"))
+        first, _ = asyncio.run(mem.recall("临时偏好", session_id="s1"))
+        assert "用红色" in first
+
+        mem._store.delete(entry_id)          # /forget（软删）
+        again, _ = asyncio.run(mem.recall("临时偏好", session_id="s1"))
+        assert "已遗忘" in again and "用红色" in again
+
     def test_clear_all(self, mem):
         for c in ["事实A", "事实B"]:
             mem._store.add(MemoryEntry(type=MemoryType.SEMANTIC, content=c))

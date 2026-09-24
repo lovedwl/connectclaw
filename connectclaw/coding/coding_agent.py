@@ -23,6 +23,7 @@ from connectclaw.agent.types import AgentTool
 from connectclaw.channel.capabilities import create_send_file_tool
 from connectclaw.channel.feishu import FeishuChannel
 from connectclaw.config import Config
+from connectclaw.injection import LedgerRegistry
 from connectclaw.memory import MemorySubsystem
 from connectclaw.memory.subsystem import MemoryConfig as MemCfg
 from connectclaw.model_registry import ModelProfile, ModelsStore, mask_key
@@ -87,6 +88,8 @@ class CodingAgent:
             config = Config.load()
 
         self._config = config
+        # 按需注入账本（清单那一半；记忆那一半在 MemorySubsystem 里，同样按会话存）
+        self._injection_ledgers = LedgerRegistry()
         self._channel = channel
 
         # Build model
@@ -189,6 +192,8 @@ class CodingAgent:
         # cycle). Persona-grade memories are protected — see MemoryTool.
         from connectclaw.coding.tools.memory import MemoryTool
         self._memory_tool = MemoryTool(self._memory)
+        # 做梦整理记忆时要拿环境事实来校验真伪（只读快照，见 environment_facts）
+        self._memory.set_env_facts_provider(self.environment_facts)
 
         # Named agents directory (.md agents — the primary "agent makes agent" path)
         self._agents_dir = os.path.expanduser("~/.connectclaw/agents")
@@ -368,7 +373,7 @@ class CodingAgent:
         if live_card_callbacks:
             await harness.set_live_card_callbacks(**live_card_callbacks)
 
-        # Per-turn dynamic context: RAG (technical docs) + memory (personal).
+        # Per-turn dynamic context: memory (personal) + agents/tool catalog.
         # BOTH are injected into the USER MESSAGE, never the system prompt.
         #
         # Why: DeepSeek / OpenAI-compatible providers cache by request *prefix*.
@@ -377,9 +382,16 @@ class CodingAgent:
         # system prompt byte-stable and appending the volatile context to the
         # user message — which then persists into history as a fixed prefix for
         # the next turn — the cached prefix keeps growing and keeps hitting.
-        rag_context = await self._rag.search(text)
+        #
+        # 因此**绝不能改写历史消息**：曾经把历史里的注入块降级成占位符以清理窗口，
+        # 结果前缀在"上一轮"处就断开、每轮多付一整轮的未命中（实测平均命中率
+        # 77%→61%，短会话 71%→10%）。正确做法是**按需注入**——只在内容真变化时
+        # 才产生新的注入块（见 connectclaw/injection.py 的账本），历史保持纯追加。
+        # RAG 注入已按用户决定移除（子系统与 [rag] 配置保留但不再参与注入）。
         memory_context, recalled_memories = await self._memory.recall(
-            text, conversation_key=conversation_key
+            text,
+            conversation_key=conversation_key,
+            session_id=harness.session.session_id,
         )
 
         # System prompt stays STABLE (no per-turn data) to preserve prefix cache.
@@ -391,13 +403,9 @@ class CodingAgent:
             key = self._config.llm.api_key
             logger.debug("[CODING] api_key=%s model=%s", "***" if key else "MISSING", self._model.id)
 
-            # Prepend dynamic context to the user message (memory first — more
-            # personal; RAG next — more technical; agent/tool catalog last), all
-            # kept OUT of the system prompt to preserve the prefix cache. The
-            # catalog is volatile (changes when agents are created), so like
-            # memory/RAG it rides in the user message.
-            agents_catalog = self._agents_tool.build_catalog()
-            context_blocks = [c for c in (memory_context, rag_context, agents_catalog) if c]
+            # Catalog 只在变化时注入（少变：实测 168 轮里只有 13 个版本）。
+            agents_catalog = self._catalog_delta(harness.session.session_id)
+            context_blocks = [c for c in (memory_context, agents_catalog) if c]
             prompt_text = text
             if context_blocks:
                 prompt_text = "\n\n".join(context_blocks) + "\n\n" + text
@@ -741,6 +749,76 @@ class CodingAgent:
         return await self._channel.request_unsandboxed_authorization(conversation_key, command)
 
     # ── Internal ────────────────────────────────────────────
+
+    def environment_facts(self) -> str:
+        """当前环境的**只读事实快照**，供做梦整理记忆时校验真伪。
+
+        用户 2026-09-24 的定调：能从环境读出来的事实不该作为记忆长期存在，而
+        "读环境 + 比对记忆"这件事归做梦做。这里只负责采集，不判断。
+        """
+        import socket
+
+        lines: list[str] = []
+
+        def _port_open(host: str, port: int) -> bool:
+            try:
+                with socket.create_connection((host, port), timeout=0.3):
+                    return True
+            except OSError:
+                return False
+
+        try:
+            llm = self._config.llm
+            lines.append(
+                f"- 当前激活模型：[llm] model_id={llm.model_id}，base_url={llm.base_url}"
+                f"（context_window={llm.context_window}）"
+            )
+            rag = getattr(self._config, "rag", None)
+            lines.append(f"- RAG：{'enabled' if getattr(rag, 'enabled', False) else 'disabled'}")
+            vision = getattr(self._config, "vision", None)
+            configured = bool(getattr(vision, "model_id", "")) if vision else False
+            lines.append(f"- Vision（图片分析）：{'已配置' if configured else '未配置'}")
+            proxy = getattr(self._config, "proxy", None)
+            purl = getattr(proxy, "url", "") if proxy else ""
+            if purl:
+                from urllib.parse import urlparse
+
+                host = urlparse(purl).hostname or "127.0.0.1"
+                port = urlparse(purl).port or 0
+                alive = _port_open(host, port) if port else False
+                lines.append(f"- [proxy] url={purl} → 端口{'监听中' if alive else '未监听'}")
+            lines.append(f"- 工作目录：{self._config.agent.cwd}")
+            lines.append(f"- 记忆库文件：{self._config.memory.db_path}")
+        except Exception as e:  # pragma: no cover - 防御性
+            logger.debug("[CODING] 环境事实采集部分失败: %s", e)
+
+        # 项目版本（有 git 就读，没有就算了）
+        try:
+            import subprocess
+
+            out = subprocess.run(
+                ["git", "-C", self._config.agent.cwd, "log", "-1", "--format=%h %cs %s"],
+                capture_output=True, text=True, timeout=3,
+            )
+            if out.returncode == 0 and out.stdout.strip():
+                lines.append(f"- 项目 HEAD：{out.stdout.strip()[:120]}")
+        except Exception:
+            pass
+
+        lines.append(f"- 采集时间：{time.strftime('%Y-%m-%d %H:%M')}")
+        return "\n".join(lines)
+
+    def _catalog_delta(self, session_id: str) -> str:
+        """agents/工具清单只在**变化**时注入（首次会注入一遍）。
+
+        清单很少变（实测 168 轮里只有 13 个版本、最常见那版重复 63 次），
+        每轮重发纯属浪费 token 与窗口。
+        """
+        ledger = self._injection_ledgers.for_session(session_id)
+        catalog = ledger.catalog_delta(self._agents_tool.build_catalog())
+        if catalog:
+            logger.debug("[CODING] agents/工具清单有变化，注入 %d 字", len(catalog))
+        return catalog
 
     async def _get_or_create_harness(self, key: str, tools: list[AgentTool] | None = None) -> AgentHarness:
         if tools is None:

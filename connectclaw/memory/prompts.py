@@ -128,3 +128,58 @@ Output format (JSON):
   "keep": ["id3"],
   "reason": "brief explanation"
 }}"""
+
+
+CURATION_SYSTEM_PROMPT = """You are a memory curator for a long-running assistant.
+You keep the memory store truthful, non-contradictory and free of anything that can be
+read directly from the environment. Output ONLY valid JSON."""
+
+
+CURATION_PROMPT = """Curate the assistant's long-term memories.
+
+Your tasks:
+1. RESOLVE CONFLICTS: several memories about the same topic must not contradict each
+   other. Keep the newest version (compare the [date] prefix), supersede the old one.
+2. DROP STALE: anything that has changed since it was recorded must be corrected or removed.
+3. DROP ENVIRONMENT-DERIVABLE: facts the assistant can read from its own environment
+   (active model, config switches, whether a service is running, file layout it can just
+   look at, language/runtime versions) must NOT live in memory. Remove them.
+   EXCEPTION — KEEP TECHNICAL KNOWLEDGE: API/protocol behaviour, field names, vendor
+   quirks, sandbox/tooling gotchas and other things that were *learned the hard way*
+   are NOT environment-readable. Keep them, even when they mention a model, a path or
+   a version. Only drop a technical memory when the environment facts show it is now
+   WRONG (then correct it instead of deleting it).
+4. VERIFY: when the environment facts below contradict a memory, the environment wins.
+5. MERGE: overlapping/redundant memories → one entry.
+Never invent facts. When unsure, keep the memory.
+
+<memories>
+{memories}
+</memories>
+
+<environment-facts>
+{env_facts}
+</environment-facts>
+
+Output format (JSON):
+{{
+  "update": [
+    {{"id": "mem_id", "content": "corrected content", "detail": null, "reason": "为什么改"}}
+  ],
+  "forget": [
+    {{"id": "mem_id", "reason": "过时 / 环境可读 / 与事实冲突"}}
+  ],
+  "merge_groups": [
+    {{"memory_ids": ["id1", "id2"], "merged_content": "合并后的内容", "reason": "重复"}}
+  ],
+  "new_semantic": [
+    {{"content": "一条应补上的新事实", "category": "", "importance": 0.6, "reason": "为什么"}}
+  ]
+}}
+
+If nothing needs changing, output:
+{{"update": [], "forget": [], "merge_groups": [], "new_semantic": []}}"""
+
+
+DECAY_SYSTEM_PROMPT = """You are a memory curator. Decide which memories are no longer relevant.
+Output ONLY valid JSON."""

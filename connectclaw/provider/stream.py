@@ -129,6 +129,7 @@ async def stream_simple(
             stream = await client.chat.completions.create(**params, timeout=timeout)
 
             chunk_count = 0
+            saw_finish_reason = False
             async for chunk in stream:
                 chunk_count += 1
                 # Check cancellation
@@ -142,15 +143,26 @@ async def stream_simple(
                     )
                     return
 
+                # Usage 可能出现在两种位置：OpenAI 官方是最后一个 choices 为空的
+                # 分块，而本网关实测是**和 finish_reason 挤在同一个分块里**（choices
+                # 非空）。过去只在 choices 为空时找它，于是永远收不到 —— 落盘的 838
+                # 条助手消息 usage 全是 {} 就是这么来的，连带真实 token、缓存命中
+                # 率、压缩的 usage 锚点全部失效。两种布局都在这里收。
+                usage_obj = getattr(chunk, "usage", None)
+                if usage_obj:
+                    partial.usage = {
+                        "input": usage_obj.prompt_tokens or 0,
+                        "output": usage_obj.completion_tokens or 0,
+                        "total": usage_obj.total_tokens or 0,
+                    }
+                    details = getattr(usage_obj, "prompt_tokens_details", None)
+                    cached = getattr(details, "cached_tokens", None) if details else None
+                    if cached is not None:
+                        # 前缀缓存命中量：把它留下，缓存行为才可观测。
+                        partial.usage["cached"] = int(cached)
+
                 # Skip chunks without choices
                 if not chunk.choices:
-                    # Final chunk with usage info
-                    if hasattr(chunk, "usage") and chunk.usage:
-                        partial.usage = {
-                            "input": chunk.usage.prompt_tokens or 0,
-                            "output": chunk.usage.completion_tokens or 0,
-                            "total": chunk.usage.total_tokens or 0,
-                        }
                     continue
 
                 delta = chunk.choices[0].delta
@@ -241,18 +253,15 @@ async def stream_simple(
                         case "tool_calls":
                             partial.stop_reason = "toolUse"
 
-                    logger.debug("stream done: stop_reason=%s content_blocks=%d chunks=%d",
-                                 partial.stop_reason, len(partial.content), chunk_count)
-                    for i, b in enumerate(partial.content):
-                        logger.debug("  block[%d]: type=%s text_len=%d thinking_len=%d",
-                                     i, b.get("type", "?"),
-                                     len(b.get("text", "")),
-                                     len(b.get("thinking", "")))
-                    yield StreamEvent(
-                        type="done",
-                        message=partial,
-                    )
-                    return
+                    # finish_reason 不等于流结束：OpenAI 兼容网关把 usage 放在**之后**
+                    # 的最后一个分块里（本网关实测如此）。所以这里不再 yield+return，
+                    # 而是继续读完流（上面 not chunk.choices 分支会收下 usage），
+                    # 由下面统一的收尾发 done。否则 partial.usage 永远是 {}——落盘没有
+                    # 真实 token、压缩的 usage 锚点失效、缓存命中率也无从观测。
+                    saw_finish_reason = True
+                    logger.debug("stream finish_reason=%s (draining for usage), chunks=%d",
+                                 partial.stop_reason, chunk_count)
+                    continue
 
             # Stream ended without explicit finish_reason
             if _tool_call_slots:
@@ -269,8 +278,12 @@ async def stream_simple(
                         slot.pop("_args_json", None)
                     partial.content.append(slot)
                 _tool_call_slots.clear()
-            logger.debug("stream ended without finish_reason: chunks=%d content_blocks=%d",
-                         chunk_count, len(partial.content))
+            if saw_finish_reason:
+                logger.debug("stream done: stop_reason=%s content_blocks=%d chunks=%d usage=%s",
+                             partial.stop_reason, len(partial.content), chunk_count, partial.usage or "{}")
+            else:
+                logger.debug("stream ended without finish_reason: chunks=%d content_blocks=%d",
+                             chunk_count, len(partial.content))
             for i, b in enumerate(partial.content):
                 logger.debug("  block[%d]: type=%s text_len=%d thinking_len=%d",
                              i, b.get("type", "?"),

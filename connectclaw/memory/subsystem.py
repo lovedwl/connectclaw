@@ -15,6 +15,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from connectclaw.injection import LedgerRegistry
 from connectclaw.logging import get_logger
 from connectclaw.provider.types import Model
 
@@ -63,6 +64,10 @@ class MemorySubsystem:
         self._turn_counter: dict[str, int] = {}
         self._last_dream_time: float = 0.0
         self._dream_task: asyncio.Task | None = None
+        # 按需注入账本：记住每个会话已经注入过哪些记忆条目（见 connectclaw/injection.py）
+        self._ledgers = LedgerRegistry()
+        # 环境事实快照提供者（由 CodingAgent 接上）：做梦整理记忆时用来校验真伪
+        self._env_facts_provider: Callable[[], str] | None = None
 
     @property
     def enabled(self) -> bool:
@@ -117,14 +122,17 @@ class MemorySubsystem:
         query: str,
         *,
         conversation_key: str = "",
+        session_id: str = "",
     ) -> tuple[str, list]:
-        """Retrieve relevant memories for the current conversation.
+        """按需注入：只返回**增量**（新增 / 变化 / 已遗忘）。
 
-        Returns ``(formatted_text, recalled_results)``. The text is meant to
-        prepend to the user message (cache-friendly); ``recalled_results``
-        should be passed back to :meth:`confirm_usage` after the reply is
-        produced so only actually-used memories are strengthened. Empty text
-        and empty list if nothing relevant.
+        Returns ``(formatted_text, recalled_results)``. 首次（或新会话/重启后）返回
+        完整块；之后只有记忆条目真的变了才返回内容，**没变化就返回空串**。这样历史
+        保持纯追加，前缀缓存不会因为改写历史而失效（见 connectclaw/injection.py 的
+        实测），也不会把同一句话重复注入几十遍。
+
+        ``recalled_results`` 始终是本次召回的全量结果，仍应交给 :meth:`confirm_usage`
+        统计真实使用情况。
         """
         if not self._initialized:
             await self.initialize()
@@ -140,12 +148,56 @@ class MemorySubsystem:
 
         # Memory is best-effort: a retrieval error must never break the turn.
         try:
-            return await self._retriever.retrieve_formatted(
+            _, results = await self._retriever.retrieve_formatted(
                 query, query_embedding=query_embedding
             )
         except Exception as e:
             logger.debug("Memory: recall failed: %s", e)
             return "", []
+
+        # 增量比对要在"召回为空"时也照跑：条目被 /forget 删掉后本轮可能召回不到
+        # 任何东西，但"它没了"这件事必须告诉模型（少召回那一侧）。
+        ledger = self._ledgers.for_session(session_id or conversation_key or "default")
+        items = self._retriever.render_item_lines(results)
+        new_lines, forgotten = ledger.memory_delta(items, alive=self._memory_alive)
+        text = self._retriever.format_block(new_lines + forgotten, incremental=True)
+        if new_lines:
+            logger.debug("Memory: 注入增量 %d 条（召回 %d 条）", len(new_lines), len(items))
+        if forgotten:
+            logger.debug("Memory: 告知遗忘 %d 条", len(forgotten))
+        return text, results
+
+    def _memory_alive(self, memory_id: str) -> bool:
+        """条目是否仍可注入：库里还在、且没被软删（/forget 把 strength 置 0）。"""
+        if not self._store:
+            return True
+        entry = self._store.get(memory_id)
+        if entry is None:
+            return False
+        strength = entry.strength if entry.strength is not None else 1.0
+        return strength > 0.05
+
+    def set_env_facts_provider(self, provider: Callable[[], str] | None) -> None:
+        """接入"环境事实快照"的提供者（做梦整理记忆时用于校验真伪）。
+
+        记忆子系统自己看不到 app 配置与进程状态，所以由 CodingAgent 传一个只读
+        快照函数进来（当前模型 / RAG 开关 / 代理端口 / HEAD 等）。
+        """
+        self._env_facts_provider = provider
+
+    def _env_facts(self) -> str:
+        """采集环境事实；失败绝不能让做梦挂掉（返回空串即可）。"""
+        if not self._env_facts_provider:
+            return ""
+        try:
+            return self._env_facts_provider() or ""
+        except Exception as e:  # pragma: no cover - 防御性
+            logger.debug("Memory: 环境事实采集失败: %s", e)
+            return ""
+
+    def forget_session(self, session_id: str) -> None:
+        """丢弃某会话的注入账本（历史被压缩重写后调用，让它重新完整注入一次）。"""
+        self._ledgers.drop(session_id)
 
     def confirm_usage(self, reply_text: str, recalled_results: list) -> int:
         """Mark memories actually reflected in ``reply_text`` as accessed.
@@ -307,7 +359,9 @@ class MemorySubsystem:
             if hours_since < self._config.dream_interval_hours:
                 return None
 
-        report = await self._consolidator.dream(model, api_key=api_key)
+        report = await self._consolidator.dream(
+            model, api_key=api_key, env_facts=self._env_facts()
+        )
         self._last_dream_time = now
 
         return {
@@ -317,6 +371,8 @@ class MemorySubsystem:
             "merged": report.merged,
             "deleted": report.deleted,
             "cleaned": report.cleaned,
+            "curated": report.curated,
+            "purged": report.purged,
         }
 
     async def schedule_dreaming(
