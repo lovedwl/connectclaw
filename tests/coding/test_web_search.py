@@ -7,6 +7,7 @@ network and is not tested (same philosophy as test_web_fetch.py).
 
 from __future__ import annotations
 
+import asyncio
 import types
 
 import pytest
@@ -112,7 +113,7 @@ async def test_fetch_once_uses_cache(fake_time, monkeypatch):
 
     async def fake_http(url, timeout=0.0):
         calls.append(url)
-        return "content " * 100
+        return "content " * 100, ""      # (text, reason) —— 直连成功时 reason 为空
 
     monkeypatch.setattr(lightpanda, "http_fetch_once", fake_http)
     text1 = await lightpanda.fetch_once("https://a.com/page", 8000)
@@ -209,3 +210,77 @@ async def test_web_search_tool_passes_params(monkeypatch):
     assert captured["allowed_domains"] == ["a.com"]
     assert captured["timeout"] == 17.0
     assert "1. [A](https://a.com/)" in result.content[0]["text"]
+
+
+# ── fail open：真实错误要暴露给 agent ────────────────────────
+#
+# 2026-09-25 用户实测：web_fetch huggingface.co 只报"浏览器引擎在此页面失败
+# （Lightpanda 仍为 Beta；繁重或 JS 框架页面可能使其崩溃）"——把"外网不可达"
+# 错报成"引擎太脆"，agent 因此不知道要换路（走代理是它凭记忆该做的判断）。
+# 修法：不揣测原因、不建议走代理，**原样抛出真实错误**；并且直连 GET 的报错
+# 不能再被静默吞掉（那条连接层错误最有诊断价值）。
+
+
+async def test_fetch_failure_exposes_both_real_errors(monkeypatch):
+    async def fake_http(url, timeout=0.0):
+        return "", "ConnectTimeout: "
+
+    async def fake_run(action, nav_timeout=0):
+        raise lightpanda.LightpandaError(
+            "浏览器会话失败：ConnectionClosedError: no close frame received or sent"
+        )
+
+    monkeypatch.setattr(lightpanda, "http_fetch_once", fake_http)
+    monkeypatch.setattr(lightpanda, "_run_stateless", fake_run)
+
+    with pytest.raises(lightpanda.LightpandaError) as exc:
+        await lightpanda.fetch_once("https://huggingface.co/convaiinnovations", 5000, no_cache=True)
+
+    msg = str(exc.value)
+    assert "ConnectTimeout" in msg, "直连的真实报错必须出现（过去被静默吞掉）"
+    assert "no close frame received or sent" in msg, "引擎的真实报错也要在"
+    assert "Beta" not in msg, "不要再把原因揣测成'引擎太脆'"
+    assert "代理" not in msg and "镜像" not in msg, "工具不该给'思路'，那是记忆的事"
+
+
+async def test_http_fetch_once_reports_connect_error(monkeypatch):
+    """连接层异常要作为 reason 返回，而不是空串。"""
+    import httpx
+
+    class _Boom:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            raise httpx.ConnectError("[Errno 111] Connection refused")
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(lightpanda.httpx, "AsyncClient", _Boom)
+    text, reason = await lightpanda.http_fetch_once("https://example.invalid/x")
+    assert text == ""
+    assert "ConnectError" in reason and "Connection refused" in reason
+
+
+async def test_run_stateless_raises_raw_error(monkeypatch):
+    """浏览器会话失败时，抛的是原始异常，不再套"Lightpanda 仍为 Beta"的帽子。"""
+    class _Eng:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def attach(self, url):
+            raise ConnectionResetError("[Errno 104] Connection reset by peer")
+
+    async def fake_server():
+        return "ws://127.0.0.1:9222/x"
+
+    monkeypatch.setattr(lightpanda, "LightpandaEngine", _Eng)
+    monkeypatch.setattr(lightpanda, "_ensure_server", fake_server)
+    lightpanda._sem = asyncio.Semaphore(1)
+
+    with pytest.raises(lightpanda.LightpandaError) as exc:
+        await lightpanda._run_stateless(lambda eng, sid: None)
+    assert "ConnectionResetError" in str(exc.value)
+    assert "Connection reset by peer" in str(exc.value)
+    assert "Beta" not in str(exc.value)

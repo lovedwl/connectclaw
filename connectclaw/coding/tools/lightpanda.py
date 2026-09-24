@@ -33,10 +33,31 @@ from typing import Any
 import httpx
 import websockets
 
+from connectclaw.logging import get_logger
+
+logger = get_logger(__name__)
+
 DEFAULT_PORT = 9222
 DEFAULT_NAV_TIMEOUT = 20          # s, page navigation budget
 _SERVE_INACTIVITY = 3600          # s, keep CDP alive for long-lived sessions
 _RECV_SLACK = 15                  # s added to nav timeout for ws recv
+
+# ── 内存边界（2026-09-25 事故后加的）─────────────────────────
+# 事故：一次 web_search 之后 unit 峰值 **15.5G**，被内核 OOM 杀掉，整机跟着 swap 抖动
+# （那次运行里 4 次 Lightpanda 抓取全部失败："no close frame received or sent"）。
+# 这个文件里有三处**无界**缓冲，任何一处撞上繁重页面都能吃满内存：
+#   1) CDP websocket 原本 `max_size=None` —— 单条消息没有上限，整页 DOM/文本一次性
+#      读进 Python 进程；
+#   2) 页面文本**全量**进 LRU 缓存，只按条数（32）封顶，不按大小；
+#   3) 共享的 `lightpanda serve` 子进程（Beta 引擎）持有页面，既没上限也没观测
+#      —— 代码里已经记着一次"orphan lightpanda 堆到 21G 峰值"的前科。
+# 下面把三处都钉上界，并在每次浏览器会话后观测子进程 RSS，超硬阈值就重启它
+# （把 15G 猝死变成 3G 重启），下次再犯也能直接定位。
+_MAX_PAGE_CHARS = 2_000_000                  # 单页文本上限（正常页面可见文本 <200KB）
+_CDP_MAX_MESSAGE_BYTES = 32 * 1024 * 1024    # 单条 CDP 消息上限
+_FETCH_CACHE_MAX_CHARS = 8_000_000           # web_fetch 缓存总量上限
+_CHILD_RSS_WARN_MB = 1024                    # 子进程 RSS 超此值告警
+_CHILD_RSS_KILL_MB = 2048                    # 超此值重启子进程（防 OOM）
 
 
 class LightpandaError(RuntimeError):
@@ -124,7 +145,9 @@ class LightpandaEngine:
         atexit.register(self._sync_kill)
         try:
             ws_url = await self._await_ready()
-            self._ws = await websockets.connect(ws_url, max_size=None, open_timeout=15)
+            self._ws = await websockets.connect(
+            ws_url, max_size=_CDP_MAX_MESSAGE_BYTES, open_timeout=15
+        )
         except BaseException:
             self._sync_kill()
             raise
@@ -142,7 +165,9 @@ class LightpandaEngine:
         if self._ws is not None:
             return
         self._proc = None  # not ours — never kill it
-        self._ws = await websockets.connect(ws_url, max_size=None, open_timeout=15)
+        self._ws = await websockets.connect(
+            ws_url, max_size=_CDP_MAX_MESSAGE_BYTES, open_timeout=15
+        )
 
     async def _await_ready(self) -> str:
         url = f"http://127.0.0.1:{self._port}/json/version"
@@ -250,7 +275,7 @@ class LightpandaEngine:
                 # Already structured Markdown — keep its newlines (collapse only
                 # runs of 3+ blank lines), don't flatten like innerText. Strip
                 # image syntax first (token bloat + breaks Feishu cards).
-                return _squeeze_blanklines(_strip_images(md).strip())
+                return _cap_page(_squeeze_blanklines(_strip_images(md).strip()))
         except LightpandaError:
             pass  # command missing / page too heavy — fall back below
 
@@ -261,7 +286,7 @@ class LightpandaEngine:
             data = {"title": "", "text": str(raw or "")}
         title = (data.get("title") or "").strip()
         text = _collapse(data.get("text") or "")
-        return f"# {title}\n\n{text}" if title else text
+        return _cap_page(f"# {title}\n\n{text}" if title else text)
 
     async def click(self, sid: str, selector: str) -> bool:
         return bool(await self._eval(sid, _click_js(selector)))
@@ -399,6 +424,51 @@ def configure_pool(size: int) -> None:
         _CDP_MAX_CONNECTIONS = max(_CDP_MAX_CONNECTIONS, size)
 
 
+def _cap_page(text: str) -> str:
+    """单页文本封顶。正常页面可见文本 <200KB，超了就是异常页面——
+    别让它灌进 CDP 缓冲区、缓存和后续的 markdown 处理。"""
+    if len(text) <= _MAX_PAGE_CHARS:
+        return text
+    logger.warning("lightpanda: 页面文本 %d 字超上限，截断至 %d 字", len(text), _MAX_PAGE_CHARS)
+    return text[:_MAX_PAGE_CHARS]
+
+
+def _child_rss_mb() -> float:
+    """共享 lightpanda serve 子进程的当前 RSS（MB）；拿不到就返回 0。"""
+    proc = _shared_proc
+    if proc is None or proc.poll() is not None:
+        return 0.0
+    try:
+        with open(f"/proc/{proc.pid}/status", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0.0
+
+
+def _check_child_memory() -> None:
+    """观测、并兜底共享浏览器子进程的内存。
+
+    这是唯一能直接区分"内存是浏览器吃掉的还是 Python 吃掉的"的地方——15.5G 那次事故
+    只能从 unit 峰值反推。超过硬阈值就重启子进程：把 15G 猝死降级成 3G 重启，
+    不会再把整机拖进 swap（内核 OOM 杀 unit、桌面跟着卡死就是这么来的）。
+    """
+    rss = _child_rss_mb()
+    if rss <= 0:
+        return
+    if rss >= _CHILD_RSS_KILL_MB:
+        logger.warning(
+            "lightpanda 子进程 RSS %.0f MB ≥ %.0f MB，重启它以防 OOM", rss, _CHILD_RSS_KILL_MB
+        )
+        _kill_shared_proc()
+    elif rss >= _CHILD_RSS_WARN_MB:
+        logger.warning("lightpanda 子进程 RSS 已达 %.0f MB（告警阈值 %.0f MB）", rss, _CHILD_RSS_WARN_MB)
+    else:
+        logger.debug("lightpanda 子进程 RSS %.0f MB", rss)
+
+
 def _kill_shared_proc() -> None:
     global _shared_proc, _shared_ws_url
     proc, _shared_proc, _shared_ws_url = _shared_proc, None, None
@@ -458,6 +528,9 @@ async def _run_stateless(action, nav_timeout: int = DEFAULT_NAV_TIMEOUT) -> str:
     last: Exception | None = None
     async with _sem:
         for _ in (1, 2):
+            # 会话**开始前**也看一眼：一轮里并发抓多个页面时（代理可以一次发十几个
+            # web_fetch），子进程会在一次批量内迅速变大——只在收尾时检查就太晚了。
+            _check_child_memory()
             eng = LightpandaEngine(nav_timeout=nav_timeout)
             sid: str | None = None
             try:
@@ -476,10 +549,12 @@ async def _run_stateless(action, nav_timeout: int = DEFAULT_NAV_TIMEOUT) -> str:
                     await eng.close()  # not our process — just drops the ws
                 except Exception:
                     pass
-    raise LightpandaError(
-        "浏览器引擎在此页面失败（Lightpanda 仍为 Beta；繁重或 "
-        f"JS 框架页面可能使其崩溃）：{last}"
-    )
+                _check_child_memory()
+    # fail open：**原样**抛出真实错误（类型名 + 报文），不做原因揣测、也不给
+    # "要不要走代理"之类的建议——那是 agent 的记忆与判断该做的事。
+    # 以前这里写死"Lightpanda 仍为 Beta；繁重或 JS 框架页面可能使其崩溃"，
+    # 把所有失败都归因成引擎脆弱，于是"外网不可达"被误读成"引擎不行"。
+    raise LightpandaError(f"浏览器会话失败：{_err_text(last)}")
 
 
 # ── plain-HTTP fast path (web_fetch) ─────────────────────────
@@ -664,17 +739,46 @@ def _cache_get(url: str) -> str | None:
 def _cache_put(url: str, text: str) -> None:
     _fetch_cache.pop(url, None)  # re-insert → freshest at the tail
     _fetch_cache[url] = (time.monotonic(), text)
-    while len(_fetch_cache) > _FETCH_CACHE_MAX:
+    # 条数与**总字符数**双重封顶：只按条数的话，32 个繁重页面能占掉几个 G。
+    while len(_fetch_cache) > _FETCH_CACHE_MAX or _cache_chars() > _FETCH_CACHE_MAX_CHARS:
+        if len(_fetch_cache) <= 1:
+            break
         _fetch_cache.pop(next(iter(_fetch_cache)))
 
 
-async def http_fetch_once(url: str, timeout: float = _FASTPATH_TIMEOUT) -> str:
+def _cache_chars() -> int:
+    return sum(len(t) for _, t in _fetch_cache.values())
+
+
+def _err_text(e: BaseException) -> str:
+    """异常的**真实**报文：str 为空时退到 __cause__/__context__（httpx 常把真因
+    放在那里，比如 ConnectError 自身没报文、但 cause 是 DNS/覆盖层的具体错误）。
+
+    只做转述，不做归因——错误是要暴露给 agent 的，由它凭记忆判断要不要换路。
+    """
+    parts: list[str] = []
+    msg = str(e).strip()
+    if msg:
+        parts.append(msg)
+    cause = e.__cause__ or e.__context__
+    if cause is not None:
+        cmsg = str(cause).strip() or repr(cause)
+        if cmsg and cmsg not in parts:
+            parts.append(cmsg)
+    detail = " | ".join(parts) or "(无报文)"
+    return f"{type(e).__name__}: {detail}"
+
+
+async def http_fetch_once(url: str, timeout: float = _FASTPATH_TIMEOUT) -> tuple[str, str]:
     """Plain-HTTP page fetch → Markdown (no browser).
 
-    Returns '' — not raises — when the response isn't usable as page text
-    (non-HTML content, HTTP errors, JS-rendered shell), so the caller can fall
-    back to the browser engine. The text is NOT capped here: the caller caches
-    the full page and applies per-call caps.
+    返回 ``(text, reason)``：拿不到可用正文时 ``text`` 为空，``reason`` 说明**真实
+    原因**（连接类异常 / HTTP 状态码 / 内容类型不对 / JS 壳页面）。过去这些都静默
+    返回空串，结果是**最有诊断价值的连接层报错被吞掉**，只剩引擎那句含糊的
+    websocket 报错——"外网不可达"于是被误读成"引擎太脆"。错误是要暴露给 agent 的，
+    由它自己（凭记忆里的代理/镜像知识）决定怎么办。
+
+    正文不在这一层封顶：调用方负责缓存整页并按次截断。
     """
     headers = {"User-Agent": _HTTP_USER_AGENT, "Accept-Language": _HTTP_ACCEPT_LANGUAGE}
     try:
@@ -682,24 +786,24 @@ async def http_fetch_once(url: str, timeout: float = _FASTPATH_TIMEOUT) -> str:
             follow_redirects=True, timeout=timeout, headers=headers
         ) as client:
             resp = await client.get(url)
-    except Exception:
-        return ""
+    except Exception as e:  # noqa: BLE001
+        return "", _err_text(e)
     if resp.status_code >= 400:
-        return ""
+        return "", f"HTTP {resp.status_code}"
     ctype = (resp.headers.get("content-type") or "").lower()
     if ctype and "html" not in ctype and "text/plain" not in ctype:
-        return ""
+        return "", f"内容类型不是 HTML/文本（{ctype}）"
     try:
         text = _html_to_markdown(resp.text, base_url=str(resp.url))
-    except Exception:
-        return ""
+    except Exception as e:  # noqa: BLE001
+        return "", f"HTML 转 Markdown 失败：{type(e).__name__}: {str(e)[:120]}"
     # Tiny content WITH scripts is the classic JS-app shell signature — the
     # server sent a loader, the real text renders client-side. Hand those (and
     # empty results) to the browser engine; genuinely small static pages come
     # back as-is instead of paying for a browser session.
     if len(text.strip()) < _FASTPATH_MIN_CHARS and "<script" in resp.text.lower():
-        return ""
-    return text
+        return "", f"JS 壳页面（正文仅 {len(text.strip())} 字且含 script）"
+    return _cap_page(text), ""
 
 
 async def fetch_once(
@@ -720,14 +824,19 @@ async def fetch_once(
         if cached is not None:
             return _cap(cached, max_chars)
 
-    text = await http_fetch_once(url, timeout=http_timeout)
+    text, fast_reason = await http_fetch_once(url, timeout=http_timeout)
     if not text.strip():
 
         async def _do(eng: LightpandaEngine, sid: str) -> str:
             await eng.navigate(sid, url)
             return await eng.read_markdown(sid)
 
-        text = await _run_stateless(_do, nav_timeout=int(http_timeout))
+        try:
+            text = await _run_stateless(_do, nav_timeout=int(http_timeout))
+        except LightpandaError as engine_error:
+            # fail open：把两条**真实错误**一起交出去（直连报了什么、浏览器报了什么），
+            # 不揣测原因、不建议走代理。agent 凭自己的记忆判断要不要换路。
+            raise LightpandaError(f"直连：{fast_reason or '无可用正文'}；{engine_error}") from engine_error
 
     if text.strip() and not no_cache:
         _cache_put(url, text)
@@ -773,7 +882,8 @@ async def _search_rss(query: str, count: int, timeout: float) -> list[dict[str, 
     """Fetch Bing's RSS search endpoint over plain HTTP (no browser).
 
     www.bing.com 302s to the regional host (e.g. cn.bing.com) — follow_redirects
-    handles it. Returns [] on any failure; the caller falls back.
+    handles it. 返回 ``(results, reason)``：失败时 reason 是真实报错（不静默吞），
+    由调用方决定兜底并**把真因暴露给 agent**。
     """
     url = _SEARCH_RSS_URL.format(q=urllib.parse.quote(query), n=max(count, 10))
     try:
@@ -783,11 +893,12 @@ async def _search_rss(query: str, count: int, timeout: float) -> list[dict[str, 
             headers={"User-Agent": _HTTP_USER_AGENT, "Accept-Language": _HTTP_ACCEPT_LANGUAGE},
         ) as client:
             resp = await client.get(url)
-    except Exception:
-        return []
+    except Exception as e:  # noqa: BLE001
+        return [], _err_text(e)
     if resp.status_code >= 400:
-        return []
-    return _parse_bing_rss(resp.text)
+        return [], f"HTTP {resp.status_code}"
+    items = _parse_bing_rss(resp.text)
+    return items, ("" if items else "RSS 解析无结果（端点变更或返回错误页）")
 
 
 def _domain_allowed(url: str, allowed: list[str] | None, blocked: list[str] | None) -> bool:
@@ -833,7 +944,7 @@ async def search_once(
     (crash-recovering). Domain filters apply to the structured RSS results.
     """
     max_results = max(1, min(int(max_results), 30))
-    rss = await _search_rss(query, count=max_results * 3, timeout=timeout)
+    rss, rss_reason = await _search_rss(query, count=max_results * 3, timeout=timeout)
     if rss:
         hits = [r for r in rss if _domain_allowed(r["url"], allowed_domains, blocked_domains)]
         if hits:
@@ -849,4 +960,7 @@ async def search_once(
         # Drop Bing's header nav and footer; keep just the result list.
         return _trim_bing_chrome(await eng.read_markdown(sid))
 
-    return _cap(await _run_stateless(_do, nav_timeout=int(timeout)), max_chars)
+    try:
+        return _cap(await _run_stateless(_do, nav_timeout=int(timeout)), max_chars)
+    except LightpandaError as engine_error:
+        raise LightpandaError(f"Bing RSS：{rss_reason or '无结果'}；{engine_error}") from engine_error
