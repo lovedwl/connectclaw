@@ -10,6 +10,8 @@ Pipeline:
 
 from __future__ import annotations
 
+import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -232,7 +234,9 @@ def find_cut_point(
 
 SUMMARIZATION_SYSTEM_PROMPT = (
     "You are a context summarization assistant. Read a conversation and produce "
-    "a structured summary. Do NOT continue the conversation. Only output the summary."
+    "a structured summary. Do NOT continue the conversation. Only output the summary. "
+    "You have NO tools available — never emit tool calls, function-call syntax, or "
+    "special tokens; plain summary text only."
 )
 
 SUMMARIZATION_PROMPT = """Create a structured context summary for an LLM to continue the work.
@@ -297,22 +301,20 @@ def _extract_file_ops(messages: list[Any]) -> FileOperations:
     ops = FileOperations()
     for msg in messages:
         msg = _unwrap(msg)
-        if msg.get("role") == "toolResult":
-            tool_name = msg.get("tool_name", msg.get("toolName", ""))
-            if tool_name == "read":
-                # Read tool — extract path from content
-                for b in msg.get("content", []):
-                    text = b.get("text", "")
-                    # Try to find file path in read result
-            elif tool_name in ("write", "edit"):
-                ops.edited.add(str(msg.get("details", {})))
-        # Also check details
+        if msg.get("role") != "toolResult":
+            continue
         details = msg.get("details", {})
-        if isinstance(details, dict):
-            path = details.get("path") or details.get("file_path") or details.get("filePath")
-            role = msg.get("role", "")
-            if role == "toolResult":
-                ops.edited.add(str(path))
+        if not isinstance(details, dict):
+            continue
+        path = details.get("path") or details.get("file_path") or details.get("filePath")
+        if not (isinstance(path, str) and path.strip()):
+            continue
+        path = path.strip()[:_MAX_FILE_PATH_CHARS]
+        tool_name = msg.get("tool_name", msg.get("toolName", ""))
+        if tool_name in ("write", "edit"):
+            ops.edited.add(path)
+        elif tool_name == "read":
+            ops.read.add(path)
     return ops
 
 
@@ -361,6 +363,21 @@ def _cap_summary(summary: str, max_tokens: int) -> str:
 # ── Summarization ──────────────────────────────────────────────
 
 
+_log = logging.getLogger(__name__)
+
+# 总结模型声明了无工具，但工具特训过的模型偶尔仍会吐原生调用语法；
+# 无工具声明时 provider 不会解析这些特殊 token，原样漏进文本。
+_TOOL_CALL_BLOCK_RE = re.compile(
+    r"<(?:\w+_)?(?:function_call|tool_call)\b[^>]*>.*?(?:</(?:tool_calls?|function_call)>|$)",
+    re.DOTALL,
+)
+
+
+def strip_tool_call_artifacts(text: str) -> str:
+    """Remove leaked native tool-call blocks (e.g. `<dots_function_call>…</tool_calls>`)."""
+    return _TOOL_CALL_BLOCK_RE.sub("", text or "").strip()
+
+
 async def generate_summary(
     messages: list[Any],
     model: Model,
@@ -404,9 +421,20 @@ async def generate_summary(
             parts.append(event.delta)
         elif event.type == "done" and event.message:
             texts = [b.get("text", "") for b in event.message.content if b.get("type") == "text"]
-            return "\n".join(texts)
+            return _finish_summary(messages, "\n".join(texts), model)
 
-    return "".join(parts)
+    return _finish_summary(messages, "".join(parts), model)
+
+
+def _finish_summary(messages: list[Any], text: str, model: Model) -> str:
+    """Sanitize summarizer output; on empty result fall back to a verbatim digest."""
+    text = strip_tool_call_artifacts(text)
+    if text:
+        return text
+    _log.warning("summarizer returned no usable text (model=%s); falling back to verbatim digest",
+                 getattr(model, "id", "?"))
+    digest = _serialize(messages, max_tokens=400).strip()
+    return f"[auto-summary failed — most recent messages verbatim]\n{digest}" if digest else ""
 
 
 async def _generate_turn_prefix_summary(
@@ -438,9 +466,9 @@ async def _generate_turn_prefix_summary(
             parts.append(event.delta)
         elif event.type == "done" and event.message:
             texts = [b.get("text", "") for b in event.message.content if b.get("type") == "text"]
-            return "\n".join(texts)
+            return strip_tool_call_artifacts("\n".join(texts))
 
-    return "".join(parts)
+    return strip_tool_call_artifacts("".join(parts))
 
 
 # ── Main Compaction Pipeline ───────────────────────────────────
@@ -615,6 +643,7 @@ class CompactionResult:
     details: dict = field(default_factory=dict)
     # 被压缩区域内散落的注入块 squash 成的"当前状态"（git 合并语义）
     merged_context: str = ""
+    context_state: dict | None = None
 
 
 def _summarize_input_budget(model: Model, reserve_tokens: int) -> int:
@@ -660,7 +689,12 @@ async def compact(
             reserve_tokens=settings.reserve_tokens,
             thinking_level=thinking_level,
         )
-        summary = f"{history}\n\n---\n\n**Turn Context (split turn):**\n\n{prefix}"
+        if prefix:
+            summary = f"{history}\n\n---\n\n**Turn Context (split turn):**\n\n{prefix}"
+        else:
+            # 保留区本就带着 suffix 原文，前缀摘要失效时宁缺毋滥
+            _log.warning("split-turn prefix summary empty; omitting Turn Context section")
+            summary = history
     else:
         summary = await generate_summary(
             prep.messages_to_summarize,
