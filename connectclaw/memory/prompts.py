@@ -8,6 +8,13 @@ Output ONLY valid JSON. Do not add commentary."""
 
 EXTRACTION_PROMPT = """Analyze this conversation and extract memorable information.
 
+先看最要紧的一条规则 —— **不要重复记录**：
+在输出任何一条之前，先对照 <existing-memories>。同一个事实**已经存在**时就不要再
+输出，哪怕措辞不同、哪怕这次说得更细。若这次对话给旧记忆**补充了细节/发生了更正**，
+就输出**一条**覆盖新旧内容（让它取代旧的，而不是并存）。
+反面教材（真实数据）：同一件"Web fetch / Lightpanda 在 JS 页面上不稳定"被记了三遍
+（措辞各异），于是每一轮对话都要把这三种说法一起塞进上下文——纯浪费。
+
 For each memory, output:
 - type: one of "semantic", "episodic", "procedural"
   - "semantic" — stable facts, preferences, knowledge (e.g. "项目目录在 ~/project")
@@ -29,7 +36,7 @@ Focus on:
 IGNORE:
 - Transient task details that won't recur
 - Generic programming knowledge the model already has
-- Anything already covered by the existing memories listed below
+- Anything already covered by the existing memories listed below（换措辞也算）
 
 <existing-memories>
 {existing_memories}
@@ -39,8 +46,8 @@ IGNORE:
 {conversation}
 </conversation>
 
-Output format (JSON array) — include AT LEAST ONE example of each type if the
-conversation contains a mix of facts, events, and patterns:
+Output format (JSON array). 只输出这次对话**真正产生**的类型——返回到只有一条、
+甚至返回 [] 都是正常的、正确的（宁少勿滥：多记一条，就要在之后每一轮里多注入一条）：
 [
   {{
     "type": "semantic",

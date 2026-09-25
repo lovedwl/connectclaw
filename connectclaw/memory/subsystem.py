@@ -45,6 +45,9 @@ class MemoryConfig:
     extract_interval_turns: int = 5
     max_context_tokens: int = 2000
     recency_threshold_days: int = 7
+    # 每轮注入几条记忆 / 相对相关性下限（见 RetrievalConfig 的说明）
+    recall_top_k: int = 8
+    similarity_keep_ratio: float = 0.85
     use_embeddings: bool = True
     dream_interval_hours: float = 24.0
     decay_halflife_days: float = 30.0
@@ -86,6 +89,8 @@ class MemorySubsystem:
             RetrievalConfig(
                 max_context_tokens=self._config.max_context_tokens,
                 recency_threshold_days=self._config.recency_threshold_days,
+                recall_top_k=self._config.recall_top_k,
+                similarity_keep_ratio=self._config.similarity_keep_ratio,
             ),
         )
 
