@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from connectclaw.injection import ContextState
@@ -21,6 +22,7 @@ from connectclaw.provider.types import Model
 
 from .consolidator import ConsolidationConfig, MemoryConsolidator
 from .extractor import extract_memories
+from .recall_eval import RecallEvalLogger
 from .retriever import MemoryRetriever, RetrievalConfig
 from .store import MemoryStore
 from .types import MemoryEntry, MemoryType
@@ -69,6 +71,10 @@ class MemorySubsystem:
         self._dream_task: asyncio.Task | None = None
         # 环境事实快照提供者（由 CodingAgent 接上）：做梦整理记忆时用来校验真伪
         self._env_facts_provider: Callable[[], str] | None = None
+        # 召回决策评估集（~/.connectclaw/memory_recall_eval.jsonl），fail-open
+        self._eval_logger = RecallEvalLogger(
+            Path(config.db_path).expanduser().parent / "memory_recall_eval.jsonl"
+        )
 
     @property
     def enabled(self) -> bool:
@@ -170,6 +176,13 @@ class MemorySubsystem:
             logger.debug("Memory: 注入增量 %d 条（召回 %d 条）", len(add_ops), len(items))
         if forget_ops:
             logger.debug("Memory: 告知遗忘 %d 条", len(forget_ops))
+        self._eval_logger.start(
+            query=query,
+            session_id=session_id,
+            conversation_key=conversation_key,
+            recalled_results=results,
+            injected_ids={op.get("id") for op in add_ops},
+        )
         return add_ops + forget_ops, results
 
     def _memory_alive(self, memory_id: str) -> bool:
@@ -216,10 +229,15 @@ class MemorySubsystem:
         if not self._initialized or not self._retriever or not recalled_results:
             return 0
         try:
-            return self._retriever.confirm_usage(reply_text, recalled_results)
+            confirmed: list[str] = []
+            n = self._retriever.confirm_usage(
+                reply_text, recalled_results, confirmed_out=confirmed
+            )
         except Exception as e:
             logger.debug("Memory: confirm_usage failed: %s", e)
             return 0
+        self._eval_logger.finalize(recalled_results, reply_text, confirmed)
+        return n
 
     # ── Extraction (called after each turn) ───────────────
 

@@ -46,3 +46,7 @@ class SearchResult:
     entry: MemoryEntry
     score: float
     detail_level: str = "summary"
+    # 原始信号（可观测 / 评估集回放用）：embedding 余弦与 BM25 归一化分。
+    # score 是融合后的综合分，回放实验需要拆开后的分量。
+    similarity: float = 0.0
+    bm25: float = 0.0

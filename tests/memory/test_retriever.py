@@ -220,3 +220,26 @@ def test_cap_is_configurable(store):
     for i in range(6):
         _make(store, f"条目{i}", [1.0, 0.0, 0.0])
     assert len(asyncio.run(r.retrieve("x", query_embedding=[1.0, 0.0, 0.0]))) <= 2
+
+
+# ── raw signals on SearchResult (评估集回放需要分量) ─────────
+
+def test_search_result_carries_raw_signals(store, retriever):
+    e = _make(store, "用户的项目叫 ConnectClaw", [0.6, 0.1, 0.1])
+    import asyncio
+    results = asyncio.run(retriever.retrieve("ConnectClaw", query_embedding=[0.6, 0.1, 0.1]))
+    hit = next(r for r in results if r.entry.id == e.id)
+    assert hit.similarity > 0
+    assert hit.bm25 >= 0
+
+
+def test_confirm_usage_exports_confirmed_ids(store, retriever):
+    e1 = _make(store, "用户喜欢深色主题", [1.0, 0.0, 0.0])
+    e2 = _make(store, "完全无关的记忆", [0.1, 0.9, 0.0])
+    import asyncio
+    results = asyncio.run(retriever.retrieve("深色主题", query_embedding=[1.0, 0.0, 0.0]))
+    confirmed: list[str] = []
+    n = retriever.confirm_usage("好的，已切换到深色主题", results, confirmed_out=confirmed)
+    assert n == len(confirmed)
+    assert e1.id in confirmed
+    assert e2.id not in confirmed

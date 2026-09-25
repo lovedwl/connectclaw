@@ -107,7 +107,13 @@ class MemoryRetriever:
             results = await self._retrieve_by_keywords(query)
         return results
 
-    def confirm_usage(self, reply_text: str, results: list[SearchResult]) -> int:
+    def confirm_usage(
+        self,
+        reply_text: str,
+        results: list[SearchResult],
+        *,
+        confirmed_out: list[str] | None = None,
+    ) -> int:
         """Mark memories actually used in the reply as accessed.
 
         A memory counts as "used" if a distinctive fragment of its content
@@ -115,6 +121,9 @@ class MemoryRetriever:
         one-word hit doesn't count (avoid spurious boosts on common words),
         and persona memories (always injected) are confirmed too — they were
         honored simply by the reply existing. Returns the count confirmed.
+
+        ``confirmed_out``: optional list receiving the confirmed memory ids
+        (评估集用它拿逐条标签；返回值保持 int 兼容旧调用方).
         """
         if not reply_text or not results:
             return 0
@@ -127,6 +136,8 @@ class MemoryRetriever:
             # persona block (score==1.0) is always-injected; count it as used.
             if r.score == 1.0 or _content_referenced(content, reply_lower):
                 self._store.touch(r.entry.id)
+                if confirmed_out is not None:
+                    confirmed_out.append(r.entry.id)
                 # Auto-boost importance for memories confirmed as useful. The
                 # 0.65 ceiling stays BELOW the persona threshold (0.85) — a
                 # repeatedly-confirmed memory must get ranked higher, but never
@@ -239,6 +250,8 @@ class MemoryRetriever:
                     entry=entry,
                     score=score,
                     detail_level=detail_level,
+                    similarity=similarity,
+                    bm25=bm_norm,
                 )
             )
 
@@ -280,6 +293,7 @@ class MemoryRetriever:
                     entry=entry,
                     score=score,
                     detail_level=detail_level,
+                    bm25=keyword_score,
                 )
             )
 
