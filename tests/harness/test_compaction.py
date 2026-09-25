@@ -15,11 +15,13 @@ from __future__ import annotations
 from connectclaw.agent.harness.compaction import (
     CompactionSettings,
     _cap_summary,
+    _extract_file_ops,
     _serialize,
     count_tokens,
     estimate_tokens,
     find_cut_point,
     prepare_compaction,
+    strip_tool_call_artifacts,
 )
 
 
@@ -214,3 +216,50 @@ def test_prepare_compaction_folds_previous_snapshot():
     assert prep is not None
     assert "远古记忆" in prep.merged_context, "上一轮的快照必须被折进新的合并结果"
     assert "远古记忆" in str(prep.context_state["memory"])
+
+
+# ── 5. Summarizer output sanitization & file-ops extraction ──
+
+
+def test_strip_tool_call_artifacts_dots_block():
+    # 2026-09-25 真实事故：dots3 总结模型吐了原生调用语法混进摘要
+    dirty = (
+        "\n\n\n\n<dots_function_call> <tool_calls> <invoke name=\"search\"> "
+        "<parameter name=\"query\">Jev TypeSafe AI RLCD training method how trained</parameter> "
+        "<parameter name=\"topn\">5</parameter> </invoke> </tool_calls>\n\nafter"
+    )
+    assert strip_tool_call_artifacts(dirty) == "after"
+
+
+def test_strip_tool_call_artifacts_unclosed_block():
+    # 没有闭合标签时切到字符串末尾，避免残段混进摘要
+    assert strip_tool_call_artifacts("summary text\n<tool_call>{\"name\": \"search\"}") == "summary text"
+
+
+def test_strip_tool_call_artifacts_keeps_normal_text():
+    text = "## Goal\nDo the thing.\n- step 1 <b>not a tool call</b>"
+    assert strip_tool_call_artifacts(text) == text
+
+
+def test_extract_file_ops_skips_none_and_empty_details():
+    # details=null 与 details={} 都不能产出字面量 "None" 条目
+    msgs = [
+        {"role": "toolResult", "tool_name": "web_search", "details": None},
+        {"role": "toolResult", "tool_name": "write", "details": {}},
+        {"role": "toolResult", "tool_name": "edit", "details": {"file_path": "/tmp/a.py"}},
+    ]
+    ops = _extract_file_ops(msgs)
+    assert ops.edited == {"/tmp/a.py"}
+    assert "None" not in ops.edited
+
+
+def test_extract_file_ops_routes_read_and_write():
+    msgs = [
+        {"role": "toolResult", "tool_name": "read", "details": {"path": "/tmp/in.txt"}},
+        {"role": "toolResult", "tool_name": "write", "details": {"path": "/tmp/out.txt"}},
+        {"role": "assistant", "details": {"path": "/tmp/nope"}},  # 非 toolResult 忽略
+        {"role": "toolResult", "tool_name": "web_search", "details": {"query": "x"}},  # 无路径忽略
+    ]
+    ops = _extract_file_ops(msgs)
+    assert ops.read == {"/tmp/in.txt"}
+    assert ops.edited == {"/tmp/out.txt"}
