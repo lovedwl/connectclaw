@@ -214,6 +214,46 @@ class AgentHarness:
         if self._agent:
             self._agent.set_system_prompt(prompt)
 
+    async def append_context(self, ops: list[dict[str, Any]], note: str = "") -> str:
+        """落盘一条结构化注入条目（本轮增量；渲染只发生在组装上下文那一刻）。"""
+        return await self._session.append_context(ops, note=note)
+
+    async def context_state(self) -> Any:
+        """当前上下文状态（结构化对象）——**从会话折叠出来**，不依赖任何内存账本。
+
+        这是"哪些已经注入过"的唯一事实来源：重启后重新折叠即可，所以不会出现
+        "进程一重启就把 persona/清单/召回整批重发一遍"。
+
+        折叠顺序跟消息层一致：遇到压缩条目就按 ``first_kept_entry_id`` 丢掉被压缩掉的
+        批次，并把压缩快照作为**基**放在保留区之前（文件里压缩条目排在保留区之后，
+        顺序照搬会算错）。
+        """
+        from connectclaw.injection import fold_ops
+
+        entries = await self._session.get_path_to_root()
+        collected: list[tuple[str, list[dict[str, Any]]]] = []
+
+        for entry in entries:
+            etype = getattr(entry, "type", "")
+            eid = getattr(entry, "id", "")
+
+            if etype == "context":
+                ops = list(getattr(entry, "ops", []) or [])
+                if ops:
+                    collected.append((eid, ops))
+
+            elif etype == "compaction":
+                snapshot = getattr(entry, "context_state", None)
+                batch = [snapshot] if snapshot else []
+                kept_from = getattr(entry, "first_kept_entry_id", "")
+                idx = next(
+                    (i for i, (cid, _) in enumerate(collected) if cid == kept_from), None
+                )
+                kept = collected[idx:] if idx is not None else []
+                collected = ([(eid, batch)] if batch else []) + kept
+
+        return fold_ops([ops for _, ops in collected])
+
     async def compact(self, custom_instructions: str | None = None) -> dict[str, Any] | None:
         """Trigger manual compaction using entry-based pipeline."""
         if not self._agent:
@@ -250,6 +290,7 @@ class AgentHarness:
             await self._session.append_compaction(
                 result.summary, result.first_kept_entry_id, result.tokens_before,
                 merged_context=result.merged_context,
+                context_state=result.context_state,
             )
 
         return {
@@ -319,6 +360,7 @@ class AgentHarness:
                     await self._session.append_compaction(
                         result.summary, result.first_kept_entry_id, result.tokens_before,
                         merged_context=result.merged_context,
+                        context_state=result.context_state,
                     )
                     if not prep.fits_budget:
                         logger.warning(

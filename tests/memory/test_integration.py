@@ -172,70 +172,85 @@ class TestSubsystemRecallConfirm:
         m._store.close() if m._store else None
 
     def test_recall_and_confirm(self, mem):
+        """recall 产出结构化 op，confirm_usage 照旧统计真实使用。"""
+        from connectclaw.injection import OP_MEMORY_ADD, ContextState
+
         for c in ["用户喜欢深色主题", "用户住在上海"]:
             mem._store.add(MemoryEntry(type=MemoryType.SEMANTIC, content=c))
-        text, results = asyncio.run(mem.recall("深色主题"))
-        assert "深色主题" in text
+
+        ops, results = asyncio.run(mem.recall("深色主题", state=ContextState()))
+        assert any(o["op"] == OP_MEMORY_ADD and "深色主题" in o["content"] for o in ops)
         for r in results:
             assert r.entry.access_count == 0
         n = mem.confirm_usage("好的，已切换到深色主题", results)
         assert n >= 1
 
     def test_recall_is_incremental(self, mem):
-        """按需注入：首轮完整注入，之后无变化就**不注入**，换会话则重新注入。
+        """按需注入：首轮完整产出 op，之后没变化就不产出；换会话（空状态）再来一遍。
 
-        2026-09-24 实测老设计：168 个用户轮 100% 带记忆块、同一句话平均被注入
-        34 次。增量注入就是为了消灭这种重复，同时保持历史纯追加（前缀缓存）。
+        2026-09-24 实测老设计：168 个用户轮 100% 带记忆块、同一句话平均被注入 34 次。
+        2026-09-25 改成结构化：状态由调用方**折叠会话**得到，所以进程重启也不会整批重发。
         """
+        from connectclaw.injection import ContextState, fold_ops
+
         for c in ["用户喜欢深色主题", "用户住在上海"]:
             mem._store.add(MemoryEntry(type=MemoryType.SEMANTIC, content=c, importance=0.9))
 
-        first, results = asyncio.run(mem.recall("深色主题", session_id="s1"))
-        assert "<remembered-context>" in first
-        assert "深色主题" in first
+        state = ContextState()
+        first, results = asyncio.run(mem.recall("深色主题", state=state))
+        assert first, "首轮要产出增量 op"
         assert results, "召回结果仍要给全量（confirm_usage 依赖它）"
 
-        second, results2 = asyncio.run(mem.recall("深色主题", session_id="s1"))
-        assert second == "", "条目没变化就不该重复注入"
-        assert results2, "但召回结果依然要返回"
+        state = fold_ops([first])          # 折叠进状态 = 等效于它已经落盘
+        second, results2 = asyncio.run(mem.recall("深色主题", state=state))
+        assert second == [], "条目没变化就不该再产出 op"
+        assert results2
 
-        # 新会话（例如 /new）→ 新账本 → 重新完整注入一次
-        fresh, _ = asyncio.run(mem.recall("深色主题", session_id="s2"))
-        assert "<remembered-context>" in fresh
+        # 空状态（= 新会话）→ 重新产出一次
+        fresh, _ = asyncio.run(mem.recall("深色主题", state=ContextState()))
+        assert fresh
 
     def test_persona_is_incremental_too(self, mem):
-        """persona 保持"每轮都参与召回"，但注入同样走增量——不该每轮重发。
+        """persona 保持"每轮都参与召回"，但注入同样走增量——不该每轮重发。"""
+        from connectclaw.injection import ContextState, fold_ops
 
-        老设计实测：称呼/语言这类 persona 条目在 168/168 轮里被重复注入。
-        """
         mem._store.add(MemoryEntry(type=MemoryType.SEMANTIC, content="用户要求全程中文",
                                    importance=0.95))
-        first, results = asyncio.run(mem.recall("随便问一句", session_id="s1"))
-        assert "全程中文" in first, "persona 首轮要注入"
+        first, results = asyncio.run(mem.recall("随便问一句", state=ContextState()))
+        assert any("全程中文" in o.get("content", "") for o in first), "persona 首轮要产出"
         assert any("全程中文" in r.entry.content for r in results), "persona 仍参与召回"
 
-        again, _ = asyncio.run(mem.recall("换一句问题", session_id="s1"))
-        assert again == "", "persona 没变化就不该再注入一遍"
+        state = fold_ops([first])
+        again, _ = asyncio.run(mem.recall("换一句问题", state=state))
+        assert again == [], "persona 没变化就不该再发一遍"
 
     def test_recall_reinjects_changed_item(self, mem):
-        entry_id = mem._store.add(MemoryEntry(type=MemoryType.SEMANTIC, content="当前模型是 A"))
-        asyncio.run(mem.recall("当前模型", session_id="s1"))
-        assert asyncio.run(mem.recall("当前模型", session_id="s1"))[0] == ""
+        from connectclaw.injection import ContextState, fold_ops
 
-        # 内容变了（= 被更正）→ 必须重新注入
+        entry_id = mem._store.add(MemoryEntry(type=MemoryType.SEMANTIC, content="当前模型是 A"))
+        ops, _ = asyncio.run(mem.recall("当前模型", state=ContextState()))
+        assert any("当前模型是 A" in o.get("content", "") for o in ops)
+
+        state = fold_ops([ops])
+        assert asyncio.run(mem.recall("当前模型", state=state))[0] == []
+
         mem._store.update(MemoryEntry(id=entry_id, type=MemoryType.SEMANTIC,
                                       content="当前模型是 B", importance=0.9))
-        changed, _ = asyncio.run(mem.recall("当前模型", session_id="s1"))
-        assert "当前模型是 B" in changed
+        changed, _ = asyncio.run(mem.recall("当前模型", state=state))
+        assert any("当前模型是 B" in o.get("content", "") for o in changed), "内容被更正必须重发"
 
     def test_recall_reports_forgotten_item(self, mem):
+        from connectclaw.injection import OP_MEMORY_FORGET, ContextState, fold_ops
+
         entry_id = mem._store.add(MemoryEntry(type=MemoryType.SEMANTIC, content="临时偏好：用红色"))
-        first, _ = asyncio.run(mem.recall("临时偏好", session_id="s1"))
-        assert "用红色" in first
+        ops, _ = asyncio.run(mem.recall("临时偏好", state=ContextState()))
+        assert any("用红色" in o.get("content", "") for o in ops)
 
         mem._store.delete(entry_id)          # /forget（软删）
-        again, _ = asyncio.run(mem.recall("临时偏好", session_id="s1"))
-        assert "已遗忘" in again and "用红色" in again
+        state = fold_ops([ops])
+        after, _ = asyncio.run(mem.recall("临时偏好", state=state))
+        assert [o["op"] for o in after] == [OP_MEMORY_FORGET]
+        assert after[0]["id"] == entry_id
 
     def test_clear_all(self, mem):
         for c in ["事实A", "事实B"]:

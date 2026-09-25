@@ -62,8 +62,8 @@ class Retriever:
     async def retrieve_formatted(self, query: str) -> str:
         """Retrieve chunks formatted as a context block. Returns '' if empty.
 
-        Wrapped in a tag so the block is identifiable: history copies get
-        downgraded to a placeholder (see connectclaw/injection.py).
+        Wrapped in a tag so the block is identifiable. (RAG 目前不参与注入：
+        需要时按 connectclaw/injection.py 的 op 模型接入，不要退回拼文本。)
         """
         chunks = await self.retrieve(query)
         if not chunks:

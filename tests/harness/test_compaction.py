@@ -93,24 +93,6 @@ def test_serialize_image_placeholder():
     assert "look at this" in out
 
 
-def test_serialize_strips_injection_before_truncating():
-    """注入块必须在 300 字截断**之前**剥掉。
-
-    注入常有 1000~2000 字，而每行只留 300 字——不剥的话用户每一轮真正说的话
-    都被切在截断线之外，摘要里只剩记忆/清单噪音。
-    """
-    injection = (
-        "<remembered-context>\n"
-        + "\n".join(f"- [2026-07-27 · 1.00] 记忆条目{i} " + "长内容" * 60 for i in range(10))
-        + "\n</remembered-context>"
-    )
-    msgs = [{"role": "user", "content": f"{injection}\n\n帮我查查jev的情况"}]
-    out = _serialize(msgs)
-
-    assert "帮我查查jev的情况" in out      # 用户真话留下来了
-    assert "记忆条目0" not in out        # 注入噪音不再占掉这条的 300 字
-
-
 # ── 2. Benefit guard ──────────────────────────────────────────
 
 
@@ -181,50 +163,54 @@ def test_serialize_without_budget_keeps_all():
 
 # ── 压缩时 squash 注入（git 合并语义）────────────────────────
 
-def _user_with_injection(text: str, *, ts: str = "") -> dict:
-    return {"type": "message", "id": f"u{abs(hash(text)) % 10000}",
-            "timestamp": ts or "2026-09-01T00:00:00Z",
-            "message": {"role": "user", "content": text}}
+def _turn(lines: str, *, ts: str) -> list[dict]:
+    """一轮：`context` 条目（结构化 op）+ 用户消息（长文本，让窗口真的需要压缩）。
+
+    新格式下注入是独立条目、用户消息是干净的——所以窗口大小由消息决定，
+    op 只是旁边挂着的一批增量。
+    """
+    h = abs(hash(lines + ts)) % 100000
+    return [
+        {"type": "context", "id": f"c{h}", "parent_id": None, "timestamp": ts,
+         "ops": [{"op": "memory_add", "id": f"m{h}", "line": lines, "content": lines}],
+         "note": "增量"},
+        {"type": "message", "id": f"u{h}", "parent_id": None, "timestamp": ts,
+         "message": {"role": "user", "content": "继续" + "长内容" * 120}},
+    ]
 
 
-def _injected(*lines: str, user_text: str = "问题") -> str:
-    block = "<remembered-context>\n(header)\n" + "\n".join(lines) + "\n</remembered-context>"
-    return block + "\n\n" + user_text
+def _region() -> list[dict]:
+    rows: list[dict] = [*_turn("- [2026-07-27 · 1.00] 甲", ts="2026-09-01T00:00:00Z")]
+    for i in range(40):
+        rows.extend(_turn(f"- [2026-08-01 · 0.80] 记忆{i}", ts=f"2026-09-01T00:{i:02d}:30Z"))
+    return rows
 
 
 def test_prepare_compaction_squashes_injections():
-    """区域内散落的注入块要合并成一个当前状态块，随摘要进入上下文。"""
-    rows = [
-        _user_with_injection(_injected("- [2026-07-27 · 1.00] 甲")),
-        {"type": "message", "id": "a1", "timestamp": "2026-09-01T00:00:01Z",
-         "message": {"role": "assistant", "content": [{"type": "text", "text": "好的"}]}},
-    ]
-    # 塞满足够多的内容让它超过 keep 窗口、真的需要压缩
-    for i in range(40):
-        rows.append(_user_with_injection(
-            _injected(f"- [2026-08-01 · 0.80] 记忆{i}", user_text="继续" + "长内容" * 80),
-            ts=f"2026-09-01T00:{i:02d}:00Z",
-        ))
-    prep = prepare_compaction(rows, CompactionSettings(), context_window=32768)
+    """区域内散落的注入 op 要合并成一个当前状态（结构化快照 + 冻结文本），随摘要进上下文。"""
+    prep = prepare_compaction(_region(), CompactionSettings(), context_window=32768)
     assert prep is not None
     assert "<remembered-context>" in prep.merged_context
     assert "甲" in prep.merged_context
     assert "压缩后合并的记忆状态" in prep.merged_context
+    # 结构化快照同时产出（后续折叠不必再解析文本）
+    assert prep.context_state is not None
+    assert prep.context_state["op"] == "state_snapshot"
+    assert "甲" in str(prep.context_state["memory"])
 
 
-def test_prepare_compaction_folds_previous_merged_context():
-    """上一轮压缩的合并块是当前上下文的一部分，这次压缩必须把它并进来。"""
-    previous = "<remembered-context>\n(header)\n- [2026-07-01 · 1.00] 远古记忆\n</remembered-context>"
-    rows = [
-        {"type": "compaction", "id": "c1", "timestamp": "2026-08-01T00:00:00Z",
-         "summary": "早期摘要", "first_kept_entry_id": "u-first",
-         "tokens_before": 1000, "merged_context": previous},
-    ]
-    for i in range(40):
-        rows.append(_user_with_injection(
-            _injected(f"- [2026-08-01 · 0.80] 记忆{i}", user_text="继续" + "长内容" * 80),
-            ts=f"2026-09-01T00:{i:02d}:00Z",
-        ))
+def test_prepare_compaction_folds_previous_snapshot():
+    """上一轮压缩的快照是当前上下文的一部分，这次压缩必须把它并进来。"""
+    snapshot = {"op": "state_snapshot",
+                "memory": {"m1": {"line": "- [2026-07-01 · 1.00] 远古记忆", "content": "远古记忆"}},
+                "catalog": ""}
+    rows: list[dict] = [{
+        "type": "compaction", "id": "cp0", "timestamp": "2026-08-01T00:00:00Z",
+        "summary": "早期摘要", "first_kept_entry_id": "u-first",
+        "tokens_before": 1000, "merged_context": "x", "context_state": snapshot,
+    }]
+    rows.extend(_region())
     prep = prepare_compaction(rows, CompactionSettings(), context_window=32768)
     assert prep is not None
-    assert "远古记忆" in prep.merged_context, "上一轮的合并块必须被折进新的合并结果"
+    assert "远古记忆" in prep.merged_context, "上一轮的快照必须被折进新的合并结果"
+    assert "远古记忆" in str(prep.context_state["memory"])
