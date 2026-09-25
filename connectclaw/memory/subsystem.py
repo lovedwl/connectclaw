@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from connectclaw.injection import LedgerRegistry
+from connectclaw.injection import ContextState
 from connectclaw.logging import get_logger
 from connectclaw.provider.types import Model
 
@@ -67,8 +67,6 @@ class MemorySubsystem:
         self._turn_counter: dict[str, int] = {}
         self._last_dream_time: float = 0.0
         self._dream_task: asyncio.Task | None = None
-        # 按需注入账本：记住每个会话已经注入过哪些记忆条目（见 connectclaw/injection.py）
-        self._ledgers = LedgerRegistry()
         # 环境事实快照提供者（由 CodingAgent 接上）：做梦整理记忆时用来校验真伪
         self._env_facts_provider: Callable[[], str] | None = None
 
@@ -128,13 +126,14 @@ class MemorySubsystem:
         *,
         conversation_key: str = "",
         session_id: str = "",
-    ) -> tuple[str, list]:
-        """按需注入：只返回**增量**（新增 / 变化 / 已遗忘）。
+        state: Any = None,
+    ) -> tuple[list[dict[str, Any]], list]:
+        """按需注入：只产出**增量 op**（新增 / 变化 / 已遗忘）。
 
-        Returns ``(formatted_text, recalled_results)``. 首次（或新会话/重启后）返回
-        完整块；之后只有记忆条目真的变了才返回内容，**没变化就返回空串**。这样历史
-        保持纯追加，前缀缓存不会因为改写历史而失效（见 connectclaw/injection.py 的
-        实测），也不会把同一句话重复注入几十遍。
+        Returns ``(ops, recalled_results)``：ops 是结构化操作（`memory_add` /
+        `memory_forget`），调用方把它们作为一条 `context` 条目落盘，文本只在发给 API
+        时渲染。``state`` 是当前的上下文状态（由 harness 折叠会话得到）；首次/新会话/
+        重启后它自然是空的，于是完整注入一遍；之后只有条目真的变了才产出 op。
 
         ``recalled_results`` 始终是本次召回的全量结果，仍应交给 :meth:`confirm_usage`
         统计真实使用情况。
@@ -162,19 +161,24 @@ class MemorySubsystem:
 
         # 增量比对要在"召回为空"时也照跑：条目被 /forget 删掉后本轮可能召回不到
         # 任何东西，但"它没了"这件事必须告诉模型（少召回那一侧）。
-        ledger = self._ledgers.for_session(session_id or conversation_key or "default")
+        # 增量判断在**折叠出来的状态对象**上做（不再是内存账本——账本一重启就丢，
+        # 于是整批重发）。状态由调用方折叠会话得到，这里只做对象层面的 diff。
+        state = state or ContextState()
         items = self._retriever.render_item_lines(results)
-        new_lines, forgotten = ledger.memory_delta(items, alive=self._memory_alive)
-        text = self._retriever.format_block(new_lines + forgotten, incremental=True)
-        if new_lines:
-            logger.debug("Memory: 注入增量 %d 条（召回 %d 条）", len(new_lines), len(items))
-        if forgotten:
-            logger.debug("Memory: 告知遗忘 %d 条", len(forgotten))
-        return text, results
+        add_ops, forget_ops = state.memory_delta(items, alive=self._memory_alive)
+        if add_ops:
+            logger.debug("Memory: 注入增量 %d 条（召回 %d 条）", len(add_ops), len(items))
+        if forget_ops:
+            logger.debug("Memory: 告知遗忘 %d 条", len(forget_ops))
+        return add_ops + forget_ops, results
 
     def _memory_alive(self, memory_id: str) -> bool:
-        """条目是否仍可注入：库里还在、且没被软删（/forget 把 strength 置 0）。"""
-        if not self._store:
+        """条目是否仍可注入：库里还在、且没被软删（/forget 把 strength 置 0）。
+
+        ``legacy:`` 前缀是旧格式迁移时生成的合成 id（见
+        scripts/migrate_sessions_to_structured.py），核不到库里，一律当"还在"。
+        """
+        if memory_id.startswith("legacy:") or not self._store:
             return True
         entry = self._store.get(memory_id)
         if entry is None:
@@ -199,10 +203,6 @@ class MemorySubsystem:
         except Exception as e:  # pragma: no cover - 防御性
             logger.debug("Memory: 环境事实采集失败: %s", e)
             return ""
-
-    def forget_session(self, session_id: str) -> None:
-        """丢弃某会话的注入账本（历史被压缩重写后调用，让它重新完整注入一次）。"""
-        self._ledgers.drop(session_id)
 
     def confirm_usage(self, reply_text: str, recalled_results: list) -> int:
         """Mark memories actually reflected in ``reply_text`` as accessed.

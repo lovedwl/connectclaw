@@ -10,6 +10,11 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from connectclaw.injection import (
+    FULL_HEADER,
+    INCREMENTAL_HEADER,
+    render_memory_block,
+)
 from connectclaw.logging import get_logger
 
 from .store import MemoryStore
@@ -421,21 +426,10 @@ class MemoryRetriever:
         return out
 
     def format_block(self, lines: list[str], *, incremental: bool = False) -> str:
-        """把若干条目行包成一个可识别的注入块（``incremental`` 用增量表头）。"""
-        if not lines:
-            return ""
-        stamp_hint = (
-            "每条前缀 [日期 · 强度]：日期是记录时间，强度 0~1 是可信度——"
-            "同主题说法冲突时以日期较新者为准，强度低者存疑"
+        """把若干条目行包成一个注入块。文本格式只在 injection 里定义一份。"""
+        return render_memory_block(
+            lines, header=INCREMENTAL_HEADER if incremental else FULL_HEADER
         )
-        if incremental:
-            header = (
-                f"(记忆更新：以下只列出本次新增或发生变化的条目，未列出的按更早轮次里的"
-                f"说法沿用。{stamp_hint})"
-            )
-        else:
-            header = f"(Things you know from past interactions. {stamp_hint})"
-        return "\n".join(["<remembered-context>", header, *lines, "</remembered-context>"])
 
     def _format_for_prompt(self, results: list[SearchResult]) -> str:
         """完整块（首次注入 / 调试用）。

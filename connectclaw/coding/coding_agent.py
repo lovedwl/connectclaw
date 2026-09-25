@@ -23,7 +23,6 @@ from connectclaw.agent.types import AgentTool
 from connectclaw.channel.capabilities import create_send_file_tool
 from connectclaw.channel.feishu import FeishuChannel
 from connectclaw.config import Config
-from connectclaw.injection import LedgerRegistry
 from connectclaw.memory import MemorySubsystem
 from connectclaw.memory.subsystem import MemoryConfig as MemCfg
 from connectclaw.model_registry import ModelProfile, ModelsStore, mask_key
@@ -88,8 +87,6 @@ class CodingAgent:
             config = Config.load()
 
         self._config = config
-        # 按需注入账本（清单那一半；记忆那一半在 MemorySubsystem 里，同样按会话存）
-        self._injection_ledgers = LedgerRegistry()
         self._channel = channel
 
         # Build model
@@ -385,13 +382,18 @@ class CodingAgent:
         #
         # 因此**绝不能改写历史消息**：曾经把历史里的注入块降级成占位符以清理窗口，
         # 结果前缀在"上一轮"处就断开、每轮多付一整轮的未命中（实测平均命中率
-        # 77%→61%，短会话 71%→10%）。正确做法是**按需注入**——只在内容真变化时
-        # 才产生新的注入块（见 connectclaw/injection.py 的账本），历史保持纯追加。
+        # 77%→61%，短会话 71%→10%）。正确做法是**结构化 + 按需注入**——注入是独立的
+        # `context` 条目，只在内容真变化时才产出新的 op（见 connectclaw/injection.py），
+        # 历史保持纯追加。
         # RAG 注入已按用户决定移除（子系统与 [rag] 配置保留但不再参与注入）。
-        memory_context, recalled_memories = await self._memory.recall(
+        # 当前上下文状态：从会话折叠出来（结构化对象）。这是"哪些已经注入过"的
+        # 唯一事实来源——重启后重新折叠即可，不再有"内存账本一丢就整批重发"的问题。
+        context_state = await harness.context_state()
+        mem_ops, recalled_memories = await self._memory.recall(
             text,
             conversation_key=conversation_key,
             session_id=harness.session.session_id,
+            state=context_state,
         )
 
         # System prompt stays STABLE (no per-turn data) to preserve prefix cache.
@@ -403,14 +405,14 @@ class CodingAgent:
             key = self._config.llm.api_key
             logger.debug("[CODING] api_key=%s model=%s", "***" if key else "MISSING", self._model.id)
 
-            # Catalog 只在变化时注入（少变：实测 168 轮里只有 13 个版本）。
-            agents_catalog = self._catalog_delta(harness.session.session_id)
-            context_blocks = [c for c in (memory_context, agents_catalog) if c]
-            prompt_text = text
-            if context_blocks:
-                prompt_text = "\n\n".join(context_blocks) + "\n\n" + text
+            # agents/工具清单同样只在变化时产出 op（少变：实测 168 轮只有 13 个版本）。
+            op_list = mem_ops + context_state.catalog_delta(self._agents_tool.build_catalog())
+            if op_list:
+                # 结构化落盘；渲染只发生在"发给模型那一刻"（build_session_context）。
+                await harness.append_context(op_list, note="增量")
 
-            result = await harness.prompt(prompt_text, images=images)
+            # 用户消息从此**只装用户真正说的话**（注入是独立的结构化条目）。
+            result = await harness.prompt(text, images=images)
             if result is None:
                 return "未生成任何回复。"
 
@@ -807,18 +809,6 @@ class CodingAgent:
 
         lines.append(f"- 采集时间：{time.strftime('%Y-%m-%d %H:%M')}")
         return "\n".join(lines)
-
-    def _catalog_delta(self, session_id: str) -> str:
-        """agents/工具清单只在**变化**时注入（首次会注入一遍）。
-
-        清单很少变（实测 168 轮里只有 13 个版本、最常见那版重复 63 次），
-        每轮重发纯属浪费 token 与窗口。
-        """
-        ledger = self._injection_ledgers.for_session(session_id)
-        catalog = ledger.catalog_delta(self._agents_tool.build_catalog())
-        if catalog:
-            logger.debug("[CODING] agents/工具清单有变化，注入 %d 字", len(catalog))
-        return catalog
 
     async def _get_or_create_harness(self, key: str, tools: list[AgentTool] | None = None) -> AgentHarness:
         if tools is None:

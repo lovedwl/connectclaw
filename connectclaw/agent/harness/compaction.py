@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from connectclaw.injection import merge_injections, strip_injections
+from connectclaw.injection import fold_ops
 from connectclaw.provider.stream import stream_simple
 from connectclaw.provider.tokenizer import count_tokens, image_block_cost  # noqa: F401 (count_tokens re-exported for tests)
 from connectclaw.provider.types import Context, Model, UserMessage
@@ -292,20 +292,6 @@ class FileOperations:
     edited: set[str] = field(default_factory=set)
 
 
-def _message_text(msg: Any) -> str:
-    """取消息里的纯文本（str 或 text 块列表）——用于提取注入块。"""
-    content = msg.get("content", "") if isinstance(msg, dict) else ""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "\n".join(
-            b.get("text", "")
-            for b in content
-            if isinstance(b, dict) and b.get("type") in ("text", None)
-        )
-    return str(content) if content else ""
-
-
 def _extract_file_ops(messages: list[Any]) -> FileOperations:
     """Extract read/modified file paths from messages."""
     ops = FileOperations()
@@ -469,8 +455,9 @@ class CompactionPreparation:
     tokens_before: int = 0
     previous_summary: str | None = None
     file_ops: FileOperations = field(default_factory=FileOperations)
-    # 区域内注入块 squash 成的"当前状态"块（见 connectclaw/injection.py）
+    # 区域内注入块 squash 成的"当前状态"（见 connectclaw/injection.py）
     merged_context: str = ""
+    context_state: dict | None = None
     # ── Hardening metadata ──
     liberated_tokens: int = 0          # estimated tokens condensed into summary
     post_compact_estimate: int = 0     # estimated kept + summary tokens after compaction
@@ -505,14 +492,14 @@ def prepare_compaction(
     # Find previous compaction boundary
     prev_compaction_idx = -1
     previous_summary = None
-    previous_merged_context = ""
+    previous_snapshot: dict | None = None
     for i in range(len(entries) - 1, -1, -1):
         if entries[i].get("type") == "compaction":
             prev_compaction_idx = i
             previous_summary = entries[i].get("summary", "")
             # 上一轮压缩 squash 出来的状态块：它是当前上下文的一部分，而这次压缩
             # 正要把它替换掉，所以必须并进新的合并结果里。
-            previous_merged_context = entries[i].get("merged_context", "") or ""
+            previous_snapshot = entries[i].get("context_state") or None
             break
 
     boundary_start = 0
@@ -588,15 +575,21 @@ def prepare_compaction(
     # File operations
     file_ops = _extract_file_ops(msgs_to_summarize)
 
-    # Squash the injection blocks scattered across the compacted region into ONE
-    # "current state" block (git-merge semantics). The previous compaction's
-    # merged block is folded in too: it represents injections from history that
-    # this compaction is about to replace. Without this, compaction would silently
-    # drop the model's memories while the injection ledger still believed they
-    # were in context.
-    merged_context = merge_injections(
-        [_message_text(m) for m in msgs_to_summarize] + [previous_merged_context or ""]
-    )
+    # Squash the injections scattered across the compacted region into ONE
+    # "current state"（git 合并语义）：区域内每条 `context` 条目就是一批 op，直接折叠。
+    # 上一个压缩的快照也要并进来——它代表这次压缩正要替换掉的那段历史。
+    region_batches: list[list[dict]] = []
+    for e in entries[boundary_start:history_end]:
+        if e.get("type") == "context":
+            ops = list(e.get("ops") or [])
+            if ops:
+                region_batches.append(ops)
+    if previous_snapshot:
+        region_batches.insert(0, [previous_snapshot])
+
+    state = fold_ops(region_batches)
+    merged_ops = state.snapshot_ops()
+    merged_context = state.render(merged_ops, incremental=False)
 
     return CompactionPreparation(
         first_kept_entry_id=first_kept_id,
@@ -610,6 +603,7 @@ def prepare_compaction(
         post_compact_estimate=post_est,
         fits_budget=(budget is None) or (post_est <= budget),
         merged_context=merged_context,
+        context_state=merged_ops[0] if merged_ops else None,
     )
 
 
@@ -693,6 +687,7 @@ async def compact(
             "fits_budget": prep.fits_budget,
         },
         merged_context=prep.merged_context,
+        context_state=prep.context_state,
     )
 
 
@@ -778,10 +773,6 @@ def _serialize(messages: list[Any], max_tokens: int | None = None) -> str:
                     for b in images
                 )
             content = text
-        if role == "user" and isinstance(content, str):
-            # 必须在下面那句 300 字截断**之前**剥掉注入块：注入常有 1000~2000 字，
-            # 直接截断会把用户真正说的话整个切掉，摘要里只剩记忆/清单噪音。
-            content = strip_injections(content)
         command = msg.get("command", "")
         if command:
             content = f"[bash: {command[:80]}] → {content[:200]}"

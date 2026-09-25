@@ -17,6 +17,7 @@ import aiofiles
 import aiofiles.os
 
 from connectclaw.agent.types import CompactionSummaryMessage
+from connectclaw.injection import render_ops
 from connectclaw.provider.types import Message, UserMessage, normalize_message
 
 
@@ -41,9 +42,27 @@ class CompactionEntry:
     summary: str = ""
     first_kept_entry_id: str = ""
     tokens_before: int = 0
-    # 被压缩的那段历史里散落的注入块，**squash 成一个当前状态块**后存在这里
-    # （git 合并语义）。见 connectclaw/injection.py 的 merge_injections。
+    # 被压缩的那段历史里散落的注入，**squash 成一个当前状态**后存在这里（git 合并语义）。
+    # merged_context 是它的文本渲染（发给模型用）；context_state 是结构化快照
+    # （后续折叠/合并用，避免再回去解析文本）。
     merged_context: str = ""
+    context_state: dict[str, Any] | None = None
+
+
+@dataclass
+class ContextEntry:
+    """一轮的注入上下文——**结构化 op**，不再拼进用户消息的文本里。
+
+    用户 2026-09-25 定的架构：状态用 Python 对象维护，文本只在发给 API 那一刻渲染。
+    op 里带着**当时渲染好的行文本**（见 connectclaw/injection.py），所以历史轮次的
+    渲染是冻结的——上游按请求前缀缓存，历史一旦被改写，命中就在改写点断开。
+    """
+    type: Literal["context"] = "context"
+    id: str = ""
+    parent_id: str | None = None
+    timestamp: str = ""
+    ops: list[dict[str, Any]] = field(default_factory=list)
+    note: str = ""   # "增量" / "压缩快照"，仅供人看
 
 
 @dataclass
@@ -66,7 +85,9 @@ class BranchSummaryEntry:
     from_id: str = ""
 
 
-SessionEntry = MessageEntry | CompactionEntry | ModelChangeEntry | BranchSummaryEntry
+SessionEntry = (
+    MessageEntry | CompactionEntry | ModelChangeEntry | BranchSummaryEntry | ContextEntry
+)
 
 
 # ── Session Header ─────────────────────────────────────────────
@@ -132,6 +153,8 @@ class JsonlSessionStorage:
                     storage._entries.append(ModelChangeEntry(**data))
                 elif entry_type == "branch_summary":
                     storage._entries.append(BranchSummaryEntry(**data))
+                elif entry_type == "context":
+                    storage._entries.append(ContextEntry(**data))
 
         for entry in storage._entries:
             storage._by_id[entry.id] = entry
@@ -187,9 +210,22 @@ class JsonlSessionStorage:
         await self.append_entry(entry)
         return entry_id
 
+    async def append_context(self, ops: list[dict[str, Any]], note: str = "") -> str:
+        """追加一条结构化上下文条目（本轮新增/更新的 op）。"""
+        entry_id = str(uuid.uuid4()).replace("-", "")[:12]
+        entry = ContextEntry(
+            id=entry_id,
+            parent_id=self._current_leaf_id,
+            timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            ops=list(ops),
+            note=note,
+        )
+        await self.append_entry(entry)
+        return entry_id
+
     async def append_compaction(
         self, summary: str, first_kept_entry_id: str, tokens_before: int,
-        merged_context: str = "",
+        merged_context: str = "", context_state: dict[str, Any] | None = None,
     ) -> str:
         """Append a compaction entry.
 
@@ -206,6 +242,7 @@ class JsonlSessionStorage:
             first_kept_entry_id=first_kept_entry_id,
             tokens_before=tokens_before,
             merged_context=merged_context,
+            context_state=context_state,
         )
         await self.append_entry(entry)
         return entry_id
@@ -431,6 +468,13 @@ def build_session_context(entries: list[SessionEntry]) -> SessionContext:
                 # Legacy compaction without first_kept_entry_id — clear all
                 messages = prefix
                 entry_to_idx = {}
+        elif entry.type == "context":
+            # 结构化 op → 文本，**只在这一步**渲染；op 里的行文本是当时冻结的，
+            # 所以重复组装得到的字节相同（前缀缓存安全）。
+            entry_to_idx[entry.id] = len(messages)
+            rendered = render_ops(getattr(entry, "ops", []) or [])
+            if rendered:
+                messages.append(UserMessage(content=rendered, timestamp=time.time() * 1000))
         elif entry.type == "branch_summary":
             branch_summaries.append(entry.summary)
 
