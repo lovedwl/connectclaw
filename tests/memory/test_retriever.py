@@ -172,3 +172,51 @@ def test_freshness_stamp_needs_created_at():
     stamp = _freshness_stamp(MemoryEntry(content="x", created_at=1_700_000_000, strength=None))
     assert stamp.startswith("[") and stamp.endswith("] ")
     assert "1.00" in stamp  # strength 缺失时按 1.0，不编造别的数
+
+
+# ── 召回"多余"的两道闸（2026-09-25 用户反馈后加）──────────────
+#
+# 实测：本机 BGE 中文余弦挤在 0.5~0.85 窄带里——无关项也有 0.52，而明显同一件事的
+# 两种说法才 0.855。绝对阈值卡不出边界（min_similarity=0.48 形同虚设，一轮放 15 条）。
+# 于是改成：① 跟本轮 top 比（低于 top×keep_ratio 丢掉，BM25 精确命中豁免）；
+# ② 条数硬上限。
+
+def test_relative_floor_drops_weak_hits(store, retriever):
+    import asyncio
+    _make(store, "强命中", [1.0, 0.0, 0.0])              # sim 1.00 → 保
+    _make(store, "次强命中", [0.9, 0.4359, 0.0])          # sim ≈0.90 → 保
+    _make(store, "边上但不相关", [0.7, 0.7141, 0.0])      # sim ≈0.70 → 丢（<0.85）
+
+    results = asyncio.run(retriever.retrieve("x", query_embedding=[1.0, 0.0, 0.0]))
+    contents = [r.entry.content for r in results]
+    assert "强命中" in contents and "次强命中" in contents
+    assert "边上但不相关" not in contents
+
+
+def test_bm25_exact_hit_survives_relative_floor(store, retriever):
+    """精确词命中的低相似度条目要留下——BM25 是特意融合的另一路信号。"""
+    import asyncio
+    _make(store, "ConnectClaw 的架构说明", [0.2, 0.9, 0.0])   # 低相似但含精确词
+    _make(store, "完全无关的高相似内容", [1.0, 0.0, 0.0])
+
+    results = asyncio.run(retriever.retrieve("ConnectClaw", query_embedding=[1.0, 0.0, 0.0]))
+    contents = [r.entry.content for r in results]
+    assert "ConnectClaw 的架构说明" in contents
+
+
+def test_recall_cap_limits_items_per_turn(store, retriever):
+    import asyncio
+    for i in range(12):
+        _make(store, f"记忆{i}", [1.0, 0.0, 0.0])
+    results = asyncio.run(retriever.retrieve("x", query_embedding=[1.0, 0.0, 0.0]))
+    assert len(results) <= retriever._config.recall_top_k
+    assert retriever._config.recall_top_k < 12
+
+
+def test_cap_is_configurable(store):
+    from connectclaw.memory.retriever import MemoryRetriever, RetrievalConfig
+    import asyncio
+    r = MemoryRetriever(store, RetrievalConfig(min_similarity=0.0, min_score=0.0, recall_top_k=2))
+    for i in range(6):
+        _make(store, f"条目{i}", [1.0, 0.0, 0.0])
+    assert len(asyncio.run(r.retrieve("x", query_embedding=[1.0, 0.0, 0.0]))) <= 2

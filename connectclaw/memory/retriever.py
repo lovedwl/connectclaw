@@ -45,13 +45,20 @@ def _content_referenced(content: str, reply_lower: str, *, min_chars: int = 4) -
 class RetrievalConfig:
     max_context_tokens: int = 2000
     recency_threshold_days: int = 7
-    recent_detail_top_k: int = 5
-    distant_summary_top_k: int = 10
+    recent_detail_top_k: int = 3
+    distant_summary_top_k: int = 5
     semantic_weight: float = 0.5
     recency_weight: float = 0.25
     importance_weight: float = 0.15
     strength_weight: float = 0.1
     min_score: float = 0.2
+    # ── 召回"多余"的两道闸（2026-09-25 用户反馈"召回得有点多余"后加）──
+    # 实测：本机 BGE 中文余弦挤在 0.5~0.85 的窄带里——无关项也有 0.52，而明显是
+    # 同一件事的两种说法才 0.855。所以**绝对阈值卡不出边界**（min_similarity=0.48
+    # 形同虚设，一轮能放进 15 条）。改成跟本轮最佳命中比：低于 top×keep_ratio 的丢掉。
+    similarity_keep_ratio: float = 0.85
+    # 每轮注入的记忆条数硬上限（原来由 recent+distant 决定的 15 条，太多）。
+    recall_top_k: int = 8
     # Hard cosine-similarity gate for embedding retrieval. Below this, a memory
     # is irrelevant regardless of recency/importance/strength. Measured on
     # BGE-base-zh-v1.5 (zh, 2026-09): relevant hits land 0.50–0.55, unrelated
@@ -201,6 +208,8 @@ class MemoryRetriever:
 
         now = time.time()
         results: list[SearchResult] = []
+        sims: dict[str, float] = {}
+        bm_hits: set[str] = set()
 
         for entry, similarity in raw:
             if similarity < self._config.min_similarity:
@@ -217,6 +226,9 @@ class MemoryRetriever:
                 continue
 
             detail_level = self._decide_detail_level(entry, now)
+            sims[entry.id] = similarity
+            if bm_norm > 0:
+                bm_hits.add(entry.id)
             results.append(
                 SearchResult(
                     entry=entry,
@@ -224,6 +236,19 @@ class MemoryRetriever:
                     detail_level=detail_level,
                 )
             )
+
+        # 相对相关性下限：跟本轮最佳命中比，差太多的直接丢掉（BM25 精确命中豁免——
+        # 那是特意融合进来的另一路信号，不该被相似度比值砍掉）。
+        if results:
+            top_sim = max(sims[r.entry.id] for r in results)
+            cut = top_sim * self._config.similarity_keep_ratio
+            kept = [r for r in results if sims[r.entry.id] >= cut or r.entry.id in bm_hits]
+            if len(kept) < len(results):
+                logger.debug(
+                    "Memory: 相对相关性下限丢弃 %d 条（top=%.3f cut=%.3f）",
+                    len(results) - len(kept), top_sim, cut,
+                )
+            results = kept
 
         results.sort(key=lambda r: r.score, reverse=True)
         results = self._apply_type_quota(results)
@@ -270,7 +295,10 @@ class MemoryRetriever:
     def _apply_type_quota(self, results: list[SearchResult]) -> list[SearchResult]:
         if not results:
             return results
-        total = self._config.recent_detail_top_k + self._config.distant_summary_top_k
+        total = min(
+            self._config.recent_detail_top_k + self._config.distant_summary_top_k,
+            self._config.recall_top_k,
+        )
         floors = self._TYPE_QUOTA_FLOOR
         kept: list[SearchResult] = []
         seen_by_type: dict[MemoryType, int] = {t: 0 for t in floors}
@@ -338,9 +366,16 @@ class MemoryRetriever:
         return "summary"
 
     def _apply_budget(self, results: list[SearchResult]) -> list[SearchResult]:
-        """Apply token budget — keep top results within budget."""
+        """Apply token budget and the per-turn recall cap."""
         if not results:
             return []
+
+        # 条数硬上限：token 预算管不住"条数"，而一轮塞十几条记忆正是"召回多余"
+        # 的直接来源。两条检索路径都收口到这里，所以闸门加在这一层。
+        limit = self._config.recall_top_k
+        if limit and len(results) > limit:
+            logger.debug("Memory: 召回条数上限 %d，丢弃尾部 %d 条", limit, len(results) - limit)
+            results = results[:limit]
 
         budget = self._config.max_context_tokens
         used = 0
