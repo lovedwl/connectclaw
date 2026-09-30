@@ -108,3 +108,18 @@ def test_card_gate_failure_never_breaks_message_handling():
 
     ch.set_card_gate(boom)
     assert ch._suppress_card("oc", "你好") is False
+
+
+def test_parse_history_merged_older_section_is_capped():
+    """回归:更早步骤合并块随步数无限增长,把卡片撑过飞书 30k 上限(230025)。"""
+    from connectclaw.channel.feishu import _parse_history
+
+    history = ""
+    for i in range(60):
+        history += f"\n\n🔧 **bash** `[{i:08x}]`\n```json\n{{\"command\": \"{'x' * 1400}\"}}\n```"
+    sections = _parse_history(history)
+    merged = [s for s in sections if "更早" in s["title"]]
+    assert merged, "应该存在合并的更早步骤块"
+    assert len(merged[0]["content"]) <= 3100, "合并块正文必须封顶"
+    card_size = sum(len(s["title"]) + len(s.get("content") or "") for s in sections)
+    assert card_size < 22_000, "整卡体积必须留在飞书内容上限之内"

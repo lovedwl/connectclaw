@@ -428,32 +428,68 @@ class FeishuChannel(Channel):
             "thinking_start": 0.0,
             "text_started": False,
             "last_flush": 0.0,
+            "fail_count": 0,
         }
         lock = asyncio.Lock()
 
         async def _flush() -> None:
             """Send or update the thinking card with collapsible sections."""
             async with lock:
+                if state["fail_count"] >= _CARD_MAX_CONSECUTIVE_FAILS:
+                    # 熔断：这张卡连续失败太多次，不再重试（日志刷屏的元凶）。
+                    # 最终回复走正常消息通道，不受影响。
+                    return
                 sections = _parse_history(state["history"])
                 if state["thinking_buf"]:
                     elapsed = time.time() - state["thinking_start"]
+                    buf = state["thinking_buf"]
+                    if len(buf) > 4000:
+                        buf = "…\n" + buf[-4000:]
                     sections.append({
                         "title": f"💭 思考中... ({elapsed:.1f}s)",
-                        "content": state["thinking_buf"],
+                        "content": buf,
                         "expanded": True,
+                    })
+                # 卡片体积预算：超了从最旧的 section 丢起，保证不超飞书上单
+                def _sec_size(s: dict) -> int:
+                    return len(s["title"]) + len(s.get("content") or "")
+                total = sum(_sec_size(s) for s in sections) + 2_000  # 结构/转义余量
+                dropped = 0
+                while total > _CARD_CHAR_BUDGET and len(sections) > 1:
+                    total -= _sec_size(sections[0])
+                    sections.pop(0)
+                    dropped += 1
+                if dropped:
+                    sections.insert(0, {
+                        "title": "…",
+                        "content": f"_(较早的 {dropped} 段已省略)_",
+                        "expanded": False,
                     })
                 card = _build_sections_card(sections)
                 if state["message_id"] is None:
                     result = await sdk.send(chat_id, {"card": card})
                     if result.ok and result.message_id:
                         state["message_id"] = result.message_id
+                        state["fail_count"] = 0
+                    else:
+                        state["fail_count"] += 1
                 else:
                     try:
-                        await sdk.update_card(state["message_id"], card)
+                        result = await sdk.update_card(state["message_id"], card)
                     except Exception as e:
                         logger.debug("update_card failed, re-sending: %s", e)
-                        state["message_id"] = None
-                        await sdk.send(chat_id, {"card": card})  # fallback: send new
+                        result = None
+                    if result is not None and getattr(result, "ok", False):
+                        state["fail_count"] = 0
+                        return
+                    state["fail_count"] += 1
+                    # 失败兜底：补不动就重发一张新卡（旧卡可能被删/不可补丁）。
+                    # 若同样失败（如内容超限），fail_count 继续累积直到熔断。
+                    if state["fail_count"] < _CARD_MAX_CONSECUTIVE_FAILS:
+                        resent = await sdk.send(chat_id, {"card": card})
+                        if resent.ok and resent.message_id:
+                            state["message_id"] = resent.message_id
+                            state["fail_count"] = 0
 
         # Fire card immediately
         asyncio.create_task(_flush())
@@ -492,7 +528,11 @@ class FeishuChannel(Channel):
                 # Embed a unique marker so results can be matched even
                 # when multiple tools share the same name.
                 label = f"🔧 **{name}** `[{tc_id[:8] if tc_id else '?'}]`"
-                state["history"] += f"\n\n{label}\n```json\n{json.dumps(args, ensure_ascii=False, indent=2)}\n```\n"
+                args_json = json.dumps(args, ensure_ascii=False, indent=2)
+                if len(args_json) > 1500:
+                    # write/edit 的大段内容参数会直接把卡片撑爆,展示层只留开头
+                    args_json = args_json[:1500] + "\n…(截断)"
+                state["history"] += f"\n\n{label}\n```json\n{args_json}\n```\n"
                 if tc_id:
                     _tool_labels[tc_id] = label
             await _flush()
@@ -772,12 +812,23 @@ def _parse_history(history: str) -> list[dict]:
         older_content = "\n\n".join(
             f"**{s['title']}**\n{s['content']}" for s in older
         )
+        if len(older_content) > 3000:
+            # 合并块会随步数无限增长,把整张卡撑过飞书 30k 内容上限
+            # (230025) 之后每次刷新都失败——只留最近一段。
+            older_content = "…\n" + older_content[-3000:]
         sections.insert(0, {
             "title": f"📋 更早的 {len(older)} 个步骤",
             "content": older_content,
             "expanded": False,
         })
     return sections
+
+
+# 飞书卡片内容上限实测 ~30k 字符(230025 = The length of the message content
+# reaches its limit)。这里给结构开销留余量后设预算,超了就从最旧的 section 丢起;
+# 连续失败熔断,防止超限后每秒重试刷日志。
+_CARD_CHAR_BUDGET = 22_000
+_CARD_MAX_CONSECUTIVE_FAILS = 3
 
 
 def _build_sections_card(sections: list[dict]) -> dict:

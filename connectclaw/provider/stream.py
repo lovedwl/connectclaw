@@ -96,6 +96,9 @@ async def stream_simple(
     # thinking/text blocks.
     _tool_call_slots: dict[int, dict] = {}
 
+    # 首 token 到达时刻（None = 还没收到任何增量）；TTFT = 它减去请求开始时刻
+    _first_token_at: float | None = None
+
     # Emit start event
     yield StreamEvent(type="start", partial=partial)
 
@@ -160,6 +163,10 @@ async def stream_simple(
                     if cached is not None:
                         # 前缀缓存命中量：把它留下，缓存行为才可观测。
                         partial.usage["cached"] = int(cached)
+                    completion_details = getattr(usage_obj, "completion_tokens_details", None)
+                    reasoning = getattr(completion_details, "reasoning_tokens", None) if completion_details else None
+                    if reasoning is not None:
+                        partial.usage["reasoning"] = int(reasoning)
 
                 # Skip chunks without choices
                 if not chunk.choices:
@@ -167,6 +174,13 @@ async def stream_simple(
 
                 delta = chunk.choices[0].delta
                 finish_reason = chunk.choices[0].finish_reason
+
+                # TTFT：第一个携带思考/正文/工具调用的增量块到达的时刻。
+                # 网关排队 + prompt 处理都在这段时间里，是体感延迟的主要成分。
+                if _first_token_at is None and (
+                    getattr(delta, "reasoning_content", None) or delta.content or delta.tool_calls
+                ):
+                    _first_token_at = time.time()
 
                 # Log first few content-carrying chunks
                 if chunk_count <= 3:
@@ -289,6 +303,11 @@ async def stream_simple(
                              i, b.get("type", "?"),
                              len(b.get("text", "")),
                              len(b.get("thinking", "")))
+            # 墙钟耗时（timestamp 即请求开始时刻，含重试退避）——trace 查看器的
+            # 耗时视图靠它，落盘走 __dict__ 透传，这里记上就有了。
+            partial.duration_ms = time.time() * 1000 - partial.timestamp
+            if _first_token_at is not None:
+                partial.ttft_ms = max(0.0, _first_token_at * 1000 - partial.timestamp)
             yield StreamEvent(type="done", message=partial)
             return
 
@@ -308,9 +327,13 @@ async def stream_simple(
             # Check for retryable errors
             if _is_retryable(error_msg) and attempt < max_retries - 1:
                 delay = min(2**attempt, 30)
+                # 重试原来只存在于 debug 日志里，上层完全不可见；记在消息上，
+                # 落盘后 trace 查看器才能显示"这次回复重试了两回"。
+                partial.retry_count += 1
                 await asyncio.sleep(delay)
                 continue
 
+            partial.duration_ms = time.time() * 1000 - partial.timestamp
             partial.stop_reason = "error"
             partial.error_message = error_msg
             yield StreamEvent(

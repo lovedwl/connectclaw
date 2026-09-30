@@ -22,6 +22,12 @@ class AssistantMessage:
     usage: dict[str, int] = field(default_factory=dict)
     error_message: str | None = None
     timestamp: float = 0.0
+    # 本次 LLM 调用的墙钟耗时（含重试退避）；timestamp 语义就是请求开始时刻。
+    duration_ms: float = 0.0
+    # 首 token 延迟：请求开始到第一个增量块（思考/正文/工具调用都算）到达的毫秒数。
+    ttft_ms: float = 0.0
+    # provider 层重试次数（成功或最终失败前重试了几回），0 表示一次成功。
+    retry_count: int = 0
 
 
 @dataclass
@@ -55,6 +61,9 @@ def normalize_message(raw: dict[str, Any] | Message) -> Message:
             usage=raw.get("usage", {}),
             error_message=raw.get("error_message"),
             timestamp=raw.get("timestamp", 0.0),
+            duration_ms=raw.get("duration_ms", 0.0),
+            ttft_ms=raw.get("ttft_ms", 0.0),
+            retry_count=raw.get("retry_count", 0),
         )
     if role == "toolResult":
         return ToolResultMessage(
