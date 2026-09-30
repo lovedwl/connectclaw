@@ -413,6 +413,9 @@ class CodingAgent:
 
             # 用户消息从此**只装用户真正说的话**（注入是独立的结构化条目）。
             result = await harness.prompt(text, images=images)
+            if harness.turn_aborted:
+                # /stop 中断：不跑 confirm_usage / learn，也别把半截话当回复
+                return "⏹ 已中断。"
             if result is None:
                 return "未生成任何回复。"
 

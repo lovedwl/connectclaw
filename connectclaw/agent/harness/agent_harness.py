@@ -175,6 +175,11 @@ class AgentHarness:
         finally:
             self._phase = "idle"
 
+    @property
+    def turn_aborted(self) -> bool:
+        """最近一次 prompt 是否被 /stop 中断（见 agent_loop 的 aborted 收尾）。"""
+        return getattr(self, "_turn_aborted", False)
+
     async def steer(self, text: str) -> None:
         """Queue a steering message."""
         msg = UserMessage(content=text, timestamp=time.time() * 1000)
@@ -430,6 +435,14 @@ class AgentHarness:
             def on_agent_event(event: dict) -> None:
                 etype = event.get("type", "")
 
+                # /stop 中断标记：turn_end 携带 stop_reason="aborted" 的收尾消息
+                if etype == "turn_end":
+                    msg = event.get("message")
+                    sr = getattr(msg, "stop_reason", None)
+                    if sr is None and isinstance(msg, dict):
+                        sr = msg.get("stop_reason")
+                    self._turn_aborted = (sr == "aborted")
+
                 # Emit to harness listeners
                 for listener in self._listeners:
                     try:
@@ -459,6 +472,7 @@ class AgentHarness:
             )
         else:
             prompt_msg = text
+        self._turn_aborted = False
         await agent.prompt(prompt_msg)
 
         # Return last assistant message
@@ -473,6 +487,9 @@ class AgentHarness:
                 usage=m.usage if hasattr(m, 'usage') else {},
                 error_message=m.error_message if hasattr(m, 'error_message') else None,
                 timestamp=time.time() * 1000,
+                duration_ms=getattr(m, 'duration_ms', 0.0),
+                ttft_ms=getattr(m, 'ttft_ms', 0.0),
+                retry_count=getattr(m, 'retry_count', 0),
             )
 
         logger.warning("No assistant message found in agent state after prompt")

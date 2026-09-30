@@ -184,7 +184,7 @@ class FeishuChannel(Channel):
                         message_id=message_id,
                         sender_open_id=sender_open_id,
                     )
-                    if response:
+                    if response and response.strip():
                         await channel._stream_text(chat_id, response)
                 except Exception as e:
                     logger.error("Message handler error: %s", e)

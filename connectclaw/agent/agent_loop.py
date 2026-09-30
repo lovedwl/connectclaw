@@ -390,6 +390,17 @@ async def _stream_assistant_response(
                 return error_msg
 
     logger.warning("[STREAM] stream ended with %d events, no done/error", event_count)
+    # abort 杀掉的 stream（连接被关、生成器正常耗尽）会走到这里。若不区分，
+    # "已中断"会被当成"正常完成"：半截空白消息落进会话、被发到聊天、
+    # 还触发 confirm_usage / 记忆抽取。检查 abort 信号，按中断收尾。
+    if signal is not None and signal.is_set():
+        return AssistantMessage(
+            content=[{"type": "text", "text": ""}],
+            model=config.model.id,
+            stop_reason="aborted",
+            usage={},
+            timestamp=time.time() * 1000,
+        )
     # If stream ended without done/error, return whatever we have
     final = partial_message or AssistantMessage(
         content=[{"type": "text", "text": ""}],
@@ -825,6 +836,9 @@ def _strip_orphan_tool_calls(messages: list) -> list:
             usage=getattr(m, "usage", {}),
             error_message=getattr(m, "error_message", None),
             timestamp=getattr(m, "timestamp", 0.0),
+            duration_ms=getattr(m, "duration_ms", 0.0),
+            ttft_ms=getattr(m, "ttft_ms", 0.0),
+            retry_count=getattr(m, "retry_count", 0),
         )
         result.append(stripped)
 

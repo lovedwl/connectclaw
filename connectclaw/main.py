@@ -338,7 +338,8 @@ async def main(argv: list[str] | None = None) -> None:
             response = await coding_agent.handle_message(
                 conversation_key, text, live_card_callbacks, images=images
             )
-            if response:
+            # 纯空白（模型爱吐前导换行）不算回复——发出去就是一只空气泡泡
+            if response and response.strip():
                 logger.info("[%s] Assistant: %s", conversation_key[:8], response[:100])
             return response
         except Exception as e:
