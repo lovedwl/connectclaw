@@ -96,10 +96,14 @@ async def test_operator_bash_suspicious_needs_channel():
     assert "授权" in r and "rm old.txt" in r
 
 
-async def test_operator_bash_safe_runs_in_sandbox():
+async def test_operator_bash_safe_runs_directly():
+    """Operator channel is unsandboxed by design (2026-10): safe commands run
+    on the real host shell; security lives in the whitelist/DANGEROUS/
+    SUSPICIOUS tests below and above."""
     ag = _agent_with_operators(["ou_owner"])
     r = await ag.run_operator_bash("oc", "ou_owner", "echo operator-ok")
     assert "operator-ok" in r
+    assert "[退出码：0]" in r
 
 
 # ── /whoami self-discovery ─────────────────────────────────────

@@ -135,7 +135,7 @@ class AgentConfig:
 
 @dataclass
 class BashConfig:
-    """Operator gate for the `!`/`/bash` escape hatch (direct sandboxed bash).
+    """Operator gate for the `!`/`/bash` escape hatch (direct host bash, unsandboxed).
 
     Non-empty allow-list of Feishu open_ids that may use it; EMPTY (default)
     disables the escape entirely. This whitelist (and the model registry) are

@@ -689,19 +689,21 @@ class CodingAgent:
     async def run_operator_bash(
         self, conversation_key: str, sender_open_id: str, command: str
     ) -> str:
-        """Run a raw sandboxed shell command for a whitelisted operator.
+        """Run a raw, UNSANDBOXED shell command for a whitelisted operator.
 
-        Same guardrail triple as the agent's bash tool (BashGuard DANGEROUS →
-        hard block, SUSPICIOUS → Feishu auth card, then the isolation sandbox +
-        user PATH) — without any LLM involvement, so it works when the model is
-        down. Returns the formatted output for the chat.
+        The operator channel is for humans doing maintenance (even editing
+        config.toml), so it bypasses the isolation sandbox by design.
+        Guardrails: open_id whitelist + BashGuard (DANGEROUS hard block,
+        SUSPICIOUS Feishu auth card) + user PATH; no LLM is involved, so it
+        still works when the model is down. Returns the formatted output for
+        the chat.
         """
         operators = self._config.bash.operator_open_ids
         if not operators or sender_open_id not in operators:
             return "⛔ 你没有使用 `!`/`/bash` 直连执行的权限。"
         cmd = (command or "").strip()
         if not cmd:
-            return "用法：`! <shell命令>` 或 `/bash <命令>` —— 沙箱内直连执行（逃生用）"
+            return "用法：`! <shell命令>` 或 `/bash <命令>` —— 主机直连执行（逃生用，无沙箱）"
 
         check = self._bash_guard.check(cmd)
         if check == "DANGEROUS":
@@ -714,7 +716,9 @@ class CodingAgent:
                 return f"❌ 已拒绝执行：`{cmd}`"
 
         try:
-            result = await self._bash_tool.execute("operator-bash", {"command": cmd})
+            result = await self._bash_tool.execute(
+                "operator-bash", {"command": cmd}, unsandboxed=True
+            )
         except Exception as e:  # noqa: BLE001
             logger.warning("operator-bash failed: %s", e)
             return f"❌ 执行异常：{e}"

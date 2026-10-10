@@ -287,8 +287,9 @@ async def main(argv: list[str] | None = None) -> None:
                 return "（已取消进行中的模型添加向导，请重新执行命令）"
             return await run_model_wizard_step(coding_agent, wiz, text)
 
-        # Operator bash escape: `!cmd` or `/bash cmd` → raw sandboxed shell for
-        # whitelisted operators (no LLM involved; works with the model down).
+        # Operator bash escape: `!cmd` or `/bash cmd` → raw host shell for
+        # whitelisted operators (unsandboxed by design; no LLM involved, so it
+        # works with the model down).
         if is_operator_bash(text):
             cmd = text[1:].strip() if text.startswith("!") else text[6:].strip()
             return await coding_agent.run_operator_bash(

@@ -9,7 +9,7 @@ import subprocess
 from typing import Any, Literal
 
 from connectclaw.agent.types import AgentTool, AgentToolResult
-from connectclaw.coding.safety.sandbox import detect_best_sandbox
+from connectclaw.coding.safety.sandbox import DirectSandbox, detect_best_sandbox
 from connectclaw.coding.safety.shellpath import with_user_path
 
 
@@ -133,6 +133,7 @@ class BashTool(AgentTool):
         params: dict[str, Any],
         signal: asyncio.Event | None = None,
         on_update: Any = None,
+        unsandboxed: bool = False,
     ) -> AgentToolResult:
         command = params["command"]
         timeout = min(params.get("timeout", 120) or 120, 600)
@@ -150,19 +151,30 @@ class BashTool(AgentTool):
                 }],
             )
 
-        # Run in the isolation sandbox with the user's interactive PATH (the
-        # systemd env PATH misses ~/.npm-global/bin, ~/.local/bin, pyenv, ...).
+        # Run with the user's interactive PATH (the systemd env PATH misses
+        # ~/.npm-global/bin, ~/.local/bin, pyenv, ...).
         command = with_user_path(command)
 
-        # Build allowed paths: cwd + git root (for git operations)
-        allowed_paths = [self._cwd]
-        if self._git_root:
-            allowed_paths.append(self._git_root)
+        if unsandboxed:
+            # Operator escape channel (`!`/`/bash`): identity-gated HUMAN
+            # commands run on the real filesystem — the sandbox would block
+            # the very maintenance work (e.g. editing config.toml) the escape
+            # exists for. Risk control here is the operator open_id whitelist
+            # + BashGuard (DANGEROUS hard block, SUSPICIOUS auth card).
+            # The agent's own bash tool NEVER gets unsandboxed=True: its
+            # isolation (incl. the RO bind on the escape-hatch configs) is
+            # the agent's privilege boundary.
+            sandbox = DirectSandbox(cwd=self._cwd)
+        else:
+            # Build allowed paths: cwd + git root (for git operations)
+            allowed_paths = [self._cwd]
+            if self._git_root:
+                allowed_paths.append(self._git_root)
 
-        sandbox = self._sandbox_cls(
-            cwd=self._cwd,
-            allowed_paths=allowed_paths,
-        )
+            sandbox = self._sandbox_cls(
+                cwd=self._cwd,
+                allowed_paths=allowed_paths,
+            )
 
         result = await sandbox.execute(command, timeout=timeout)
 

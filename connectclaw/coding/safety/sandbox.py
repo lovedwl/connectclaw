@@ -26,11 +26,16 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import subprocess
 import time
 from dataclasses import dataclass
 from enum import Enum
 
 from connectclaw.security import protected_file_paths
+from connectclaw.logging import get_logger
+
+
+logger = get_logger(__name__)
 
 
 # ── Result Types ───────────────────────────────────────────────
@@ -56,11 +61,114 @@ class SandboxResult:
 # ── Sandbox Factory ────────────────────────────────────────────
 
 
+# Probe results are cached for the process lifetime: whether the kernel /
+# container lets a binary create namespaces cannot change mid-run, and the
+# probe forks a subprocess (~tens of ms per binary) we don't want on every
+# BashTool construction or code path that calls detect_best_sandbox().
+_PROBE_CACHE: dict[str, bool] = {}
+
+# bwrap is deemed *unusable* only when stderr proves user-namespace creation
+# is blocked. This exact fingerprint list is copied from OpenAI Codex
+# `sandboxing/src/bwrap.rs` (Apache-2.0): Codex matches these texts before
+# deciding to warn / fall back. Matching only these known failures avoids
+# degrading isolation on a spurious probe failure (e.g. a PATH-shadowing
+# bwrap stub exiting nonzero for an unrelated reason).
+USER_NAMESPACE_FAILURES: tuple[str, ...] = (
+    "loopback: Failed RTM_NEWADDR",
+    "loopback: Failed RTM_NEWLINK",
+    "setting up uid map: Permission denied",
+    "No permissions to create a new namespace",
+)
+
+
+def _is_user_namespace_failure(stderr: str) -> bool:
+    """True if a probe's stderr shows the known user-namespace ban."""
+    return any(f in stderr for f in USER_NAMESPACE_FAILURES)
+
+
+def _run_probe(cmd_args: list[str], timeout: int = 10) -> tuple[bool, str | None]:
+    """Run one probe; returns (exit_ok, stderr_text).
+
+    ``stderr`` is None when the probe could not be spawned at all (ENOENT /
+    ENOEXEC / timeout) — those say nothing about namespace availability.
+    """
+    try:
+        proc = subprocess.run(cmd_args, capture_output=True, timeout=timeout)
+        stderr = (proc.stderr or b"").decode("utf-8", errors="replace")
+        return proc.returncode == 0, stderr
+    except (subprocess.SubprocessError, OSError) as e:
+        logger.warning("Sandbox probe could not run %s: %s", cmd_args[0], e)
+        return False, None
+
+
+def _probe_bwrap() -> bool:
+    """True if bwrap is installed *and* user namespaces actually work.
+
+    Codex semantics: usable unless the probe's stderr is a confirmed
+    user-namespace ban. A nonzero exit for any other reason — or a probe that
+    could not even spawn — does NOT downgrade the tier: losing isolation on an
+    unrelated probe hiccup is worse than running bwrap once more.
+    """
+    if "bwrap" not in _PROBE_CACHE:
+        # Same namespace set (ipc/uts/pid + proc/dev) and ro-bind root as
+        # BwrapSandbox.execute; the writable binds carry no namespace weight.
+        ok, stderr = _run_probe([
+            "bwrap",
+            "--die-with-parent",
+            "--ro-bind", "/", "/",
+            "--dev", "/dev",
+            "--proc", "/proc",
+            "--unshare-ipc",
+            "--unshare-uts",
+            "--unshare-pid",
+            "--", "/bin/true",
+        ])
+        if ok:
+            usable = True
+        elif stderr is not None and _is_user_namespace_failure(stderr):
+            usable = False
+        else:
+            if stderr:
+                logger.warning(
+                    "bwrap probe exit without a user-namespace failure (%.200s); keeping bwrap",
+                    stderr.strip(),
+                )
+            usable = True
+        _PROBE_CACHE["bwrap"] = usable
+    return _PROBE_CACHE["bwrap"]
+
+
+def _probe_unshare() -> bool:
+    """True if ``unshare`` can create the mount/pid namespaces it needs.
+
+    Kept strictly "exit 0": unshare fails with locale-dependent text (e.g.
+    Chinese ``unshare: unshare 失败: 不允许的操作`` for EPERM) that no
+    fingerprint table covers, so any failed probe here means the tier is
+    unusable and we must degrade to direct execution.
+    """
+    if "unshare" not in _PROBE_CACHE:
+        # Identical namespace set (mount + pid + mount-proc) to
+        # NamespaceSandbox.execute.
+        ok, _ = _run_probe([
+            "unshare", "--mount", "--fork", "--pid", "--mount-proc",
+            "--", "/bin/true",
+        ])
+        _PROBE_CACHE["unshare"] = ok
+    return _PROBE_CACHE["unshare"]
+
+
 def detect_best_sandbox() -> type:
-    """Detect the best available sandbox implementation."""
-    if shutil.which("bwrap"):
+    """Detect the best *actually usable* sandbox implementation.
+
+    Selection is two-tier per candidate: the binary must exist AND a minimal
+    probe (namespaces + no-op command) must succeed. A candidate that is
+    installed but cannot create namespaces in this environment is skipped, so
+    deployments banned from user namespaces degrade to direct execution
+    instead of picking a sandbox whose every command fails.
+    """
+    if shutil.which("bwrap") and _probe_bwrap():
         return BwrapSandbox
-    if shutil.which("unshare"):
+    if shutil.which("unshare") and _probe_unshare():
         return NamespaceSandbox
     return DirectSandbox
 
