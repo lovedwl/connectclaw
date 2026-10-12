@@ -233,3 +233,42 @@ async def test_auth_path_unaffected_by_kind_dispatch():
 
     # model_switch 但未接线 handler → 告警路径，不抛异常
     ch.handle_card_action(_ev({"kind": "model_switch", "stage": "providers"}))
+
+
+async def test_click_discover_dispatches_and_renders_list(monkeypatch):
+    """2026-10 regression: dispatcher 漏了 discover 分支，点「🔍 自动发现"""
+    """报「未知的卡片操作：discover」。"""
+    import json
+
+    import connectclaw.model_card as mc
+
+    ch = FeishuChannel(FeishuConfig(app_id="a", app_secret="s"))
+    active = _p("a", "qwen3.8-reasoner", provider="Provider A")
+    agent = FakeAgent([active], active)
+    agent._channel = ch
+    updates: list[tuple[str, dict]] = []
+
+    async def fake_update(message_id, card):
+        updates.append((message_id, card))
+        return True
+
+    ch.update_card = fake_update
+
+    async def fake_fetch(base_url, api_key="", proxy=None, timeout=12.0):
+        return ([{"id": "m1", "max_input": 131072, "max_output": 4096},
+                 {"id": "qwen3.8-reasoner", "max_input": None, "max_output": None}],
+                "https://api.example.com")
+
+    monkeypatch.setattr(mc.model_discovery, "fetch_model_list", fake_fetch)
+
+    await on_model_card_action(
+        agent, {"kind": "model_switch", "stage": "discover", "provider": "Provider A"},
+        "oc_x", "om_1")
+
+    assert updates, "discover 点击没有产生卡片更新"
+    texts = json.dumps(updates[-1][1], ensure_ascii=False)
+    assert "模型发现" in texts
+    assert "m1" in texts
+    assert "128k" in texts
+    assert "已有" in texts  # qwen3.8-reasoner 已注册 → 标记已有
+    assert "add_all" in texts  # 批量同步按钮在场

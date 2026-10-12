@@ -305,6 +305,8 @@ async def on_model_card_action(agent: Any, value: dict, chat_id: str, message_id
         elif stage == "models":
             await channel.update_card(
                 message_id, model_level_card(agent, value.get("provider", "")))
+        elif stage == "discover":
+            await _stage_discover(agent, channel, value, message_id)
         elif stage == "add_model":
             payload = _cache_get(message_id)
             item = next((i for i in (payload or {}).get("items", [])
