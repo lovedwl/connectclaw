@@ -17,6 +17,8 @@ import uuid
 from typing import Any
 
 from connectclaw.logging import get_logger
+from connectclaw import model_discovery
+from connectclaw.model_discovery import fmt_ctx
 from connectclaw.model_registry import ModelProfile
 
 logger = get_logger(__name__)
@@ -138,6 +140,11 @@ def model_level_card(agent: Any, provider: str) -> dict:
             nonce=nonce,
         )))
     elements.append({"tag": "hr"})
+    elements.append(_row(_button(
+        "🔍 自动发现新模型（查列表+上下文）",
+        {"kind": KIND, "stage": "discover", "provider": provider},
+        "primary", nonce=nonce,
+    )))
     elements.append(_row(
         _button("‹ 返回", {"kind": KIND, "stage": "providers"}, nonce=nonce),
         _button("取消", {"kind": KIND, "stage": "cancel"}, nonce=nonce),
@@ -156,6 +163,125 @@ def result_card(text: str, ok: bool | None = True) -> dict:
             "‹ 重新选择", {"kind": KIND, "stage": "providers"}, nonce=nonce)))
     elements.append({"tag": "markdown", "content": _NOTE})
     return _card("模型切换", template, elements)
+
+
+# ── Auto-discovery (2026-10) ─────────────────────────────────────
+# Level 3: after selecting a provider, one click fetches {base}/models with
+# that provider's key, parses per-model limits, and lets the user add new
+# profiles / refresh existing ones. Discovery state lives in a tiny
+# message_id-keyed cache (the card is updated in place, so the click payload
+# carries only ids, not the fetched data).
+
+_DISCOVERY_CACHE: dict[str, dict] = {}
+_DISCOVERY_CACHE_MAX = 20
+_DISCOVERY_MAX_ROWS = 24          # per-card display cap (payload keeps all)
+_DISCOVERY_PROBE_CAP = 8          # context-limit probes per click round
+
+
+def _cache_put(message_id: str, payload: dict) -> None:
+    _DISCOVERY_CACHE[message_id] = payload
+    while len(_DISCOVERY_CACHE) > _DISCOVERY_CACHE_MAX:
+        _DISCOVERY_CACHE.pop(next(iter(_DISCOVERY_CACHE)))
+
+
+def _cache_get(message_id: str) -> dict | None:
+    return _DISCOVERY_CACHE.get(message_id)
+
+
+def _proxy_of(agent: Any) -> str | None:
+    cfg = getattr(agent, "_config", None)
+    return (getattr(cfg, "proxy", None) and cfg.proxy.url) or None
+
+
+def discovery_card(payload: dict, note: str = "") -> dict:
+    """Level 3: discovered models with per-model 添加/更新 buttons."""
+    items = payload["items"]
+    nonce = _render_nonce()
+    elements: list[dict] = [
+        {"tag": "markdown",
+         "content": (f"**{payload['provider']}** · 发现 {len(items)} 个模型\n"
+                     f"端点：`{payload['endpoint']}`\n"
+                     "「上下文/输出」，? = 网关未暴露：")},
+         {"tag": "hr"},
+    ]
+    for item in items[:_DISCOVERY_MAX_ROWS]:
+        label = f"`{item['id']}`  {fmt_ctx(item.get('ctx'))}/{fmt_ctx(item.get('mt'))}"
+        if item.get("exists"):
+            label += f"\n<font color='grey'>已有 `{item['exists']}`</font>"
+            btn = _button("🔄 更新",
+                          {"kind": KIND, "stage": "update_model",
+                           "name": item["exists"], "id": item["id"]},
+                          "default", nonce=nonce)
+        else:
+            btn = _button("➕ 添加",
+                          {"kind": KIND, "stage": "add_model", "id": item["id"]},
+                          "default", nonce=nonce)
+        elements.append({
+            "tag": "column_set",
+            "columns": [
+                {"tag": "column", "weight": 3,
+                 "elements": [{"tag": "markdown", "content": label}]},
+                {"tag": "column", "weight": 1, "elements": [btn]},
+            ],
+        })
+    if len(items) > _DISCOVERY_MAX_ROWS:
+        elements.append({"tag": "markdown", "content":
+                         f"<font color='grey'>仅显示前 {_DISCOVERY_MAX_ROWS} 个；"
+                         f"其余 {len(items) - _DISCOVERY_MAX_ROWS} 个可用 "
+                         f"`/model sync {payload['provider']}` 文本处理</font>"})
+    elements.append({"tag": "hr"})
+    btns = [_button("➕ 全部添加/更新", {"kind": KIND, "stage": "add_all"},
+                    "primary", nonce=nonce)]
+    n_unknown = sum(1 for i in items if not i.get("ctx"))
+    if n_unknown:
+        btns.append(_button(f"🔎 探测上限({min(n_unknown, _DISCOVERY_PROBE_CAP)})",
+                            {"kind": KIND, "stage": "probe_unknown"},
+                            "default", nonce=nonce))
+    btns.append(_button("‹ 返回", {"kind": KIND, "stage": "models",
+                                   "provider": payload["provider"]},
+                        "default", nonce=nonce))
+    elements.append(_row(*btns))
+    if note:
+        elements.append({"tag": "markdown",
+                         "content": f"<font color='grey'>{note}</font>"})
+    elements.append({"tag": "markdown", "content": _NOTE})
+    return _card(f"模型发现 · {payload['provider']}", "turquoise", elements)
+
+
+async def _stage_discover(agent, channel, value: dict, message_id: str) -> None:
+    provider = value.get("provider", "")
+    profiles = [p for p in agent.list_model_profiles()
+                if p.display_provider() == provider]
+    if not profiles:
+        await channel.update_card(
+            message_id, result_card(f"❌ 没有「{provider}」的 profile，无法借用其 key 查询。", ok=False))
+        return
+    seed = profiles[0]
+    await channel.update_card(
+        message_id,
+        result_card(f"🔍 正在查询 **{provider}** 的模型列表（{seed.base_url}）…", ok=None))
+    try:
+        entries, endpoint = await model_discovery.fetch_model_list(
+            seed.base_url, seed.resolved_api_key(), _proxy_of(agent))
+    except model_discovery.DiscoveryError as e:
+        await channel.update_card(message_id, result_card(f"❌ 发现失败：{e}", ok=False))
+        return
+    if not entries:
+        await channel.update_card(
+            message_id,
+            result_card(f"⚠️ `{endpoint}/models` 返回空列表（该网关不暴露模型清单）。"
+                        f"请用 `/model add` 手动添加。", ok=None))
+        return
+    items = []
+    for e in entries:
+        ex = model_discovery.match_existing(profiles, seed.base_url, e["id"])
+        items.append({"id": e["id"], "ctx": e["max_input"], "mt": e["max_output"],
+                      "exists": ex.name if ex else None})
+    payload = {"provider": provider, "base_url": seed.base_url,
+               "raw_key": seed.api_key, "resolved_key": seed.resolved_api_key(),
+               "endpoint": endpoint, "items": items}
+    _cache_put(message_id, payload)
+    await channel.update_card(message_id, discovery_card(payload))
 
 
 async def on_model_card_action(agent: Any, value: dict, chat_id: str, message_id: str) -> None:
@@ -179,6 +305,122 @@ async def on_model_card_action(agent: Any, value: dict, chat_id: str, message_id
         elif stage == "models":
             await channel.update_card(
                 message_id, model_level_card(agent, value.get("provider", "")))
+        elif stage == "add_model":
+            payload = _cache_get(message_id)
+            item = next((i for i in (payload or {}).get("items", [])
+                         if i["id"] == value.get("id")), None)
+            if payload is None or item is None:
+                await channel.update_card(
+                    message_id, result_card("⚠️ 发现结果已过期，请重新 `/model` 选择供应商。", ok=None))
+                return
+            if item.get("exists"):
+                await channel.update_card(
+                    message_id,
+                    result_card(f"ℹ️ `{item['id']}` 已有 profile **{item['exists']}**，请用「🔄 更新」。", ok=None))
+                return
+            p = ModelProfile(
+                name="", base_url=payload["base_url"], model_id=item["id"],
+                api_key=payload["raw_key"],
+                context_window=item.get("ctx") or model_discovery.DEFAULT_CONTEXT_WINDOW,
+                max_tokens=item.get("mt") or model_discovery.DEFAULT_MAX_TOKENS,
+                provider=payload["provider"])
+            name = agent.save_model_profile(p)
+            await channel.update_card(message_id, result_card(
+                f"✅ 已添加 **{name}**（`{item['id']}`）\n"
+                f"上下文 {fmt_ctx(item.get('ctx') or model_discovery.DEFAULT_CONTEXT_WINDOW)} · "
+                f"输出 {fmt_ctx(item.get('mt') or model_discovery.DEFAULT_MAX_TOKENS)}\n"
+                f"可 `/model test {name}` 实测后 `/model set {name}` 激活。", ok=True))
+        elif stage == "update_model":
+            payload = _cache_get(message_id)
+            item = next((i for i in (payload or {}).get("items", [])
+                         if i["id"] == value.get("id")), None)
+            cur = agent.get_model_profile(value.get("name", ""))
+            if payload is None or item is None or cur is None:
+                await channel.update_card(
+                    message_id, result_card("⚠️ 发现结果已过期或 profile 不存在，请重新 `/model`。", ok=None))
+                return
+            changed = []
+            if item.get("ctx"):
+                cur.context_window = item["ctx"]
+                changed.append(f"上下文→{fmt_ctx(item['ctx'])}")
+            if item.get("mt"):
+                cur.max_tokens = item["mt"]
+                changed.append(f"输出→{fmt_ctx(item['mt'])}")
+            if not changed:
+                await channel.update_card(
+                    message_id,
+                    result_card(f"❓ `{item['id']}` 未暴露上下文/输出上限，没有可更新的字段。\n"
+                                f"可点「🔎 探测上限」实测，或 `/model edit {cur.name}` 手填。", ok=None))
+                return
+            agent.save_model_profile(cur)
+            await channel.update_card(message_id, result_card(
+                f"🔄 已更新 **{cur.name}**（`{item['id']}`）：{'，'.join(changed)}", ok=True))
+        elif stage == "add_all":
+            payload = _cache_get(message_id)
+            if payload is None:
+                await channel.update_card(
+                    message_id, result_card("⚠️ 发现结果已过期，请重新 `/model` 选择供应商。", ok=None))
+                return
+            added, updated, skipped = [], [], []
+            for item in payload["items"]:
+                if item.get("exists"):
+                    cur = agent.get_model_profile(item["exists"])
+                    if cur is None:
+                        skipped.append(f"{item['id']}（已有 profile 不存在）")
+                        continue
+                    if item.get("ctx") or item.get("mt"):
+                        if item.get("ctx"):
+                            cur.context_window = item["ctx"]
+                        if item.get("mt"):
+                            cur.max_tokens = item["mt"]
+                        agent.save_model_profile(cur)
+                        updated.append(item["id"])
+                    else:
+                        skipped.append(f"{item['id']}（未暴露上限）")
+                else:
+                    p = ModelProfile(
+                        name="", base_url=payload["base_url"], model_id=item["id"],
+                        api_key=payload["raw_key"],
+                        context_window=item.get("ctx") or model_discovery.DEFAULT_CONTEXT_WINDOW,
+                        max_tokens=item.get("mt") or model_discovery.DEFAULT_MAX_TOKENS,
+                        provider=payload["provider"])
+                    added.append(agent.save_model_profile(p))
+            text = (f"✅ 批量同步完成（{payload['provider']}，共 {len(payload['items'])} 个）：\n"
+                    f"· 新增 {len(added)}：{'、'.join(added) or '无'}\n"
+                    f"· 更新 {len(updated)}：{'、'.join(updated) or '无'}\n"
+                    f"· 跳过 {len(skipped)}：{'、'.join(skipped) or '无'}\n"
+                    "新模型可 `/model test <name>` 实测后 `/model set <name>` 激活。")
+            await channel.update_card(message_id, result_card(text, ok=True))
+        elif stage == "probe_unknown":
+            payload = _cache_get(message_id)
+            if payload is None:
+                await channel.update_card(
+                    message_id, result_card("⚠️ 发现结果已过期，请重新 `/model` 选择供应商。", ok=None))
+                return
+            unknowns = [i for i in payload["items"] if not i.get("ctx")]
+            if not unknowns:
+                await channel.update_card(
+                    message_id, result_card("所有模型都已有上下文长度。", ok=None))
+                return
+            batch = unknowns[:_DISCOVERY_PROBE_CAP]
+            await channel.update_card(
+                message_id,
+                result_card(f"🔎 正在探测 {len(batch)} 个模型的上下文上限"
+                            f"（发送超大 prompt 触发 400，每个可能 10~60 秒）…", ok=None))
+            for item in batch:
+                limit, note = await model_discovery.probe_context_window(
+                    payload["base_url"], payload["resolved_key"], item["id"], _proxy_of(agent))
+                if limit:
+                    item["ctx"] = limit
+                item["probe_note"] = note
+            _cache_put(message_id, payload)
+            tail = ""
+            if len(unknowns) > len(batch):
+                tail = f"；本轮最多 {len(batch)} 个，剩余 {len(unknowns) - len(batch)} 个可再点一次"
+            await channel.update_card(
+                message_id,
+                discovery_card(payload, note=f"探测完成{tail}；? = 未解析到"))
+
         elif stage == "switch":
             name = value.get("name", "")
             p = agent.get_model_profile(name)

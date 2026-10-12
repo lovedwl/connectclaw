@@ -84,18 +84,25 @@ async def test_model_add_inline_saves():
     assert fa.profiles["p1"].base_url.endswith("deepseek.com")
 
 
-async def test_model_add_missing_required_starts_wizard():
+async def test_model_add_missing_required_starts_wizard(monkeypatch):
+    from connectclaw import model_discovery
+
+    async def broken(base, key, proxy=None, timeout=None):
+        raise model_discovery.DiscoveryError("test: no network")
+
+    monkeypatch.setattr(model_discovery, "fetch_model_list", broken)
     fa = _fa()
     resp = await handle("/model add", conversation_key="oc", agent=fa)
     assert "base_url" in resp and fa.wizard is not None
-    # wizard round-trip via chat replies
+    # wizard round-trip via chat replies (new flow: base_url → api_key →
+    # auto-discovery; discovery is forced to fail → manual model_id)
     r1 = await run_model_wizard_step(fa, fa.wizard[1], "not-a-url")
     assert "http" in r1  # rejected
     r2 = await run_model_wizard_step(fa, fa.wizard[1], "https://gw/v1")
-    assert "model_id" in r2
-    r3 = await run_model_wizard_step(fa, fa.wizard[1], "my-model")
-    assert "api_key" in r3
-    r4 = await run_model_wizard_step(fa, fa.wizard[1], "无")  # skip key
+    assert "api_key" in r2
+    r3 = await run_model_wizard_step(fa, fa.wizard[1], "无")  # skip key
+    assert "自动发现失败" in r3 and "model_id" in r3
+    r4 = await run_model_wizard_step(fa, fa.wizard[1], "my-model")
     assert "已保存" in r4
     assert fa.wizard is None
     assert any(p.model_id == "my-model" for p in fa.profiles.values())
@@ -152,18 +159,24 @@ async def test_model_help_lists_escape_hints():
         assert "/model" in resp and "test" in resp and "set" in resp
 
 
-async def test_wizard_accepts_pasted_link_and_stores_clean_url():
+async def test_wizard_accepts_pasted_link_and_stores_clean_url(monkeypatch):
     """粘贴的链接到这儿是 markdown（飞书富文本），要拆开而不是把人挡回去。"""
+    from connectclaw import model_discovery
+
+    async def broken(base, key, proxy=None, timeout=None):
+        raise model_discovery.DiscoveryError("test: no network")
+
+    monkeypatch.setattr(model_discovery, "fetch_model_list", broken)
     fa = _fa()
     await handle("/model add", conversation_key="oc", agent=fa)
     state = fa.wizard[1]
     r1 = await run_model_wizard_step(
         fa, state, "[https://note3-prev-api.askdiandian.com/v1](https://note3-prev-api.askdiandian.com/v1/)")
-    assert "model_id" in r1
+    assert "api_key" in r1
     assert state["fields"]["base_url"] == "https://note3-prev-api.askdiandian.com/v1"
-    r2 = await run_model_wizard_step(fa, state, "dots3-note-prev")
-    assert "api_key" in r2
-    r3 = await run_model_wizard_step(fa, state, "ak-123")
+    r2 = await run_model_wizard_step(fa, state, "ak-123")
+    assert "model_id" in r2  # discovery failed → manual model_id
+    r3 = await run_model_wizard_step(fa, state, "dots3-note-prev")
     assert "已保存" in r3
     saved = fa.profiles["dots3-note-prev"]
     assert saved.base_url == "https://note3-prev-api.askdiandian.com/v1"

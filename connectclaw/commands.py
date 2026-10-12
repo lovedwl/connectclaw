@@ -10,10 +10,12 @@ Add new commands with the @register decorator below.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from typing import Any, Awaitable, Callable
 
 from connectclaw.logging import get_logger
+from connectclaw.model_registry import ModelProfile, normalize_url
 
 logger = get_logger(__name__)
 
@@ -316,21 +318,110 @@ def _profile_from_pairs(pairs: dict) -> dict:
     return p
 
 
-MODEL_WIZARD_STEPS = ["base_url", "model_id", "api_key"]
+MODEL_WIZARD_STEPS = ["base_url", "api_key"]
 _MODEL_WIZARD_PROMPTS = {
     "base_url": "① base_url（OpenAI 兼容端点，多数网关是 `https://网关地址/v1`；粘贴的链接也可以）：",
-    "model_id": "② model_id（模型名，如 `deepseek-v4-flash`）：",
-    "api_key": "③ api_key（没有可回复 `无` 跳过）：",
+    "api_key": "② api_key（没有可回复 `无` 跳过）：",
+    "model_id": "③ model_id（模型名，如 `deepseek-v4-flash`）：",
 }
+_CANCEL_WORDS = ("取消", "cancel", "/cancel", "退出")
+
+
+def _proxy_of(agent: Any) -> str | None:
+    cfg = getattr(agent, "_config", None)
+    return (getattr(cfg, "proxy", None) and cfg.proxy.url) or None
+
+
+def _render_pick_list(items: list[dict]) -> str:
+    from connectclaw.model_discovery import fmt_ctx
+
+    lines = ["发现以下模型（回复**序号**选择；或直接回复**模型名**手动添加；回复 `取消` 退出）："]
+    for i, e in enumerate(items[:30], 1):
+        lines.append(f"{i}. `{e['id']}` · 上下文 {fmt_ctx(e.get('ctx'))} / 输出 {fmt_ctx(e.get('mt'))}")
+    if len(items) > 30:
+        lines.append(f"…共 {len(items)} 个（仅列前 30）")
+    return "\n".join(lines)
+
+
+def _parse_selection(value: str, n: int) -> list[int] | None:
+    """`1,3` / `1~3` / `1-3` / `all` → 1-based indices; None = unparseable."""
+    v = (value or "").strip().lower().strip("。.!！ ")
+    if v in ("all", "全部", "*"):
+        return list(range(1, n + 1))
+    out: list[int] = []
+    for part in re.split(r"[,，\s]+", v):
+        if not part:
+            continue
+        if re.fullmatch(r"\d+", part):
+            i = int(part)
+            if 1 <= i <= n and i not in out:
+                out.append(i)
+        elif re.fullmatch(r"\d+[~-]\d+", part):
+            a_s, b_s = re.split(r"[~-]", part)
+            lo, hi = sorted((int(a_s), int(b_s)))
+            for i in range(lo, hi + 1):
+                if 1 <= i <= n and i not in out:
+                    out.append(i)
+        else:
+            return None
+    return sorted(out)
+
+
+async def _finish_wizard_add(agent: Any, state: dict, model_id: str,
+                             ctx: int | None, mt: int | None) -> str:
+    """Common tail: build + save the profile from collected wizard fields."""
+    from connectclaw.model_discovery import DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, fmt_ctx
+
+    fields = state["fields"]
+    p = ModelProfile(
+        name=fields.get("name", ""),
+        base_url=fields.get("base_url", ""),
+        model_id=model_id,
+        api_key=fields.get("api_key", ""),
+        context_window=ctx or DEFAULT_CONTEXT_WINDOW,
+        max_tokens=mt or DEFAULT_MAX_TOKENS,
+    )
+    agent.pop_wizard(state.get("_conv", ""))
+    if not p.base_url or not p.model_id:
+        return "❌ base_url/model_id 不能为空，已放弃。"
+    name = agent.save_model_profile(p)
+    det = (f" · 上下文 {fmt_ctx(ctx)}" if ctx
+           else " · 上下文未暴露（默认 64k，可 /model edit 或发现后更新）")
+    return (
+        f"✅ 已保存 profile **{name}**（`{p.model_id}` @ {p.base_url}{det}）。\n"
+        f"建议下一步：`/model test {name}` 实测 → 通过后 `/model set {name}` 激活。"
+    )
 
 
 async def run_model_wizard_step(agent: Any, state: dict, text: str) -> str:
-    """Feed one non-command reply into a pending /model add wizard."""
-    from connectclaw.model_registry import ModelProfile, normalize_url
+    """Feed one non-command reply into a pending /model wizard.
+
+    Modes:
+    - add (manual): base_url → api_key → auto /models discovery → pick a
+      number (or paste a model_id); discovery failure falls back to a manual
+      model_id prompt so the wizard always completes.
+    - add_pick: choose from the discovered list.
+    - sync_pick: /model sync — pick which discovered models to add/update.
+    """
+    from connectclaw import model_discovery
+
+    mode = state.get("mode", "add")
+    if text.strip() in _CANCEL_WORDS:
+        agent.pop_wizard(state.get("_conv", ""))
+        return "已取消。"
+    if mode == "sync_pick":
+        return await _wizard_sync_pick(agent, state, text)
+    if mode == "add_pick":
+        return await _wizard_add_pick(agent, state, text)
 
     idx = state.get("step", 0)
     if idx >= len(MODEL_WIZARD_STEPS):
-        return "向导已结束，可用 /model 查看。"
+        # base_url+api_key collected; manual fallback waiting for a model_id
+        value = text.strip()
+        if not value:
+            return _MODEL_WIZARD_PROMPTS["model_id"]
+        return await _finish_wizard_add(agent, state, value, None, None)
+
     key = MODEL_WIZARD_STEPS[idx]
     value = text.strip()
     if key == "api_key" and value in ("无", "none", "/skip"):
@@ -352,27 +443,156 @@ async def run_model_wizard_step(agent: Any, state: dict, text: str) -> str:
     if idx < len(MODEL_WIZARD_STEPS):
         agent.set_wizard(state.get("_conv", ""), state)
         return _MODEL_WIZARD_PROMPTS[MODEL_WIZARD_STEPS[idx]]
-    # complete
+
+    # base_url + api_key in hand → auto-discovery (2026-10)
+    base = state["fields"].get("base_url", "")
+    api_key = state["fields"].get("api_key", "")
+    try:
+        entries, endpoint = await model_discovery.fetch_model_list(
+            base, api_key, _proxy_of(agent), timeout=10)
+    except Exception as e:  # noqa: BLE001 — keep the wizard alive
+        agent.set_wizard(state.get("_conv", ""), state)
+        return (f"⚠️ 自动发现失败（{e}）。直接回复 model_id 手动添加：\n"
+                + _MODEL_WIZARD_PROMPTS["model_id"])
+    if not entries:
+        agent.set_wizard(state.get("_conv", ""), state)
+        return ("该端点 /models 返回空列表（网关不暴露清单）。直接回复 model_id 手动添加：\n"
+                + _MODEL_WIZARD_PROMPTS["model_id"])
+    state["mode"] = "add_pick"
+    state["items"] = [{"id": e["id"], "ctx": e["max_input"], "mt": e["max_output"]}
+                      for e in entries]
+    agent.set_wizard(state.get("_conv", ""), state)
+    return (f"✅ `{endpoint}/models` 共 {len(entries)} 个模型：\n"
+            + _render_pick_list(state["items"]))
+
+
+async def _wizard_add_pick(agent: Any, state: dict, text: str) -> str:
+    """Choose a discovered model (number) or paste an arbitrary model_id."""
+    items = state.get("items") or []
+    value = text.strip()
+    if value.isdigit():
+        i = int(value)
+        if 1 <= i <= len(items):
+            choice = items[i - 1]
+        else:
+            return f"序号超出范围（1~{len(items)}）。\n" + _render_pick_list(items)
+    elif value in [e["id"] for e in items]:
+        choice = next(e for e in items if e["id"] == value)
+    else:
+        choice = {"id": value, "ctx": None, "mt": None}
+    return await _finish_wizard_add(agent, state, choice["id"],
+                                    choice.get("ctx"), choice.get("mt"))
+
+
+async def _wizard_sync_pick(agent: Any, state: dict, text: str) -> str:
+    """/model sync pick: save the selected discovered models (add/update)."""
+    from connectclaw.model_discovery import DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, fmt_ctx
+
+    items = state.get("items") or []
+    sel = _parse_selection(text, len(items))
+    if sel is None:
+        return "回复格式：序号 `1,3` · 范围 `1~5` · `all`（全部）；`取消` 退出。"
+    if not sel:
+        return f"没有选择任何模型（序号需在 1~{len(items)} 内）。"
+    added, updated, skipped = [], [], []
+    for i in sel:
+        item = items[i - 1]
+        ex = state.get("existing", {}).get(item["id"])
+        cur = agent.get_model_profile(ex) if ex else None
+        if cur is not None:
+            if item.get("ctx") or item.get("mt"):
+                if item.get("ctx"):
+                    cur.context_window = item["ctx"]
+                if item.get("mt"):
+                    cur.max_tokens = item["mt"]
+                agent.save_model_profile(cur)
+                updated.append(f"{item['id']}（→ {fmt_ctx(item.get('ctx') or cur.context_window)}/"
+                               f"{fmt_ctx(item.get('mt') or cur.max_tokens)}）")
+            else:
+                skipped.append(f"{item['id']}（未暴露上限，无可更新）")
+        else:
+            p = ModelProfile(
+                name="", base_url=state["base_url"], model_id=item["id"],
+                api_key=state.get("raw_key", ""),
+                context_window=item.get("ctx") or DEFAULT_CONTEXT_WINDOW,
+                max_tokens=item.get("mt") or DEFAULT_MAX_TOKENS,
+                provider=state.get("provider", ""),
+            )
+            added.append(f"{agent.save_model_profile(p)}（{fmt_ctx(item.get('ctx') or DEFAULT_CONTEXT_WINDOW)}）")
     agent.pop_wizard(state.get("_conv", ""))
-    p = ModelProfile(
-        name=state["fields"].get("name", ""),
-        base_url=state["fields"].get("base_url", ""),
-        model_id=state["fields"].get("model_id", ""),
-        api_key=state["fields"].get("api_key", ""),
-    )
-    if not p.base_url or not p.model_id:
-        return "❌ base_url/model_id 不能为空，向导已放弃。"
-    name = agent.save_model_profile(p)
-    return (
-        f"✅ 已保存 profile **{name}**（`{p.model_id}` @ {p.base_url}）。\n"
-        f"建议下一步：`/model test {name}` 实测 → 通过后 `/model set {name}` 激活。"
-    )
+    lines = [f"✅ 同步完成（**{state.get('provider', '?')}**）："]
+    lines.append("· 新增 " + str(len(added)) + "：" + ("、".join(added) if added else "无"))
+    lines.append("· 更新 " + str(len(updated)) + "：" + ("、".join(updated) if updated else "无"))
+    if skipped:
+        lines.append("· 跳过 " + str(len(skipped)) + "：" + "、".join(skipped))
+    lines.append("新模型可 `/model test <name>` 实测后 `/model set <name>` 激活。")
+    return "\n".join(lines)
+
+
+async def _model_sync(agent: Any, conversation_key: str, provider_arg: str) -> str:
+    """/model sync [provider] — text-channel discovery: fetch a provider's
+    /models, list them with detected limits, then a wizard picks by number
+    (add new / update existing)."""
+    from connectclaw import model_discovery
+    from connectclaw.model_card import group_by_provider
+    from connectclaw.model_discovery import fmt_ctx
+
+    profiles = agent.list_model_profiles()
+    if not profiles:
+        return "注册表为空，没有可借用 base_url/key 的 profile。先 /model add。"
+    groups = group_by_provider(profiles)
+    matches = groups
+    if provider_arg:
+        a = provider_arg.lower()
+        matches = []
+        for prov, ps in groups:
+            hosts = {model_discovery._host(p.base_url) for p in ps}
+            if a in (prov.lower(),) or a in hosts or any(a in h for h in hosts if h):
+                matches.append((prov, ps))
+    if not matches:
+        return f"❌ 没有匹配「{provider_arg}」的供应商。现有：{'、'.join(p for p, _ in groups)}"
+    if len(matches) > 1:
+        return ("匹配到多个供应商，请指定：\n"
+                + "\n".join(f"- {p}（{len(ps)} 个 profile）" for p, ps in matches)
+                + "\n用法：/model sync <供应商名>")
+    prov, ps = matches[0]
+    seed = ps[0]
+    try:
+        entries, endpoint = await model_discovery.fetch_model_list(
+            seed.base_url, seed.resolved_api_key(), _proxy_of(agent))
+    except model_discovery.DiscoveryError as e:
+        return f"❌ 发现失败（{prov}）：{e}"
+    if not entries:
+        return (f"⚠️ `{endpoint}/models` 返回空列表（{prov} 的网关不暴露模型清单），"
+                f"请手动 /model add。")
+    existing = {e["id"]: model_discovery.match_existing(profiles, seed.base_url, e["id"])
+                for e in entries}
+    items = [{"id": e["id"], "ctx": e["max_input"], "mt": e["max_output"],
+              "exists": (existing[e["id"]].name if existing[e["id"]] else None)}
+             for e in entries]
+    state = {"mode": "sync_pick", "provider": prov, "base_url": seed.base_url,
+             "raw_key": seed.api_key, "endpoint": endpoint, "items": items,
+             "existing": {e["id"]: (existing[e["id"]].name if existing[e["id"]] else None)
+                          for e in entries},
+             "fields": {}}
+    agent.set_wizard(conversation_key, state)
+    lines = [f"🔍 **{prov}** · `{endpoint}/models` 共 {len(entries)} 个模型（上下文/输出，? = 未暴露）："]
+    for i, it in enumerate(items[:40], 1):
+        mark = f" · 已有 `{it['exists']}`" if it["exists"] else ""
+        lines.append(f"{i}. `{it['id']}`  {fmt_ctx(it['ctx'])}/{fmt_ctx(it['mt'])}{mark}")
+    if len(items) > 40:
+        lines.append(f"…共 {len(entries)} 个（只显示前 40，序号仍按完整列表）")
+    lines.append("")
+    lines.append("回复 **序号** 保存（不存在→新增，存在→更新上下文/输出上限）：`1,3` · `1~5` · `all`；`取消` 退出。")
+    return "\n".join(lines)
+
 
 
 @register(
     "/model",
-    "模型逃生口：/model 清单 · /model add 添加(向导) · /model test <name> 实测 · "
-    "/model set <name> 激活 · /model edit|rm <name> · /model verify <base_url> · /model cancel",
+    "模型逃生口：/model 清单+卡片发现 · /model sync 自动发现 · /model add 添加(向导) · "
+    "/model test <name> 实测 · /model set <name> 激活 · /model edit|rm <name> · "
+    "/model verify <base_url> · /model cancel",
 )
 async def _model(conversation_key: str, agent: Any, args: str = "") -> str:
     parts = (args or "").split()
@@ -414,6 +634,9 @@ async def _model(conversation_key: str, agent: Any, args: str = "") -> str:
         url = rest.strip() or (parts[1] if len(parts) > 1 else "")
         return await _model_verify(agent, url)
 
+    if sub == "sync":
+        return await _model_sync(agent, conversation_key, rest.strip())
+
     if sub == "cancel":
         agent.pop_wizard(conversation_key)
         return "已取消当前向导。"
@@ -424,9 +647,10 @@ async def _model(conversation_key: str, agent: Any, args: str = "") -> str:
 def _model_help() -> str:
     return (
         "**/model —— 模型逃生口**\n"
-        "· `/model` 弹出**选择卡片**：供应商（按 key 区分）→ 模型 → 点击即热切换\n"
+        "· `/model` 弹出**选择卡片**：供应商（按 key 区分）→ 模型（点击即热切换）→ 🔍 一键自动发现该供应商的模型并带出上下文长度\n"
         "· `/model list` 文本清单（按供应商分组）\n"
-        "· `/model add` 交互向导添加；或 `/model add name=x base_url=... model_id=... api_key=... [provider=...]`\n"
+        "· `/model add` 交互向导添加（填完 base_url+key 后自动查 /models 列表供选择）；或 `/model add name=x base_url=... model_id=... api_key=... [provider=...]`\n"
+        "· `/model sync [供应商]` 一键自动发现：查 `/models` + 上下文/输出上限，回复序号批量新增/更新已有 profile\n"
         "· `/model test <name>` 对该模型发送最小请求实测（逃生校验）\n"
         "· `/model set <name>` 激活（热切换全部会话 + 写入 config.toml）\n"
         "· `/model edit <name> base_url=... model_id=... [provider=...]` / `/model rm <name>`\n"
@@ -490,7 +714,8 @@ async def _model_add(agent: Any, conversation_key: str, partial, name_hint: str 
         fields = {k: d.get(k, "") for k in ("base_url", "model_id", "api_key")}
     if name_hint:
         fields["name"] = name_hint
-    state = {"fields": fields, "step": 0, "_conv": conversation_key}
+    state = {"fields": fields, "step": (1 if fields.get("base_url") else 0),
+             "_conv": conversation_key, "mode": "add"}
     agent.set_wizard(conversation_key, state)
     return "开始添加模型 profile（向导会逐个收集，随时 `/model cancel` 取消）。\n" + _MODEL_WIZARD_PROMPTS["base_url"]
 
