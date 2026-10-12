@@ -28,6 +28,39 @@ _client_cache_lock = asyncio.Lock()
 _client_cache_max = 8
 
 
+def _merge_tool_call_slots(slots: dict[int, dict], partial: "AssistantMessage") -> None:
+    """Parse accumulated tool-call argument JSON and merge slots into
+    partial.content (appended after thinking/text blocks).
+
+    2026-10 (F5): a truncated/mangled arguments JSON used to be silently
+    replaced with {} — the tool then ran with empty params ("edits 为空")
+    and the model got no idea why. Now the slot is marked args_error with a
+    human-readable reason so the agent loop short-circuits and tells the
+    model to retry or split the call.
+    """
+    import json as _json
+
+    for api_idx in sorted(slots):
+        slot = slots[api_idx]
+        raw = slot.get("_args_json")
+        slot.pop("_args_json", None)
+        if raw:
+            try:
+                slot["arguments"] = _json.loads(raw)
+            except _json.JSONDecodeError:
+                logger.warning(
+                    "toolCall args JSON incomplete (truncated?): stop=%s tail=%r",
+                    partial.stop_reason, raw[-160:],
+                )
+                slot["arguments"] = {}
+                slot["args_error"] = (
+                    "工具调用参数在流式传输中被截断，JSON 不完整，无法解析；工具未执行。"
+                    "请重试该调用；若 payload 较大，请拆成更小的多次调用。"
+                )
+        partial.content.append(slot)
+    slots.clear()
+
+
 async def stream_simple(
     model: Model,
     context: Context,
@@ -245,19 +278,7 @@ async def stream_simple(
                 if finish_reason:
                     # Merge tool call slots (appended after thinking/text blocks)
                     if _tool_call_slots:
-                        import json as _json
-                        for api_idx in sorted(_tool_call_slots):
-                            slot = _tool_call_slots[api_idx]
-                            if slot.get("_args_json"):
-                                try:
-                                    slot["arguments"] = _json.loads(slot.pop("_args_json"))
-                                except _json.JSONDecodeError:
-                                    slot["arguments"] = {}
-                                    slot.pop("_args_json", None)
-                            else:
-                                slot.pop("_args_json", None)
-                            partial.content.append(slot)
-                        _tool_call_slots.clear()
+                        _merge_tool_call_slots(_tool_call_slots, partial)
 
                     match finish_reason:
                         case "stop":
@@ -279,19 +300,7 @@ async def stream_simple(
 
             # Stream ended without explicit finish_reason
             if _tool_call_slots:
-                import json as _json
-                for api_idx in sorted(_tool_call_slots):
-                    slot = _tool_call_slots[api_idx]
-                    if slot.get("_args_json"):
-                        try:
-                            slot["arguments"] = _json.loads(slot.pop("_args_json"))
-                        except _json.JSONDecodeError:
-                            slot["arguments"] = {}
-                            slot.pop("_args_json", None)
-                    else:
-                        slot.pop("_args_json", None)
-                    partial.content.append(slot)
-                _tool_call_slots.clear()
+                _merge_tool_call_slots(_tool_call_slots, partial)
             if saw_finish_reason:
                 logger.debug("stream done: stop_reason=%s content_blocks=%d chunks=%d usage=%s",
                              partial.stop_reason, len(partial.content), chunk_count, partial.usage or "{}")

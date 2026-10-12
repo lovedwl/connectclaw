@@ -12,6 +12,10 @@ from typing import Literal, Union
 from .config import HASH_LENGTH_MAX, HASH_LENGTH_MIN, get_hash_length
 from .hash import HASH_ALPHABET_RE, NIBBLE_STR
 
+from connectclaw.logging import get_logger
+
+logger = get_logger(__name__)
+
 # ─── Display-prefix rejection regexes ──────────────────────────────────────
 # These detect (and reject) hashline display prefixes inside edit payloads.
 # They match ALL supported hash lengths, not just the session's.
@@ -307,11 +311,74 @@ def _normalize_exact_text(text: str | None) -> str:
 # Ported from pi-hashline-edit/src/edit-normalize.ts.
 
 
+def _repair_edits_json_string(s: str) -> list | None:
+    """Repair a model-mangled JSON array string (2026-10, F5).
+
+    qwen-family models, when double-encoding the edits array as a string,
+    occasionally drop the closing ']' right before an "op" key — the key then
+    lands inside the array and json.loads fails ("Expecting ',' delimiter").
+    Structural state machine repair: when ':' arrives with the stack top '['
+    (key inside array), close the array before the key keeping exactly one
+    comma between ']' and the key; finally append any still-unclosed brackets.
+    Returns the recovered list, or None when unrecoverable (e.g. truncated
+    mid-string).
+    """
+    out: list[str] = []
+    stack: list[str] = []
+    in_str = False
+    esc = False
+    key_start = 0
+    for ch in s:
+        if in_str:
+            out.append(ch)
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            key_start = len(out)
+            in_str = True
+            out.append(ch)
+        elif ch == ":":
+            if stack and stack[-1] == "[":
+                pre = out[:key_start]
+                k = len(pre)
+                while k > 0 and pre[k - 1] == " ":
+                    k -= 1
+                if k > 0 and pre[k - 1] == ",":
+                    out = pre[:k - 1] + ["]", ","] + out[key_start:]
+                else:
+                    out = pre[:k] + ["]", ","] + out[key_start:]
+                stack.pop()
+            out.append(ch)
+        else:
+            if ch in "[{":
+                stack.append(ch)
+            elif ch in "]}":
+                if stack:
+                    stack.pop()
+            out.append(ch)
+    if in_str:
+        return None  # truncated mid-string: content lost, unrecoverable
+    for opener in reversed(stack):
+        out.append("]" if opener == "[" else "}")
+    import json
+    try:
+        parsed = json.loads("".join(out))
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, list) else None
+
+
 def _coerce_edits_array(edits: object) -> object:
     """Parse edits when a model serializes it as a JSON string.
 
-    Tries JSON first, then ast.literal_eval for Python-style literals
-    (some models use single quotes in "code-like" fields).
+    Tries JSON first, then structural repair (dropped brackets — see
+    _repair_edits_json_string), then ast.literal_eval for Python-style
+    literals (some models use single quotes in "code-like" fields).
     """
     if not isinstance(edits, str):
         return edits
@@ -322,6 +389,14 @@ def _coerce_edits_array(edits: object) -> object:
         return parsed if isinstance(parsed, list) else edits
     except json.JSONDecodeError:
         pass
+
+    repaired = _repair_edits_json_string(edits)
+    if repaired is not None:
+        logger.warning(
+            "coerce_edits_array: repaired structurally mangled edits JSON (%d items)",
+            len(repaired),
+        )
+        return repaired
 
     # Fallback: Python literal (handles single quotes, Python-style syntax)
     import ast

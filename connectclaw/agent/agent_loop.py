@@ -18,6 +18,7 @@ from connectclaw.provider.types import (
     Context,
     ToolDef,
     ToolResultMessage,
+    UserMessage,
 )
 
 from .types import (
@@ -107,6 +108,8 @@ async def _run_loop(
 
     first_turn = True
     pending_messages: list[AgentMessage] = []
+    # 2026-10 (F5 family): count of consecutive silent no-op nudges
+    _noop_retries = 0
 
     if config.get_steering_messages:
         pending_messages = await config.get_steering_messages()
@@ -149,6 +152,43 @@ async def _run_loop(
                 await emit({"type": "agent_end", "messages": new_messages})
                 return
 
+            # 2026-10 (F5 family): the model sometimes ends a turn with thinking
+            # only — no tool call, no visible text. The turn silently no-ops and
+            # the user stares at a frozen progress card (2026-10-12: 24 min of
+            # silence until the user poked us). Detect it and nudge the model to
+            # continue, up to 2 times.
+            if (
+                message.stop_reason == "stop"
+                and not any(c.get("type") == "toolCall" for c in message.content)
+                and not any(
+                    isinstance(b.get("text"), str) and b["text"].strip()
+                    for b in message.content
+                    if b.get("type") == "text"
+                )
+                and _noop_retries < 2
+            ):
+                _noop_retries += 1
+                logger.warning(
+                    "silent no-op turn (thinking only, no tool call, no text); nudging (%d/2)",
+                    _noop_retries,
+                )
+                new_messages.append(message)
+                await emit({
+                    "type": "turn_end",
+                    "message": message,
+                    "tool_results": [],
+                })
+                # Injected at the top of the next inner-loop iteration
+                pending_messages = [UserMessage(
+                    content=(
+                        "（系统提示）上一条回复没有产生任何可见内容或工具调用。"
+                        "请继续完成上一步的操作：直接给出工具调用，或给出可见回复。"
+                    ),
+                    timestamp=time.time() * 1000,
+                )]
+                continue
+
+            _noop_retries = 0
             new_messages.append(message)
 
             # Check for tool calls
@@ -695,6 +735,11 @@ async def _prepare_tool_call(
 
     args = tc.get("arguments", {})
 
+    # 2026-10 (F5): the stream parser marks truncated tool-call args with
+    # args_error — refuse to run the tool with empty params, surface a clear
+    # error so the model retries or splits the call.
+    if tc.get("args_error"):
+        raise RuntimeError(tc["args_error"])
     # Call before_tool_call hook
     if config.before_tool_call:
         hook_result = await config.before_tool_call(
