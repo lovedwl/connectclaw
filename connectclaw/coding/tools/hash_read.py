@@ -13,6 +13,7 @@ from connectclaw.hashline.format import format_hashline_region
 from connectclaw.hashline.snapshot import remember_read_snapshot
 from connectclaw.hashline.guard import clear_applied_payload
 from connectclaw.hashline.diff_util import normalize_to_lf, strip_bom
+from connectclaw.security import is_protected
 
 # ─── Truncation ─────────────────────────────────────────────────────────────
 
@@ -73,8 +74,9 @@ class HashReadTool(AgentTool):
         "required": ["path"],
     }
 
-    def __init__(self, cwd: str):
+    def __init__(self, cwd: str, read_tool: object = None):
         self._cwd = cwd
+        self._read_tool = read_tool
 
     async def execute(
         self,
@@ -90,12 +92,14 @@ class HashReadTool(AgentTool):
         if not os.path.isfile(absolute_path):
             return AgentToolResult(
                 content=[{"type": "text", "text": f"错误：文件不存在：{file_path}"}],
+                details={"is_error": True},
             )
 
         # Check is not a directory
         if os.path.isdir(absolute_path):
             return AgentToolResult(
                 content=[{"type": "text", "text": f"错误：路径是目录：{file_path}"}],
+                details={"is_error": True},
             )
 
         # Read file
@@ -108,10 +112,12 @@ class HashReadTool(AgentTool):
                     "type": "text",
                     "text": f"错误：文件为二进制或非 UTF-8：{file_path}。请使用 read 工具进行二进制检查。",
                 }],
+                details={"is_error": True},
             )
         except Exception as e:
             return AgentToolResult(
                 content=[{"type": "text", "text": f"读取文件错误：{e}"}],
+                details={"is_error": True},
             )
 
         # Strip BOM, normalize line endings
@@ -157,7 +163,8 @@ class HashReadTool(AgentTool):
                         f"使用 offset=1 从头读取，"
                         f"或 offset={total_lines} 读取最后一行。"
                     ),
-                }]
+                }],
+                details={"is_error": True},
             )
 
         start_idx = offset - 1
@@ -194,7 +201,8 @@ class HashReadTool(AgentTool):
                                 f"Hashline 输出需要完整行；"
                                 f"无法为已截断的预览计算哈希。]"
                             ),
-                        }]
+                        }],
+                        details={"is_error": True},
                     )
             # Truncate by reducing end_idx
             while len(output.encode("utf-8")) > MAX_BYTES and end_idx > start_idx + 1:
@@ -235,6 +243,22 @@ class HashReadTool(AgentTool):
             remember_read_snapshot(absolute_path, normalized)
             clear_applied_payload(absolute_path)
 
+        # 2026-10 R2 bridge: a successful hash_read also satisfies the legacy
+        # read tool's read-before-write ledger, so hash_read -> write is no
+        # longer refused (the two generations kept separate ledgers before).
+        if self._read_tool is not None:
+            recently = getattr(self._read_tool, "recently_read", None)
+            if isinstance(recently, set):
+                recently.add(absolute_path)
+
+        # 2026-10 R6: read-only protected files (escape config) — warn up
+        # front so the agent does not burn a hash_edit call that must fail.
+        if is_protected(absolute_path):
+            output = (
+                "⚠️ 该文件为只读受保护文件（逃生配置）："
+                "hash_edit/write 无法修改它，请不要再尝试编辑。\n\n"
+            ) + output
+
         return AgentToolResult(
             content=[{"type": "text", "text": output}],
         )
@@ -245,5 +269,5 @@ class HashReadTool(AgentTool):
         return os.path.normpath(os.path.join(self._cwd, path))
 
 
-def create_hash_read_tool(cwd: str) -> HashReadTool:
-    return HashReadTool(cwd)
+def create_hash_read_tool(cwd: str, read_tool: object = None) -> HashReadTool:
+    return HashReadTool(cwd, read_tool)

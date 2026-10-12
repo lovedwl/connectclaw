@@ -122,8 +122,20 @@ class HashEditTool(AgentTool):
         signal: asyncio.Event | None = None,
         on_update: Any = None,
     ) -> AgentToolResult:
-        raw_path = params["path"]
+        raw_path = params.get("path")
         raw_edits = params.get("edits", [])
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            return AgentToolResult(
+                content=[{
+                    "type": "text",
+                    "text": (
+                        "错误：缺少必填参数 path。若本调用带有大体积 payload，"
+                        "参数可能已在传输中被截断 —— 请重试本调用，"
+                        "或把编辑拆成更小的多次调用。"
+                    ),
+                }],
+                details={"is_error": True},
+            )
 
         # ── Normalize request ──────────────────────────────
         try:
@@ -131,7 +143,7 @@ class HashEditTool(AgentTool):
         except ValueError as e:
             return AgentToolResult(
                 content=[{"type": "text", "text": f"错误：{e}"}],
-                details={"error": str(e)},
+                details={"error": str(e), "is_error": True},
             )
 
         path = normalized.get("path", raw_path)
@@ -148,16 +160,26 @@ class HashEditTool(AgentTool):
         if not os.path.isfile(absolute_path):
             return AgentToolResult(
                 content=[{"type": "text", "text": f"错误：文件不存在：{path}。请使用 write 工具创建新文件。"}],
+                details={"is_error": True},
             )
 
         if os.path.isdir(absolute_path):
             return AgentToolResult(
                 content=[{"type": "text", "text": f"错误：路径是目录：{path}"}],
+                details={"is_error": True},
             )
 
         if not isinstance(edits_raw, list) or len(edits_raw) == 0:
             return AgentToolResult(
-                content=[{"type": "text", "text": "错误：未提供任何编辑。"}],
+                content=[{
+                    "type": "text",
+                    "text": (
+                        "错误：未收到任何编辑（edits 为空或缺失）。"
+                        "若本调用带有大体积 payload，参数可能已在传输中被"
+                        "截断 —— 请重试本调用，或把编辑拆成更小的多次调用。"
+                    ),
+                }],
+                details={"is_error": True},
             )
 
         # ── Read file ─────────────────────────────────────
@@ -170,10 +192,12 @@ class HashEditTool(AgentTool):
                     "type": "text",
                     "text": f"错误：文件为二进制或非 UTF-8：{path}。Hashline 编辑仅支持文本文件。",
                 }],
+                details={"is_error": True},
             )
         except Exception as e:
             return AgentToolResult(
                 content=[{"type": "text", "text": f"读取文件错误：{e}"}],
+                details={"is_error": True},
             )
 
         bom, raw_text = strip_bom(content)
@@ -194,6 +218,7 @@ class HashEditTool(AgentTool):
         except ValueError as e:
             return AgentToolResult(
                 content=[{"type": "text", "text": f"错误：{e}"}],
+                details={"error": str(e), "is_error": True},
             )
 
         # ── Duplicate-edit guard ──────────────────────────
@@ -222,7 +247,7 @@ class HashEditTool(AgentTool):
         except ValueError as e:
             return AgentToolResult(
                 content=[{"type": "text", "text": f"错误：{e}"}],
-                details={"error": str(e)},
+                details={"error": str(e), "is_error": True},
             )
 
         # ── Handle noop ───────────────────────────────────
@@ -276,6 +301,7 @@ class HashEditTool(AgentTool):
         except Exception as e:
             return AgentToolResult(
                 content=[{"type": "text", "text": f"写入文件错误：{e}"}],
+                details={"is_error": True},
             )
 
         record_applied_edit(absolute_path, payload_key)

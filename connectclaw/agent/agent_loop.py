@@ -552,7 +552,7 @@ async def _execute_parallel(
             is_error = True
         elif isinstance(exec_result, AgentToolResult):
             result = exec_result
-            is_error = False
+            is_error = _result_is_error(exec_result)
         else:
             result = AgentToolResult(
                 content=[{"type": "text", "text": f"Unexpected result: {exec_result}"}],
@@ -723,6 +723,16 @@ def _make_tool_update(config: AgentLoopConfig, tc: dict[str, Any]):
     return _on_update
 
 
+def _result_is_error(result: AgentToolResult) -> bool:
+    """Honor a tool's self-reported logical failure (details['is_error']).
+    
+    2026-10 fix: tool results used to be flattened to is_error=False in the
+    loop, silencing refusals/validation failures (hash_edit E_BAD_REF,
+    protected files, ...) so the harness/Feishu card never saw them as errors.
+    """
+    details = getattr(result, "details", None)
+    return bool(isinstance(details, dict) and details.get("is_error"))
+
 async def _execute_prepared_tool(
     tc: dict[str, Any],
     tool: AgentTool,
@@ -734,7 +744,7 @@ async def _execute_prepared_tool(
     try:
         on_update = _make_tool_update(config, tc) if config else None
         result = await tool.execute(tc["id"], args, signal=signal, on_update=on_update)
-        return result, False
+        return result, _result_is_error(result)
     except Exception as e:
         return (
             AgentToolResult(

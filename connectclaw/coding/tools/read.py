@@ -58,6 +58,7 @@ class ReadTool(AgentTool):
         if not os.path.isfile(absolute_path):
             return AgentToolResult(
                 content=[{"type": "text", "text": f"错误：文件不存在：{file_path}"}],
+                details={"is_error": True},
             )
 
         # Read file
@@ -67,6 +68,7 @@ class ReadTool(AgentTool):
         except Exception as e:
             return AgentToolResult(
                 content=[{"type": "text", "text": f"读取文件错误：{e}"}],
+                details={"is_error": True},
             )
 
         lines = content.split("\n")

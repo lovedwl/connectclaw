@@ -105,7 +105,7 @@ class CodingAgent:
         # Create base tools (always available)
         self._read_tool = create_read_tool(config.agent.cwd)
         self._write_tool = create_write_tool(config.agent.cwd, self._read_tool)
-        self._hash_read_tool = create_hash_read_tool(config.agent.cwd)
+        self._hash_read_tool = create_hash_read_tool(config.agent.cwd, self._read_tool)
         self._hash_edit_tool = create_hash_edit_tool(config.agent.cwd)
         self._bash_guard = BashGuard()
         self._bash_tool = create_bash_tool(config.agent.cwd, self._bash_guard)

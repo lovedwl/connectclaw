@@ -10,7 +10,12 @@ from .hash import compute_line_hash
 # ─── Constants ──────────────────────────────────────────────────────────────
 
 ANCHOR_CONTEXT_LINES = 2
-ANCHOR_MAX_OUTPUT_LINES = 12
+ANCHOR_MAX_OUTPUT_LINES = 48
+
+# 2026-10: raised from 12 to 48. With 12, any edit touching more than ~8 lines
+# omitted its anchors and forced a full hash_read round-trip (48% of real
+# edits in session analysis). The 50 KiB text budget in hash_edit.py stays the
+# hard cap for genuinely huge changes.
 
 
 # ─── Affected-line computation ──────────────────────────────────────────────

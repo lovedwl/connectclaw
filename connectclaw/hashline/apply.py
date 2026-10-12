@@ -267,9 +267,20 @@ def _validate_anchor_edits(
 
     def _validate(ref: Anchor) -> bool:
         if ref.line < 1 or ref.line > len(line_index.file_lines):
+            visible = line_index.visible_line_count
+            if visible == 0:
+                raise ValueError(
+                    f"[E_RANGE_OOB] 第 {ref.line} 行不存在（文件共 0 行，为空文件）。"
+                    "请使用 hash_edit 的 prepend/append 并省略 pos 来插入内容。"
+                )
+            nearest = visible if ref.line > visible else 1
+            boundary = "最后一行" if nearest == visible else "第一行"
+            nh = compute_line_hash(line_index.file_lines, nearest - 1)
+            ncontent = _preview_text(line_index.file_lines[nearest - 1])
             raise ValueError(
-                f"[E_RANGE_OOB] 第 {ref.line} 行不存在"
-                f"（文件共有 {line_index.visible_line_count} 行）"
+                f"[E_RANGE_OOB] 第 {ref.line} 行不存在（文件共有 {visible} 行）。"
+                f"文件{boundary}的当前锚点：{nearest}#{nh}:{ncontent} — "
+                f"请改用有效范围内的锚点，或重新 hash_read 获取最新锚点。"
             )
         line = line_index.file_lines[ref.line - 1]
         actual = compute_line_hash(line_index.file_lines, ref.line - 1)

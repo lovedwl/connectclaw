@@ -47,8 +47,27 @@ class WriteTool(AgentTool):
         signal: asyncio.Event | None = None,
         on_update: Any = None,
     ) -> AgentToolResult:
-        file_path = params["file_path"]
-        content = params["content"]
+        file_path = params.get("file_path")
+        content = params.get("content")
+        if not isinstance(file_path, str) or not file_path.strip():
+            return AgentToolResult(
+                content=[{
+                    "type": "text",
+                    "text": (
+                        "错误：缺少必填参数 file_path。若本调用带有大体积 payload，"
+                        "参数可能已在传输中被截断 —— 请重试本调用，或把内容拆小。"
+                    ),
+                }],
+                details={"is_error": True},
+            )
+        if not isinstance(content, str):
+            return AgentToolResult(
+                content=[{
+                    "type": "text",
+                    "text": "错误：缺少必填参数 content（文件内容），或其在传输中被截断。请重试本调用。",
+                }],
+                details={"is_error": True},
+            )
         absolute_path = self._resolve_path(file_path)
 
         # Agent must never modify the escape-hatch security files (operator
@@ -77,6 +96,7 @@ class WriteTool(AgentTool):
                         f"请使用 cwd 内的 /tmp 路径，或写入项目目录。"
                     ),
                 }],
+                details={"is_error": True},
             )
 
         # Enforce read-before-write for existing files
@@ -88,9 +108,10 @@ class WriteTool(AgentTool):
                         "type": "text",
                         "text": (
                             f"错误：文件 '{file_path}' 已存在但尚未读取。"
-                            f"写入前必须先用 read 工具读取该文件。"
+                            f"写入前必须先用 read 或 hash_read 工具读取该文件。"
                         ),
                     }],
+                    details={"is_error": True},
                 )
 
         # Atomic write: write to temp file, then rename
@@ -126,6 +147,7 @@ class WriteTool(AgentTool):
                     pass
             return AgentToolResult(
                 content=[{"type": "text", "text": f"写入文件错误：{e}"}],
+                details={"is_error": True},
             )
 
     def _resolve_path(self, path: str) -> str:
