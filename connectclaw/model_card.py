@@ -193,6 +193,24 @@ def _proxy_of(agent: Any) -> str | None:
     return (getattr(cfg, "proxy", None) and cfg.proxy.url) or None
 
 
+def _active_of(agent: Any) -> str | None:
+    """当前激活 profile 的名字：config.llm 与注册表比对定位。
+
+    CodingAgent 并没有 active_model_name 属性（2026-10 发现，之前的
+    getattr 护栏是哑的），这里用 entry_model_profile() 的 model_id+host
+    匹配注册表；getattr 保留作测试桩回退。"""
+    try:
+        llm = agent.entry_model_profile()
+        for p in agent.list_model_profiles():
+            if (p.model_id == llm.model_id
+                    and model_discovery._host(p.base_url)
+                    == model_discovery._host(llm.base_url)):
+                return p.name
+    except Exception:  # noqa: BLE001  FakeAgent 等没有 entry_model_profile
+        pass
+    return getattr(agent, "active_model_name", None)
+
+
 def discovery_card(payload: dict, note: str = "") -> dict:
     """Level 3: discovered models with per-model 添加/更新 buttons.
 
@@ -209,12 +227,20 @@ def discovery_card(payload: dict, note: str = "") -> dict:
     )
     shown = items[:_DISCOVERY_MAX_ROWS]
     nonce = _render_nonce()
+    dead = bool(payload.get("dead_key"))
+    if dead:
+        head = (f"**{payload['provider']}** \u00b7 \U0001f6ab "
+                f"<font color='red'>key \u5df2\u5931\u6548\u2014\u2014 "
+                f"{len(gone)} \u4e2a profile \u4e0d\u53ef\u7528</font>")
+    else:
+        head = (f"**{payload['provider']}** \u00b7 \u53d1\u73b0 {len(items)} \u4e2a\u6a21\u578b"
+                + (f" \u00b7 <font color='red'>\U0001f5d1 \u5df2\u4e0b\u67b6 {len(gone)}</font>"
+                   if gone else "")
+                + f"\n<font color='grey'>`{payload['endpoint']}` \u00b7 ctx/\u8f93\u51fa\uff0c"
+                  "?=\u672a\u66b4\u9732 \u00b7 \u2795 \u6dfb\u52a0 \u00b7 \U0001f504 \u66f4\u65b0 "
+                  "\u00b7 \U0001f5d1 \u5220\u9664</font>")
     elements: list[dict] = [
-        {"tag": "markdown",
-         "content": (f"**{payload['provider']}** \u00b7 \u53d1\u73b0 {len(items)} \u4e2a\u6a21\u578b"
-                     + (f" \u00b7 <font color='red'>\U0001f5d1 \u5df2\u4e0b\u67b6 {len(gone)}</font>" if gone else "")
-                     + f"\n<font color='grey'>`{payload['endpoint']}` \u00b7 ctx/\u8f93\u51fa\uff0c"
-                     "?=\u672a\u66b4\u9732 \u00b7 \u2795 \u6dfb\u52a0 \u00b7 \U0001f504 \u66f4\u65b0 \u00b7 \U0001f5d1 \u5220\u9664</font>")},
+        {"tag": "markdown", "content": head},
         {"tag": "hr"},
     ]
     for item in shown:
@@ -244,8 +270,9 @@ def discovery_card(payload: dict, note: str = "") -> dict:
                          f"`/model sync {payload['provider']}` 文本处理</font>"})
     if gone:
         elements.append({"tag": "markdown", "content":
-                         "\u26a0\ufe0f <font color='red'>**\u672c\u5730\u5df2\u6709\u4f46\u7f51\u5173\u5df2\u4e0d\u63d0\u4f9b**" 
-                         "\uff08\u4e0b\u67b6\u6216\u8be5 key \u65e0\u6743\u9650\uff09\uff0c\u53ef\u6e05\u7406\uff1a</font>"})
+                         ("🚫 <font color='red'>**key \u5df2\u5931\u6548\uff0c\u4ee5\u4e0b profile \u5747\u4e0d\u53ef\u7528**\uff0c\u53ef\u6e05\u7406\uff1a</font>" if dead
+                          else "\u26a0\ufe0f <font color='red'>**\u672c\u5730\u5df2\u6709\u4f46\u7f51\u5173\u5df2\u4e0d\u63d0\u4f9b**"
+                                "\uff08\u4e0b\u67b6\u6216\u8be5 key \u65e0\u6743\u9650\uff09\uff0c\u53ef\u6e05\u7406\uff1a</font>")})
         for item in gone:
             label = (f"`{item['id']}`\n<font color='grey'>\u5df2\u6709 "
                      f"{item['exists']} \u00b7 ctx {fmt_ctx(item.get('ctx'))}</font>")
@@ -261,6 +288,10 @@ def discovery_card(payload: dict, note: str = "") -> dict:
                                           "danger", nonce=nonce)]},
                 ],
             })
+        elements.append(_row(_button(
+            f"🗑 全部清理（{len(gone)}）",
+            {"kind": KIND, "stage": "delete_all_gone"},
+            "danger", nonce=nonce)))
     elements.append({"tag": "hr"})
     n_unknown = sum(1 for i in items if not i.get("ctx"))
     if n_unknown:
@@ -268,9 +299,10 @@ def discovery_card(payload: dict, note: str = "") -> dict:
             f"🔎 探测未知上限（{min(n_unknown, _DISCOVERY_PROBE_CAP)}）",
             {"kind": KIND, "stage": "probe_unknown"},
             "default", nonce=nonce)))
-    elements.append(_row(_button(
-        "➕ 全部添加/更新", {"kind": KIND, "stage": "add_all"},
-        "primary", nonce=nonce)))
+    if not dead:
+        elements.append(_row(_button(
+            "\u2795 \u5168\u90e8\u6dfb\u52a0/\u66f4\u65b0", {"kind": KIND, "stage": "add_all"},
+            "primary", nonce=nonce)))
     elements.append(_row(_button(
         "‹ 返回模型列表", {"kind": KIND, "stage": "models",
                              "provider": payload["provider"]},
@@ -297,8 +329,23 @@ async def _stage_discover(agent, channel, value: dict, message_id: str) -> None:
     try:
         entries, endpoint = await model_discovery.fetch_model_list(
             seed.base_url, seed.resolved_api_key(), _proxy_of(agent))
+    except model_discovery.AuthError as e:
+        # key 已死：该 provider 全部 profile 都不可用 → 转入清理模式，
+        # 复用 gone 清单 + 🗑 逐个删（正在使用的模型受同样护栏）。
+        dead_items = [{"id": p.model_id or "?", "ctx": p.context_window or None,
+                       "mt": p.max_tokens or None, "exists": p.name, "gone": True}
+                      for p in profiles]
+        payload = {"provider": provider, "base_url": seed.base_url,
+                   "raw_key": seed.api_key, "resolved_key": seed.resolved_api_key(),
+                   "endpoint": "", "items": dead_items, "dead_key": True}
+        _cache_put(message_id, payload)
+        await channel.update_card(
+            message_id,
+            discovery_card(payload,
+                           note=f"🚫 {e} \u2014\u2014 \u53ef\u9010\u4e2a \U0001f5d1 \u6e05\u7406\uff0c\u6216\u7528\u65b0 key \u91cd\u65b0\u6dfb\u52a0\u3002"))
+        return
     except model_discovery.DiscoveryError as e:
-        await channel.update_card(message_id, result_card(f"❌ 发现失败：{e}", ok=False))
+        await channel.update_card(message_id, result_card(f"\u274c \u53d1\u73b0\u5931\u8d25\uff1a{e}", ok=False))
         return
     if not entries:
         await channel.update_card(
@@ -485,7 +532,7 @@ async def on_model_card_action(agent: Any, value: dict, chat_id: str, message_id
                     message_id,
                     result_card(f"\u26a0\ufe0f `{name}` \u4e0d\u5728\u5df2\u4e0b\u67b6\u6e05\u5355\u4e2d\uff08\u6216\u6e05\u5355\u5df2\u8fc7\u671f\uff09\uff0c\u8bf7\u91cd\u65b0\u53d1\u73b0\u3002", ok=False))
                 return
-            if name == getattr(agent, "active_model_name", None):
+            if name == _active_of(agent):
                 await channel.update_card(
                     message_id,
                     result_card(f"\u274c **{name}** \u6b63\u5728\u4f7f\u7528\u4e2d\uff0c\u5148\u5207\u6362\u5230\u522b\u7684\u6a21\u578b\u518d\u5220\u9664\u3002", ok=False))
@@ -500,6 +547,32 @@ async def on_model_card_action(agent: Any, value: dict, chat_id: str, message_id
             await channel.update_card(
                 message_id,
                 discovery_card(payload, note=f"\U0001f5d1 \u5df2\u5220\u9664 **{name}**\uff08`{target['id']}`\uff09"))
+        elif stage == "delete_all_gone":
+            payload = _cache_get(message_id)
+            if payload is None:
+                await channel.update_card(
+                    message_id, result_card("⚠️ 发现结果已过期，请重新 `/model`。", ok=None))
+                return
+            active = _active_of(agent)
+            deleted, kept = [], []
+            for it in [i for i in payload["items"] if i.get("gone")]:
+                nm = it.get("exists")
+                if not nm:
+                    continue
+                if nm == active:
+                    kept.append(nm)
+                    continue
+                if agent.delete_model_profile(nm):
+                    deleted.append(nm)
+            payload["items"] = [i for i in payload["items"]
+                                if not (i.get("gone")
+                                        and i.get("exists") in deleted)]
+            _cache_put(message_id, payload)
+            note = f"🗑 已清理 {len(deleted)} 个：{'、'.join(deleted) or '无'}"
+            if kept:
+                note += f"；正在使用的 **{'、'.join(kept)}** 已保留"
+            await channel.update_card(
+                message_id, discovery_card(payload, note=note))
         elif stage == "switch":
             name = value.get("name", "")
             p = agent.get_model_profile(name)

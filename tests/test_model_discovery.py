@@ -453,3 +453,63 @@ async def test_card_delete_guardrails():
         ag, {"stage": "delete_model", "name": "cur"}, "chat", "m2")
     assert "正在使用中" in _card_texts(ch.updates[-1][1])
     assert "cur" in ag._store
+
+
+async def test_dead_key_discovery_and_cleanup(monkeypatch):
+    """401/403 → AuthError → 死 key 清理卡片 → 全部清理一键删光。"""
+    from connectclaw import model_card
+
+    ag = FakeAgent()
+    for nm in ("old-a", "old-b"):
+        ag._store[nm] = ModelProfile(name=nm, base_url="https://x/",
+                                     model_id=nm, api_key="dead", provider="OLD")
+    ch = FakeChannel()
+    ag._channel = ch
+
+    async def boom(base, key, proxy=None, timeout=None):
+        raise model_card.model_discovery.AuthError(
+            "`https://x/v1/models` \u2192 HTTP 401\uff08key \u5df2\u5931\u6548\u6216\u88ab\u5c01\u7981\uff09")
+
+    monkeypatch.setattr(model_card.model_discovery, "fetch_model_list", boom)
+    await model_card.on_model_card_action(
+        ag, {"stage": "discover", "provider": "OLD"}, "chat", "m9")
+    card = ch.updates[-1][1]
+    txt = _card_texts(card)
+    assert "key \u5df2\u5931\u6548" in txt  # \u5934\u90e8\u7ea2\u5b57\u6807\u8bc6
+    vals = _card_values(card)
+    assert any(v.get("stage") == "delete_all_gone" for v in vals)
+    assert any(v.get("stage") == "delete_model" for v in vals)
+
+    await model_card.on_model_card_action(
+        ag, {"stage": "delete_all_gone"}, "chat", "m9")
+    assert ag._store == {}
+    assert "\u5df2\u6e05\u7406 2" in _card_texts(ch.updates[-1][1])
+
+
+async def test_active_of_locates_via_llm_block():
+    """_active_of 用 config.llm 比对定位（真 CodingAgent 无 active_model_name）；
+    delete_all_gone 不误删激活 profile。"""
+    from connectclaw import model_card
+
+    ag = FakeAgent()
+    ag._store["keep"] = ModelProfile(name="keep", base_url="https://x/v1",
+                                     model_id="m-live", api_key="k", provider="P")
+    ag._store["gone-p"] = ModelProfile(name="gone-p", base_url="https://x/",
+                                       model_id="m-dead", api_key="k", provider="P")
+    ag.entry_model_profile = lambda: ModelProfile(
+        name="(active)", base_url="https://x/", model_id="m-live", api_key="k")
+    assert model_card._active_of(ag) == "keep"
+
+    ch = FakeChannel()
+    ag._channel = ch
+    payload = {"provider": "P", "base_url": "https://x/", "raw_key": "k",
+               "resolved_key": "k", "endpoint": "", "dead_key": True,
+               "items": [{"id": "m-live", "ctx": None, "mt": None,
+                          "exists": "keep", "gone": True},
+                         {"id": "m-dead", "ctx": None, "mt": None,
+                          "exists": "gone-p", "gone": True}]}
+    model_card._cache_put("m10", payload)
+    await model_card.on_model_card_action(ag, {"stage": "delete_all_gone"},
+                                          "chat", "m10")
+    assert "keep" in ag._store and "gone-p" not in ag._store
+    assert "\u5df2\u4fdd\u7559" in _card_texts(ch.updates[-1][1])

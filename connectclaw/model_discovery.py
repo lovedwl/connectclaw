@@ -66,6 +66,10 @@ class DiscoveryError(Exception):
     """Readable failure for the /models fetch (surfaced in card/chat)."""
 
 
+class AuthError(DiscoveryError):
+    """key 被拒（401/403）——通常意味着 key 已被封禁/吊销；
+    同 key 的全部 profile 均不可用，卡片会转入清理模式。"""
+
 def _int_field(m: dict, *keys: str) -> int | None:
     for k in keys:
         v = m.get(k)
@@ -150,7 +154,7 @@ async def fetch_model_list(
             if r.status_code == 404 and i < len(bases) - 1:
                 continue  # bare endpoint 404s → the /v1 prefix is next
             if r.status_code in (401, 403):
-                raise DiscoveryError(f"`{url}` → HTTP {r.status_code}（缺 key 或 key 无权限）")
+                raise AuthError(f"`{url}` → HTTP {r.status_code}（key 已失效或被封禁）")
             if r.status_code != 200:
                 raise DiscoveryError(f"`{url}` → HTTP {r.status_code}（可能不是 OpenAI 兼容端点）")
             try:
