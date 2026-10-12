@@ -27,13 +27,28 @@ logger = get_logger(__name__)
 DEFAULT_CONTEXT_WINDOW = 65536
 DEFAULT_MAX_TOKENS = 8192
 
-# Oversized-prompt probes. "probe " repeats: ~1 token per 3-6 chars, so these
-# come out around 150k and 1M+ tokens. The small probe resolves most windows
-# (≤150k) with a ~600KB upload; only models with a bigger window pay the
-# ~4MB large upload. Both are rejected pre-inference by well-behaved
+# Oversized-prompt probes. Filler must be token-dense: a repeated word like
+# "probe " compresses to very few BPE tokens, so the gateway never sees an
+# oversized prompt and the 400 never fires. Cycling a small word list with
+# a coprime stride keeps ~2 tokens/word with a modest body: small ≈ 160k
+# tokens (~0.8MB) resolves windows ≤128k; large ≈ 640k tokens (~2.2MB)
+# resolves up to ~500k. Both are rejected pre-inference by well-behaved
 # gateways, so a probe costs (almost) nothing.
-_PROBE_SMALL = "probe " * 100_000
-_PROBE_LARGE = "probe " * 650_000
+_PROBE_WORDS = (
+    "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima "
+    "mike november oscar papa quebec romeo sierra tango uniform victor whiskey "
+    "xray yankee zulu".split()
+)
+
+
+def _probe_content(n_words: int) -> str:
+    ws = _PROBE_WORDS
+    # stride 7 is coprime with len(ws) → no adjacent repeats, uniform cycle
+    return " ".join(ws[(i * 7) % len(ws)] for i in range(n_words))
+
+
+_PROBE_SMALL = _probe_content(80_000)
+_PROBE_LARGE = _probe_content(320_000)
 _PROBE_TIMEOUT = 60.0
 
 # Ordered — first hit wins. Covers the gateway/litellm wording observed in the
@@ -195,7 +210,8 @@ async def probe_context_window(
             try:
                 r = await c.post(url, json=body, headers=headers)
             except Exception as e:  # noqa: BLE001
-                return None, f"探测请求失败（{label} 级）：{e}"
+                reason = str(e) or e.__class__.__name__
+                return None, f"探测请求失败（{label} 级）：{reason}"
             if r.status_code == 200:
                 saw_200 = True
                 continue  # window bigger than this probe → escalate
