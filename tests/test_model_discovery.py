@@ -164,6 +164,9 @@ class FakeAgent:
     def pop_wizard(self, k):
         return self._wizard.pop(k, None)
 
+    def delete_model_profile(self, name):
+        return self._store.pop(name, None) is not None
+
 
 async def test_wizard_add_auto_discovery(monkeypatch):
     import connectclaw.commands as cmd
@@ -390,3 +393,63 @@ async def test_card_probe_unknown_fills_ctx(monkeypatch):
     assert payload["items"][0]["ctx"] == 999999
     text = _card_texts(ch.updates[-1][1])
     assert "探测完成" in text and "977k" in text
+
+
+async def test_card_gone_detection_and_delete(monkeypatch):
+    """网关下架检测：本地有但 /models 没有 → 红区 + 🗑；点击真删。"""
+    from connectclaw import model_card
+
+    ag = FakeAgent()
+    ag._store["dead-profile"] = ModelProfile(
+        name="dead-profile", base_url="https://x/", model_id="dead-model",
+        api_key="k", provider="P")
+    ch = FakeChannel()
+    ag._channel = ch
+
+    async def fake_fetch(base, key, proxy=None, timeout=None):
+        return ([{"id": "alive", "max_input": 131072, "max_output": 4096}], "e")
+
+    monkeypatch.setattr(model_card.model_discovery, "fetch_model_list", fake_fetch)
+    await model_card.on_model_card_action(
+        ag, {"stage": "discover", "provider": "P"}, "chat", "m1")
+    card = ch.updates[-1][1]
+    assert "已下架" in _card_texts(card)
+    assert any(v.get("stage") == "delete_model" for v in _card_values(card))
+    # 存活的 alive 不能被误标：行内按钮应是 ➕ 添加
+    assert any(v.get("stage") == "add_model" and v.get("id") == "alive"
+               for v in _card_values(card))
+
+    await model_card.on_model_card_action(
+        ag, {"stage": "delete_model", "name": "dead-profile"}, "chat", "m1")
+    assert "dead-profile" not in ag._store
+    assert "已删除" in _card_texts(ch.updates[-1][1])
+    # 删完后卡片里不再有下架区
+    assert "已下架" not in _card_texts(ch.updates[-1][1])
+
+
+async def test_card_delete_guardrails():
+    """🗑 只删清单里标过的名字；正在使用的模型拒删。"""
+    from connectclaw import model_card
+
+    ag = FakeAgent()
+    ag._store["cur"] = ModelProfile(name="cur", base_url="https://x/",
+                                    model_id="gone1", api_key="k", provider="P")
+    ch = FakeChannel()
+    ag._channel = ch
+    payload = {"provider": "P", "base_url": "https://x/", "raw_key": "k",
+               "resolved_key": "k", "endpoint": "e",
+               "items": [{"id": "gone1", "ctx": None, "mt": None,
+                          "exists": "cur", "gone": True}]}
+    model_card._cache_put("m2", payload)
+
+    # 构造 name 不在下架清单 → 拒绝
+    await model_card.on_model_card_action(
+        ag, {"stage": "delete_model", "name": "hacker"}, "chat", "m2")
+    assert "不在已下架清单" in _card_texts(ch.updates[-1][1])
+
+    # 正在使用 → 拒删
+    ag.active_model_name = "cur"
+    await model_card.on_model_card_action(
+        ag, {"stage": "delete_model", "name": "cur"}, "chat", "m2")
+    assert "正在使用中" in _card_texts(ch.updates[-1][1])
+    assert "cur" in ag._store

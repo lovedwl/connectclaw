@@ -202,17 +202,19 @@ def discovery_card(payload: dict, note: str = "") -> dict:
     - 底部三按钮平分被挤成「全…/探…/…」：拆成三行，主 CTA 独占整行。
     - 已知上下文的模型排前面（977k 的先看见）。
     """
+    gone = [i for i in payload["items"] if i.get("gone")]
     items = sorted(
-        payload["items"],
+        [i for i in payload["items"] if not i.get("gone")],
         key=lambda i: (not i.get("ctx"), -(i.get("ctx") or 0)),
     )
     shown = items[:_DISCOVERY_MAX_ROWS]
     nonce = _render_nonce()
     elements: list[dict] = [
         {"tag": "markdown",
-         "content": (f"**{payload['provider']}** · 发现 {len(items)} 个模型\n"
-                     f"<font color='grey'>`{payload['endpoint']}` · ctx/输出，"
-                     "?=未暴露 · ➕ 添加 · 🔄 更新已有</font>")},
+         "content": (f"**{payload['provider']}** \u00b7 \u53d1\u73b0 {len(items)} \u4e2a\u6a21\u578b"
+                     + (f" \u00b7 <font color='red'>\U0001f5d1 \u5df2\u4e0b\u67b6 {len(gone)}</font>" if gone else "")
+                     + f"\n<font color='grey'>`{payload['endpoint']}` \u00b7 ctx/\u8f93\u51fa\uff0c"
+                     "?=\u672a\u66b4\u9732 \u00b7 \u2795 \u6dfb\u52a0 \u00b7 \U0001f504 \u66f4\u65b0 \u00b7 \U0001f5d1 \u5220\u9664</font>")},
         {"tag": "hr"},
     ]
     for item in shown:
@@ -240,6 +242,25 @@ def discovery_card(payload: dict, note: str = "") -> dict:
                          f"<font color='grey'>仅显示前 {_DISCOVERY_MAX_ROWS} 个；"
                          f"其余 {len(items) - _DISCOVERY_MAX_ROWS} 个可用 "
                          f"`/model sync {payload['provider']}` 文本处理</font>"})
+    if gone:
+        elements.append({"tag": "markdown", "content":
+                         "\u26a0\ufe0f <font color='red'>**\u672c\u5730\u5df2\u6709\u4f46\u7f51\u5173\u5df2\u4e0d\u63d0\u4f9b**" 
+                         "\uff08\u4e0b\u67b6\u6216\u8be5 key \u65e0\u6743\u9650\uff09\uff0c\u53ef\u6e05\u7406\uff1a</font>"})
+        for item in gone:
+            label = (f"`{item['id']}`\n<font color='grey'>\u5df2\u6709 "
+                     f"{item['exists']} \u00b7 ctx {fmt_ctx(item.get('ctx'))}</font>")
+            elements.append({
+                "tag": "column_set",
+                "columns": [
+                    {"tag": "column", "weight": 3,
+                     "elements": [{"tag": "markdown", "content": label}]},
+                    {"tag": "column", "weight": 1,
+                     "elements": [_button("\U0001f5d1",
+                                          {"kind": KIND, "stage": "delete_model",
+                                           "name": item["exists"]},
+                                          "danger", nonce=nonce)]},
+                ],
+            })
     elements.append({"tag": "hr"})
     n_unknown = sum(1 for i in items if not i.get("ctx"))
     if n_unknown:
@@ -290,6 +311,17 @@ async def _stage_discover(agent, channel, value: dict, message_id: str) -> None:
         ex = model_discovery.match_existing(profiles, seed.base_url, e["id"])
         items.append({"id": e["id"], "ctx": e["max_input"], "mt": e["max_output"],
                       "exists": ex.name if ex else None})
+    # \u4e0b\u67b6\u68c0\u6d4b\uff1a\u540c host \u7684\u672c\u5730 profile \u5176 model_id \u5df2\u4e0d\u5728\u4e0a\u6e38\u5217\u8868\u91cc
+    # \uff08\u5217\u8868\u6309 key \u6743\u9650\u8fc7\u6ee4\uff0ckey \u7528\u4e0d\u4e86\u540c\u6837\u7b49\u4e8e\u4e0d\u53ef\u7528\uff09\u2192 \u6807 gone \u4f9b\u4e00\u952e\u6e05\u7406\u3002
+    upstream_ids = {e["id"] for e in entries}
+    seed_host = model_discovery._host(seed.base_url)
+    for p in profiles:
+        if (p.model_id and seed_host
+                and model_discovery._host(p.base_url) == seed_host
+                and p.model_id not in upstream_ids):
+            items.append({"id": p.model_id, "ctx": p.context_window or None,
+                          "mt": p.max_tokens or None,
+                          "exists": p.name, "gone": True})
     payload = {"provider": provider, "base_url": seed.base_url,
                "raw_key": seed.api_key, "resolved_key": seed.resolved_api_key(),
                "endpoint": endpoint, "items": items}
@@ -378,6 +410,8 @@ async def on_model_card_action(agent: Any, value: dict, chat_id: str, message_id
                 return
             added, updated, skipped = [], [], []
             for item in payload["items"]:
+                if item.get("gone"):
+                    continue  # \u5df2\u4e0b\u67b6\u6a21\u578b\u4e0d\u53c2\u4e0e\u6279\u91cf\u540c\u6b65
                 if item.get("exists"):
                     cur = agent.get_model_profile(item["exists"])
                     if cur is None:
@@ -436,6 +470,36 @@ async def on_model_card_action(agent: Any, value: dict, chat_id: str, message_id
                 message_id,
                 discovery_card(payload, note=f"探测完成{tail}；? = 未解析到"))
 
+        elif stage == "delete_model":
+            payload = _cache_get(message_id)
+            name = value.get("name", "")
+            if payload is None:
+                await channel.update_card(
+                    message_id, result_card("\u26a0\ufe0f \u53d1\u73b0\u7ed3\u679c\u5df2\u8fc7\u671f\uff0c\u8bf7\u91cd\u65b0 `/model` \u3002", ok=None))
+                return
+            # \u53ea\u5141\u8bb8\u5220\u300c\u4e0b\u67b6\u68c0\u6d4b\u300d\u6807\u51fa\u7684 profile\uff0c\u9632\u6784\u9020 value \u4efb\u610f\u5220
+            target = next((i for i in payload["items"]
+                           if i.get("gone") and i.get("exists") == name), None)
+            if target is None:
+                await channel.update_card(
+                    message_id,
+                    result_card(f"\u26a0\ufe0f `{name}` \u4e0d\u5728\u5df2\u4e0b\u67b6\u6e05\u5355\u4e2d\uff08\u6216\u6e05\u5355\u5df2\u8fc7\u671f\uff09\uff0c\u8bf7\u91cd\u65b0\u53d1\u73b0\u3002", ok=False))
+                return
+            if name == getattr(agent, "active_model_name", None):
+                await channel.update_card(
+                    message_id,
+                    result_card(f"\u274c **{name}** \u6b63\u5728\u4f7f\u7528\u4e2d\uff0c\u5148\u5207\u6362\u5230\u522b\u7684\u6a21\u578b\u518d\u5220\u9664\u3002", ok=False))
+                return
+            if not agent.delete_model_profile(name):
+                await channel.update_card(
+                    message_id,
+                    result_card(f"\u274c \u5220\u9664\u5931\u8d25\uff1a\u6ca1\u6709\u540d\u4e3a {name} \u7684 profile\u3002", ok=False))
+                return
+            payload["items"] = [i for i in payload["items"] if i is not target]
+            _cache_put(message_id, payload)
+            await channel.update_card(
+                message_id,
+                discovery_card(payload, note=f"\U0001f5d1 \u5df2\u5220\u9664 **{name}**\uff08`{target['id']}`\uff09"))
         elif stage == "switch":
             name = value.get("name", "")
             p = agent.get_model_profile(name)
