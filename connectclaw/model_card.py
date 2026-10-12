@@ -194,26 +194,37 @@ def _proxy_of(agent: Any) -> str | None:
 
 
 def discovery_card(payload: dict, note: str = "") -> dict:
-    """Level 3: discovered models with per-model 添加/更新 buttons."""
-    items = payload["items"]
+    """Level 3: discovered models with per-model 添加/更新 buttons.
+
+    2026-10 排版重做（移动端反馈「排版垃圾」）：
+    - 行内按钮只放 emoji（➕/🔄），图例放头部——旧标签「➕ 添加」
+      在 3:1 列宽里被截成「＋…」。
+    - 底部三按钮平分被挤成「全…/探…/…」：拆成三行，主 CTA 独占整行。
+    - 已知上下文的模型排前面（977k 的先看见）。
+    """
+    items = sorted(
+        payload["items"],
+        key=lambda i: (not i.get("ctx"), -(i.get("ctx") or 0)),
+    )
+    shown = items[:_DISCOVERY_MAX_ROWS]
     nonce = _render_nonce()
     elements: list[dict] = [
         {"tag": "markdown",
          "content": (f"**{payload['provider']}** · 发现 {len(items)} 个模型\n"
-                     f"端点：`{payload['endpoint']}`\n"
-                     "「上下文/输出」，? = 网关未暴露：")},
-         {"tag": "hr"},
+                     f"<font color='grey'>`{payload['endpoint']}` · ctx/输出，"
+                     "?=未暴露 · ➕ 添加 · 🔄 更新已有</font>")},
+        {"tag": "hr"},
     ]
-    for item in items[:_DISCOVERY_MAX_ROWS]:
+    for item in shown:
         label = f"`{item['id']}`  {fmt_ctx(item.get('ctx'))}/{fmt_ctx(item.get('mt'))}"
         if item.get("exists"):
-            label += f"\n<font color='grey'>已有 `{item['exists']}`</font>"
-            btn = _button("🔄 更新",
+            label += f"\n<font color='grey'>已有 {item['exists']}</font>"
+            btn = _button("🔄",
                           {"kind": KIND, "stage": "update_model",
                            "name": item["exists"], "id": item["id"]},
                           "default", nonce=nonce)
         else:
-            btn = _button("➕ 添加",
+            btn = _button("➕",
                           {"kind": KIND, "stage": "add_model", "id": item["id"]},
                           "default", nonce=nonce)
         elements.append({
@@ -230,17 +241,19 @@ def discovery_card(payload: dict, note: str = "") -> dict:
                          f"其余 {len(items) - _DISCOVERY_MAX_ROWS} 个可用 "
                          f"`/model sync {payload['provider']}` 文本处理</font>"})
     elements.append({"tag": "hr"})
-    btns = [_button("➕ 全部添加/更新", {"kind": KIND, "stage": "add_all"},
-                    "primary", nonce=nonce)]
     n_unknown = sum(1 for i in items if not i.get("ctx"))
     if n_unknown:
-        btns.append(_button(f"🔎 探测上限({min(n_unknown, _DISCOVERY_PROBE_CAP)})",
-                            {"kind": KIND, "stage": "probe_unknown"},
-                            "default", nonce=nonce))
-    btns.append(_button("‹ 返回", {"kind": KIND, "stage": "models",
-                                   "provider": payload["provider"]},
-                        "default", nonce=nonce))
-    elements.append(_row(*btns))
+        elements.append(_row(_button(
+            f"🔎 探测未知上限（{min(n_unknown, _DISCOVERY_PROBE_CAP)}）",
+            {"kind": KIND, "stage": "probe_unknown"},
+            "default", nonce=nonce)))
+    elements.append(_row(_button(
+        "➕ 全部添加/更新", {"kind": KIND, "stage": "add_all"},
+        "primary", nonce=nonce)))
+    elements.append(_row(_button(
+        "‹ 返回模型列表", {"kind": KIND, "stage": "models",
+                             "provider": payload["provider"]},
+        "default", nonce=nonce)))
     if note:
         elements.append({"tag": "markdown",
                          "content": f"<font color='grey'>{note}</font>"})
