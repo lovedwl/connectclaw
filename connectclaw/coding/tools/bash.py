@@ -86,7 +86,9 @@ class BashTool(AgentTool):
         "The command will be executed in the working directory. "
         "A timeout can be specified (default 120 seconds). "
         "Runs in a sandbox (filesystem isolation) with full network access; "
-        "dangerous commands require user authorization."
+        "dangerous commands require user authorization. "
+        "For long-lived processes use background=true and manage them with the "
+        "bg_tasks tool."
     )
     parameters = {
         "type": "object",
@@ -98,6 +100,18 @@ class BashTool(AgentTool):
             "timeout": {
                 "type": "integer",
                 "description": "Timeout in seconds (default: 120, max: 600)",
+            },
+            "background": {
+                "type": "boolean",
+                "description": (
+                    "Set true to launch as a detached long-lived task "
+                    "(dev servers, watchers, trace viewers) instead of "
+                    "waiting. Returns a task id immediately; the process "
+                    "keeps running across bash calls and its output goes "
+                    "to a log file. Manage with the bg_tasks tool "
+                    "(list/tail/kill). Tasks stop when the bot restarts. "
+                    "timeout is ignored in background mode."
+                ),
             },
         },
         "required": ["command"],
@@ -174,6 +188,33 @@ class BashTool(AgentTool):
             sandbox = self._sandbox_cls(
                 cwd=self._cwd,
                 allowed_paths=allowed_paths,
+            )
+
+        # Background mode: the bot process spawns the *whole* sandbox command
+        # line (bwrap argv included) and supervises it, so the task outlives
+        # this call. BashGuard above is NOT bypassed here.
+        if params.get("background"):
+            from ..bg_tasks import get_bg_manager
+            try:
+                task = await get_bg_manager().start(
+                    params["command"], sandbox.build(command), self._cwd)
+            except Exception as e:
+                return AgentToolResult(
+                    content=[{"type": "text",
+                              "text": f"后台任务启动失败：{e}"}],
+                    details={"is_error": True},
+                )
+            return AgentToolResult(
+                content=[{"type": "text", "text": (
+                    f"[background] 任务 {task.task_id} 已启动"
+                    f"（pid {task.pid}, {sandbox.level.value}）。\n"
+                    f"日志：{task.log_path}\n"
+                    f"它跨 bash 调用持续运行，bot 重启即终止。"
+                    f"读输出用 bg_tasks(action=tail, id={task.task_id})，"
+                    f"停止用 bg_tasks(action=kill, id={task.task_id})。"
+                )}],
+                details={"task_id": task.task_id, "pid": task.pid,
+                         "background": True},
             )
 
         result = await sandbox.execute(command, timeout=timeout)

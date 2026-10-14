@@ -197,6 +197,16 @@ class Sandbox:
     async def execute(self, command: str, timeout: int = 120) -> SandboxResult:
         raise NotImplementedError
 
+    def build(self, command: str) -> list[str]:
+        """Full argv to run *command* in this sandbox.
+
+        Used by the background-task manager: it must spawn the *complete*
+        sandbox command line (e.g. the whole bwrap argv), otherwise background
+        tasks would silently run on the host. execute() implementations are
+        expected to route through this.
+        """
+        return ["/bin/bash", "-c", command]
+
     def _truncate_output(self, output: str) -> tuple[str, bool]:
         if len(output) <= self.max_output_bytes:
             return output, False
@@ -229,7 +239,7 @@ class BwrapSandbox(Sandbox):
     def level(self) -> SandboxLevel:
         return SandboxLevel.BWARP
 
-    async def execute(self, command: str, timeout: int = 120) -> SandboxResult:
+    def build(self, command: str) -> list[str]:
         home = os.environ.get("HOME") or os.path.expanduser("~")
 
         # Build bwrap args: read-only root, read-write $HOME + system /tmp
@@ -279,8 +289,11 @@ class BwrapSandbox(Sandbox):
         ]
 
         bwrap_args.extend(["--", "bash", "-c", command])
+        return bwrap_args
 
-        return await _run_command(bwrap_args, timeout, self.max_output_bytes, self.level)
+    async def execute(self, command: str, timeout: int = 120) -> SandboxResult:
+        return await _run_command(
+            self.build(command), timeout, self.max_output_bytes, self.level)
 
 
 # ── Tier 2: Namespace + unshare ────────────────────────────────
@@ -299,20 +312,14 @@ class NamespaceSandbox(Sandbox):
     def level(self) -> SandboxLevel:
         return SandboxLevel.UNSHARE
 
+    def build(self, command: str) -> list[str]:
+        inner = f"cd {self.cwd}; {command}"
+        return ["unshare", "--mount", "--fork", "--pid", "--mount-proc",
+                "--", "bash", "-c", inner]
+
     async def execute(self, command: str, timeout: int = 120) -> SandboxResult:
-        t0 = time.time()
-
-        unshare_args = ["unshare", "--mount", "--fork", "--pid", "--mount-proc"]
-
-        # Build the inner command
-        inner = (
-            f"cd {self.cwd}; "
-            f"{command}"
-        )
-
-        unshare_args.extend(["--", "bash", "-c", inner])
-
-        return await _run_command(unshare_args, timeout, self.max_output_bytes, self.level)
+        return await _run_command(
+            self.build(command), timeout, self.max_output_bytes, self.level)
 
 
 # ── Tier 3: Direct (no isolation available) ────────────────────

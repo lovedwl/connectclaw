@@ -32,6 +32,7 @@ from connectclaw.provider.types import Context, Model, UserMessage
 from .tools.attach_image import AttachImageTool, AttachmentStore, DEFAULT_ATTACHMENTS_DIR
 from .tools.agents import create_agents_tool
 from .tools.bash import BashGuard, create_bash_tool
+from .bg_tasks import BgTasksTool
 from .tools.hash_edit import create_hash_edit_tool
 from .tools.hash_read import create_hash_read_tool
 from .tools.image_analyze import create_image_analyze_tool
@@ -109,6 +110,8 @@ class CodingAgent:
         self._hash_edit_tool = create_hash_edit_tool(config.agent.cwd)
         self._bash_guard = BashGuard()
         self._bash_tool = create_bash_tool(config.agent.cwd, self._bash_guard)
+        # Control plane for bash(background=true) tasks: list / tail / kill.
+        self._bg_tasks_tool = BgTasksTool()
         # Size the stateless browser-engine pool (parallel web_search/web_fetch).
         lightpanda.configure_pool(config.web_search.pool_size)
         self._web_search_tool = create_web_search_tool(
@@ -203,7 +206,8 @@ class CodingAgent:
             t.name: t
             for t in [
                 self._read_tool, self._write_tool, self._hash_read_tool,
-                self._hash_edit_tool, self._bash_tool, self._web_search_tool,
+                self._hash_edit_tool, self._bash_tool, self._bg_tasks_tool,
+                self._web_search_tool,
                 self._web_fetch_tool, self._image_tool, self._attach_image_tool,
                 self._skills_tool, self._send_file_tool, self._memory_tool,
             ]
@@ -299,6 +303,13 @@ class CodingAgent:
         # self-no-ops inside the tool).
         if self._memory.enabled and "memory" in registry:
             exposed = exposed + [registry["memory"]]
+
+        # bg_tasks is bash's control plane (bash background=true produces
+        # the tasks) — expose it wherever bash is exposed.
+        if any(getattr(t, "name", "") == "bash" for t in exposed) \
+                and "bg_tasks" in registry \
+                and not any(getattr(t, "name", "") == "bg_tasks" for t in exposed):
+            exposed = exposed + [registry["bg_tasks"]]
 
         tools = exposed + [self._agents_tool]
         self._tools = tools
