@@ -133,6 +133,10 @@ def fetch_page(monkeypatch):
         return "PAGE CONTENT " * 50
 
     monkeypatch.setattr(lightpanda, "fetch_once", fake_fetch)
+    # 离线测试：跳过 SSRF 校验（它会对 url 做真实 DNS 解析）
+    import connectclaw.security as _security
+
+    monkeypatch.setattr(_security, "check_public_http_url", lambda url: None)
 
 
 async def test_web_fetch_plain(fetch_page):

@@ -790,6 +790,12 @@ async def http_fetch_once(url: str, timeout: float = _FASTPATH_TIMEOUT) -> tuple
         return "", _err_text(e)
     if resp.status_code >= 400:
         return "", f"HTTP {resp.status_code}"
+    # H4：follow_redirects=True 会让公网外链 302 到内网——必须复查**最终** URL
+    from connectclaw.security import check_public_http_url
+
+    redirect_reason = check_public_http_url(str(resp.url))
+    if redirect_reason:
+        return "", f"重定向目标被拒绝：{redirect_reason}"
     ctype = (resp.headers.get("content-type") or "").lower()
     if ctype and "html" not in ctype and "text/plain" not in ctype:
         return "", f"内容类型不是 HTML/文本（{ctype}）"
@@ -826,6 +832,12 @@ async def fetch_once(
 
     text, fast_reason = await http_fetch_once(url, timeout=http_timeout)
     if not text.strip():
+        # H4：浏览器路径同样过 SSRF 校验（fetch_once 是公开入口）
+        from connectclaw.security import check_public_http_url
+
+        ssrf_reason = await asyncio.to_thread(check_public_http_url, url)
+        if ssrf_reason:
+            raise LightpandaError(ssrf_reason)
 
         async def _do(eng: LightpandaEngine, sid: str) -> str:
             await eng.navigate(sid, url)

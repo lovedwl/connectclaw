@@ -185,6 +185,17 @@ class WebFetchTool(AgentTool):
         on_update: object = None,
     ) -> AgentToolResult:
         url = params["url"]
+        # H4：SSRF 校验——scheme 白名单 + DNS 解析后拒本机/内网/链路本地/元数据网段。
+        # 重定向后的最终 URL 由 lightpanda.http_fetch_once 复查（follow_redirects=True
+        # 会使任何入口前缀判断失效）。
+        from connectclaw.security import check_public_http_url
+
+        ssrf_reason = await asyncio.to_thread(check_public_http_url, url)
+        if ssrf_reason:
+            return AgentToolResult(
+                content=[{"type": "text", "text": f"URL 被拒绝：{ssrf_reason}"}],
+                details={"is_error": True},
+            )
         prompt = str(params.get("prompt") or "").strip()
         max_chars = int(params.get("max_chars") or self._config.max_chars)
         no_cache = bool(params.get("no_cache"))
