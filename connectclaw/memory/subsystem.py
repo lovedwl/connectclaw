@@ -147,7 +147,7 @@ class MemorySubsystem:
         if not self._initialized:
             await self.initialize()
         if not self._retriever:
-            return "", []
+            return [], []
 
         query_embedding = None
         if self._embedding_provider:
@@ -163,7 +163,7 @@ class MemorySubsystem:
             )
         except Exception as e:
             logger.debug("Memory: recall failed: %s", e)
-            return "", []
+            return [], []
 
         # 增量比对要在"召回为空"时也照跑：条目被 /forget 删掉后本轮可能召回不到
         # 任何东西，但"它没了"这件事必须告诉模型（少召回那一侧）。
