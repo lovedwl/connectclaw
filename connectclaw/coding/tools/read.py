@@ -10,6 +10,7 @@ from typing import Any
 import aiofiles
 
 from connectclaw.agent.types import AgentTool, AgentToolResult
+from connectclaw.security import is_protected, path_within_cwd, resolve_tool_path
 
 
 class ReadTool(AgentTool):
@@ -53,6 +54,31 @@ class ReadTool(AgentTool):
     ) -> AgentToolResult:
         file_path = params["file_path"]
         absolute_path = self._resolve_path(file_path)
+
+        # 2026-10 (H2)：read 与 write 同一契约——只读 cwd 内文件，且逃生配置
+        # （config.toml / models.toml）直接拒绝，否则模型一句 read ~/.connectclaw/
+        # config.toml 就把 app_secret / 所有 provider key 贴回聊天。
+        if not path_within_cwd(self._cwd, absolute_path):
+            return AgentToolResult(
+                content=[{
+                    "type": "text",
+                    "text": (
+                        f"错误：只能读取工作目录（{self._cwd}）内的文件。"
+                        f"'{file_path}' 在目录之外。"
+                    ),
+                }],
+                details={"is_error": True},
+            )
+        if is_protected(absolute_path):
+            return AgentToolResult(
+                content=[{
+                    "type": "text",
+                    "text": (
+                        f"⛔ 受保护文件（逃生配置，agent 不可读取）：{absolute_path}"
+                    ),
+                }],
+                details={"is_error": True},
+            )
 
         # Check file exists
         if not os.path.isfile(absolute_path):
@@ -106,9 +132,7 @@ class ReadTool(AgentTool):
         )
 
     def _resolve_path(self, path: str) -> str:
-        if os.path.isabs(path):
-            return path
-        return os.path.normpath(os.path.join(self._cwd, path))
+        return resolve_tool_path(self._cwd, path)
 
 
 def create_read_tool(cwd: str) -> ReadTool:

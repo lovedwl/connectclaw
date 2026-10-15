@@ -10,7 +10,11 @@ from typing import Any
 import aiofiles
 
 from connectclaw.agent.types import AgentTool, AgentToolResult
-from connectclaw.security import is_protected
+from connectclaw.security import (
+    is_protected,
+    path_within_cwd,
+    resolve_tool_path,
+)
 
 
 class WriteTool(AgentTool):
@@ -85,8 +89,8 @@ class WriteTool(AgentTool):
 
         # Only allow writes within cwd — bash runs in sandbox which can't
         # see files outside cwd, so write must match.
-        cwd_abs = os.path.abspath(self._cwd)
-        if not absolute_path.startswith(cwd_abs + os.sep) and absolute_path != cwd_abs:
+        # realpath 容器检查：symlink 指向 cwd 外、或绝对路径中的 .. 都拒绝。
+        if not path_within_cwd(self._cwd, absolute_path):
             return AgentToolResult(
                 content=[{
                     "type": "text",
@@ -151,9 +155,8 @@ class WriteTool(AgentTool):
             )
 
     def _resolve_path(self, path: str) -> str:
-        if os.path.isabs(path):
-            return path
-        return os.path.normpath(os.path.join(self._cwd, path))
+        # normpath 绝对路径：/proj/../proj2/f 不能以 startswith("/proj/") 放行（M24）
+        return resolve_tool_path(self._cwd, path)
 
 
 def create_write_tool(cwd: str, read_tool: object) -> WriteTool:

@@ -12,7 +12,7 @@ import aiofiles
 
 from connectclaw.agent.types import AgentTool, AgentToolResult
 from connectclaw.hashline.apply import execute_edit_pipeline
-from connectclaw.security import is_protected
+from connectclaw.security import is_protected, path_within_cwd, resolve_tool_path
 from connectclaw.hashline.diff_util import (
     detect_line_ending,
     generate_diff_string,
@@ -154,6 +154,19 @@ class HashEditTool(AgentTool):
             return AgentToolResult(
                 content=[{"type": "text",
                           "text": f"⛔ 受保护文件（逃生配置，agent 不可修改）：{absolute_path}"}],
+                details={"is_error": True},
+            )
+
+        # 2026-10 (H2)：hash_edit 与 write 同一契约——只能编辑 cwd 内文件。
+        # 此前对绝对路径完全不设防，模型可 hash_edit ~/.ssh/authorized_keys 等
+        # 任意宿主文件绕过全部沙箱；且 on_before_tool 授权钩子也不拦 hash_edit。
+        if not path_within_cwd(self._cwd, absolute_path):
+            return AgentToolResult(
+                content=[{"type": "text",
+                          "text": (
+                              f"错误：只能编辑工作目录（{self._cwd}）内的文件。"
+                              f"'{path}' 在目录之外。"
+                          )}],
                 details={"is_error": True},
             )
 
@@ -349,9 +362,7 @@ class HashEditTool(AgentTool):
         )
 
     def _resolve_path(self, path: str) -> str:
-        if os.path.isabs(path):
-            return path
-        return os.path.normpath(os.path.join(self._cwd, path))
+        return resolve_tool_path(self._cwd, path)
 
 
 async def _write_file_atomically(path: str, content: str) -> None:

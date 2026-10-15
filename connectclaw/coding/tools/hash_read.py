@@ -13,7 +13,11 @@ from connectclaw.hashline.format import format_hashline_region
 from connectclaw.hashline.snapshot import remember_read_snapshot
 from connectclaw.hashline.guard import clear_applied_payload
 from connectclaw.hashline.diff_util import normalize_to_lf, strip_bom
-from connectclaw.security import is_protected
+from connectclaw.security import (
+    is_protected,
+    path_within_cwd,
+    resolve_tool_path,
+)
 
 # ─── Truncation ─────────────────────────────────────────────────────────────
 
@@ -87,6 +91,31 @@ class HashReadTool(AgentTool):
     ) -> AgentToolResult:
         file_path = params["path"]
         absolute_path = self._resolve_path(file_path)
+
+        # 2026-10 (H2)：与 read/write 同一契约——只读 cwd 内文件，且逃生配置
+        # 直接拒绝。此前命中保护只是加警告后照样返回完整内容，
+        # config.toml / models.toml 里的密钥仍会被贴回聊天。
+        if not path_within_cwd(self._cwd, absolute_path):
+            return AgentToolResult(
+                content=[{
+                    "type": "text",
+                    "text": (
+                        f"错误：只能读取工作目录（{self._cwd}）内的文件。"
+                        f"'{file_path}' 在目录之外。"
+                    ),
+                }],
+                details={"is_error": True},
+            )
+        if is_protected(absolute_path):
+            return AgentToolResult(
+                content=[{
+                    "type": "text",
+                    "text": (
+                        f"⛔ 受保护文件（逃生配置，agent 不可读取）：{absolute_path}"
+                    ),
+                }],
+                details={"is_error": True},
+            )
 
         # Check file exists
         if not os.path.isfile(absolute_path):
@@ -251,22 +280,14 @@ class HashReadTool(AgentTool):
             if isinstance(recently, set):
                 recently.add(absolute_path)
 
-        # 2026-10 R6: read-only protected files (escape config) — warn up
-        # front so the agent does not burn a hash_edit call that must fail.
-        if is_protected(absolute_path):
-            output = (
-                "⚠️ 该文件为只读受保护文件（逃生配置）："
-                "hash_edit/write 无法修改它，请不要再尝试编辑。\n\n"
-            ) + output
+        # 2026-10 R6 → 2026-10 (H2)：受保护文件改为直接拒绝（原为警告后照读）。
 
         return AgentToolResult(
             content=[{"type": "text", "text": output}],
         )
 
     def _resolve_path(self, path: str) -> str:
-        if os.path.isabs(path):
-            return path
-        return os.path.normpath(os.path.join(self._cwd, path))
+        return resolve_tool_path(self._cwd, path)
 
 
 def create_hash_read_tool(cwd: str, read_tool: object = None) -> HashReadTool:

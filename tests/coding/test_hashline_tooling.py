@@ -6,7 +6,7 @@ See docs/hashline-tool-usage-report.md:
 - R3: tool error paths set details.is_error; agent loop honors it
 - R4: E_RANGE_OOB includes the boundary line's current anchor
 - R5: missing/truncated required params get explicit errors
-- R6: hash_read flags read-only protected files up front
+- R6: hash_read refuses read-only protected files up front (2026-10 H2)
 """
 from __future__ import annotations
 
@@ -172,15 +172,17 @@ async def test_hash_read_satisfies_write(tmp_path):
 # ── R6: protected file note ────────────────────────────────────
 
 
-async def test_hash_read_protected_note(tmp_path, monkeypatch):
+async def test_hash_read_refuses_protected_file(tmp_path, monkeypatch):
     import connectclaw.coding.tools.hash_read as hr_mod
     f = tmp_path / "f.txt"
     f.write_text("secret\n")
     monkeypatch.setattr(hr_mod, "is_protected", lambda p: True)
     hr = create_hash_read_tool(str(tmp_path))
-    text, _ = await _hr(hr, str(f))
-    assert "只读受保护" in text
-    assert "secret" in text  # content still readable
+    r = await hr.execute("t", {"path": str(f)})
+    text = r.content[0]["text"]
+    assert "不可读取" in text
+    assert r.details.get("is_error") is True
+    assert "secret" not in text  # content must not leak
 
 
 async def test_hash_edit_protected_flagged(tmp_path, monkeypatch):
