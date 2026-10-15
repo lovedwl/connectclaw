@@ -347,16 +347,19 @@ async def main(argv: list[str] | None = None) -> None:
             logger.error("[%s] Error: %s", conversation_key[:8], e)
             return f"错误：{e}"
 
-    # Handle graceful shutdown on SIGINT / Ctrl+C
+    # Handle graceful shutdown on SIGINT / SIGTERM (Ctrl+C vs systemd/docker stop)
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
 
     def _on_sigint() -> None:
-        logger.info("Received SIGINT, shutting down...")
+        logger.info("Received SIGINT/SIGTERM, shutting down...")
         stop_event.set()
         channel.close_safe()
 
     loop.add_signal_handler(signal.SIGINT, _on_sigint)
+    # systemd / docker stop / kill 默认发 SIGTERM；不注册的话进程被直接终止，
+    # 下方 finally 里的 memory.close / attachment_store.flush / channel.close 全不执行（H11）。
+    loop.add_signal_handler(signal.SIGTERM, _on_sigint)
 
     try:
         await channel.start(on_message)
@@ -364,6 +367,7 @@ async def main(argv: list[str] | None = None) -> None:
         logger.info("Shutting down...")
     finally:
         loop.remove_signal_handler(signal.SIGINT)
+        loop.remove_signal_handler(signal.SIGTERM)
         restart_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await restart_task
