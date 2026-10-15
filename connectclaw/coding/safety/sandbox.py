@@ -173,6 +173,38 @@ def detect_best_sandbox() -> type:
     return DirectSandbox
 
 
+def resolve_sandbox_cls(mode: str = "auto") -> type:
+    """Pick the sandbox class for an operator-configured *mode*.
+
+    ``auto`` (default) = runtime detection. ``none`` deliberately returns
+    ``DirectSandbox`` — the agent's bash then runs on the host as the bot user
+    with no isolation; that is the operator's explicit "full permissions"
+    switch, and the only gate left is BashGuard. A forced ``bwrap``/``unshare``
+    still degrades to direct when its probe fails, so a configured tier can
+    never make every command fail on a host that bans namespaces.
+    """
+    from connectclaw.config import normalize_sandbox_mode
+
+    mode = normalize_sandbox_mode(mode)
+    if mode == "none":
+        logger.warning(
+            "Sandbox mode 'none': bash runs UNSANDBOXED on the host — the agent "
+            "can now modify config.toml / models.toml through bash."
+        )
+        return DirectSandbox
+    if mode == "bwrap":
+        if shutil.which("bwrap") and _probe_bwrap():
+            return BwrapSandbox
+        logger.warning("[sandbox] mode=bwrap unusable here; falling back to direct")
+        return DirectSandbox
+    if mode == "unshare":
+        if shutil.which("unshare") and _probe_unshare():
+            return NamespaceSandbox
+        logger.warning("[sandbox] mode=unshare unusable here; falling back to direct")
+        return DirectSandbox
+    return detect_best_sandbox()
+
+
 # ── Base ───────────────────────────────────────────────────────
 
 

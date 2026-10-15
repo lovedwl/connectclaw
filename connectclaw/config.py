@@ -147,6 +147,41 @@ class BashConfig:
 
 
 @dataclass
+class SandboxConfig:
+    """Which isolation the agent's own bash tool runs under.
+
+    mode:
+      "auto"    — detect at runtime (bwrap → unshare → direct). Default.
+      "bwrap"   — force bubblewrap; falls back to direct if unusable.
+      "unshare" — force plain namespaces; falls back to direct if unusable.
+      "none"    — NO isolation: the agent's bash runs directly on the host as
+                  the bot user ("完全权限"/jailbreak-the-agent switch).
+
+    ``none`` is a deliberate operator decision to trust the agent completely.
+    Consequence: bash can then edit config.toml / models.toml — the files that
+    gate the `!` escape hatch and the model registry — so the agent could
+    widen its own permissions. write/hash_edit still refuse those paths; bash
+    bypasses that refusal. Only set this on a machine you fully trust the
+    agent on. This file is agent-read-only, so only the operator can flip it.
+    """
+
+    mode: str = "auto"
+
+
+def normalize_sandbox_mode(mode: str) -> str:
+    """Map user spellings onto the four canonical modes (unknown → auto)."""
+    m = (mode or "auto").strip().lower()
+    aliases = {
+        "": "auto", "auto": "auto", "detect": "auto", "default": "auto",
+        "bwrap": "bwrap", "bubblewrap": "bwrap",
+        "unshare": "unshare", "namespace": "unshare",
+        "none": "none", "off": "none", "false": "none", "no": "none",
+        "direct": "none", "unsandboxed": "none", "full": "none",
+    }
+    return aliases.get(m, "auto")
+
+
+@dataclass
 class SessionConfig:
     dir: str = "~/.connectclaw/sessions"
 
@@ -216,6 +251,7 @@ class Config:
     proxy: ProxyConfig = field(default_factory=ProxyConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     bash: BashConfig = field(default_factory=BashConfig)
+    sandbox: SandboxConfig = field(default_factory=SandboxConfig)
     session: SessionConfig = field(default_factory=SessionConfig)
     skills: SkillsConfig = field(default_factory=SkillsConfig)
     rag: RAGConfig = field(default_factory=RAGConfig)
@@ -316,6 +352,20 @@ class Config:
             operator_open_ids=[str(x) for x in ba.get("operator_open_ids", []) if x],
         )
 
+        # Sandbox mode for the agent's own bash tool ("none" = full host access)
+        sa = raw.get("sandbox", {})
+        sandbox = SandboxConfig(
+            mode=normalize_sandbox_mode(
+                os.environ.get("CONNECTCLAW_SANDBOX", "")
+                or str(sa.get("mode", "auto"))
+            ),
+        )
+        if sandbox.mode != "auto":
+            logger.warning(
+                "[sandbox] mode=%r from config — isolation override is active",
+                sandbox.mode,
+            )
+
         # Session
         se = raw.get("session", {})
         session = SessionConfig(
@@ -391,6 +441,7 @@ class Config:
             proxy=proxy,
             agent=agent,
             bash=bash,
+            sandbox=sandbox,
             session=session,
             skills=skills,
             rag=rag,

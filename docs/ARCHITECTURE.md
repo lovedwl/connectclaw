@@ -387,6 +387,8 @@ JSONL 树形结构，每行一个 JSON 对象：
   [feishu]       app_id / app_secret
   [vision]       api_key / base_url / model_id      # 替代旧 [mimo]；proxy 缺省复用 [proxy].url
   [agent]        cwd / thinking_level / tools(白名单) / tool_session_idle_timeout
+  [bash]         operator_open_ids                  # `!`/`/bash` 逃生口白名单（留空 = 关闭）
+  [sandbox]      mode                               # auto|bwrap|unshare|none；none = agent 自己的 bash 直接在宿主机运行（完全权限）；env: CONNECTCLAW_SANDBOX
   [session]      dir
   [rag]          enabled / docs_dir / db_path / top_k / top_n
   [web_search]   max_chars / timeout / pool_size / extract_model

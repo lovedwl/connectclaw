@@ -117,10 +117,13 @@ class BashTool(AgentTool):
         "required": ["command"],
     }
 
-    def __init__(self, cwd: str, guard: BashGuard | None = None):
+    def __init__(self, cwd: str, guard: BashGuard | None = None,
+                 sandbox_cls: type | None = None):
         self._cwd = cwd
         self._guard = guard or BashGuard()
-        self._sandbox_cls = detect_best_sandbox()
+        # sandbox_cls is the operator's [sandbox] mode resolved to a class
+        # (see sandbox.resolve_sandbox_cls); None keeps runtime auto-detection.
+        self._sandbox_cls = sandbox_cls or detect_best_sandbox()
         # Auto-detect git root for read-write bind in sandbox
         self._git_root = self._find_git_root()
 
@@ -253,5 +256,6 @@ class BashTool(AgentTool):
         )
 
 
-def create_bash_tool(cwd: str, guard: BashGuard | None = None) -> BashTool:
-    return BashTool(cwd, guard)
+def create_bash_tool(cwd: str, guard: BashGuard | None = None,
+                    sandbox_cls: type | None = None) -> BashTool:
+    return BashTool(cwd, guard, sandbox_cls)

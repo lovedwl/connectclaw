@@ -33,6 +33,7 @@ from .tools.attach_image import AttachImageTool, AttachmentStore, DEFAULT_ATTACH
 from .tools.agents import create_agents_tool
 from .tools.bash import BashGuard, create_bash_tool
 from .bg_tasks import BgTasksTool
+from .safety.sandbox import resolve_sandbox_cls
 from .tools.hash_edit import create_hash_edit_tool
 from .tools.hash_read import create_hash_read_tool
 from .tools.image_analyze import create_image_analyze_tool
@@ -109,7 +110,13 @@ class CodingAgent:
         self._hash_read_tool = create_hash_read_tool(config.agent.cwd, self._read_tool)
         self._hash_edit_tool = create_hash_edit_tool(config.agent.cwd)
         self._bash_guard = BashGuard()
-        self._bash_tool = create_bash_tool(config.agent.cwd, self._bash_guard)
+        # [sandbox] mode decides isolation for the agent's OWN bash: "auto"
+        # detects, "none" runs unsandboxed on the host (operator's full-trust
+        # switch). config.toml is agent-read-only, so only the operator flips it.
+        self._sandbox_cls = resolve_sandbox_cls(
+            getattr(getattr(config, "sandbox", None), "mode", "auto"))
+        self._bash_tool = create_bash_tool(
+            config.agent.cwd, self._bash_guard, self._sandbox_cls)
         # Control plane for bash(background=true) tasks: list / tail / kill.
         self._bg_tasks_tool = BgTasksTool()
         # Size the stateless browser-engine pool (parallel web_search/web_fetch).
@@ -808,6 +815,15 @@ class CodingAgent:
                 alive = _port_open(host, port) if port else False
                 lines.append(f"- [proxy] url={purl} → 端口{'监听中' if alive else '未监听'}")
             lines.append(f"- 工作目录：{self._config.agent.cwd}")
+            sb = getattr(self._config, "sandbox", None)
+            sb_mode = getattr(sb, "mode", "auto")
+            if sb_mode == "none":
+                lines.append(
+                    "- Bash 沙箱：已关闭（[sandbox] mode=none）——agent 的 bash "
+                    "直接在宿主机上以 bot 用户身份运行，无文件系统隔离"
+                )
+            else:
+                lines.append(f"- Bash 沙箱：[sandbox] mode={sb_mode}")
             lines.append(f"- 记忆库文件：{self._config.memory.db_path}")
         except Exception as e:  # pragma: no cover - 防御性
             logger.debug("[CODING] 环境事实采集部分失败: %s", e)

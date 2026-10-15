@@ -50,6 +50,20 @@ tools = ["read", "write", "hash_read", "hash_edit", "bash", "web_search", "web_f
 # Idle seconds before a stateful scripted-tool session (e.g. the browser) is reaped.
 tool_session_idle_timeout = 300
 
+[sandbox]
+# Isolation for the agent's OWN bash tool. auto | bwrap | unshare | none
+#   auto    — detect at runtime (bwrap → unshare → direct). Default.
+#   bwrap   — force bubblewrap (falls back to direct if unusable here).
+#   unshare — force plain namespaces (same fallback).
+#   none    — NO isolation: the agent's bash runs directly on the host as the
+#             bot user ("full permissions"). bash can then edit config.toml /
+#             models.toml — the files gating the `!` escape hatch and the model
+#             registry — so the agent could widen its own permissions. Only set
+#             this on a machine you fully trust the agent on. BashGuard's
+#             DANGEROUS pattern gate still applies.
+# Override with the CONNECTCLAW_SANDBOX env var.
+mode = "auto"
+
 [session]
 # Session storage directory
 dir = "~/.connectclaw/sessions"
