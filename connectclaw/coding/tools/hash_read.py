@@ -133,7 +133,9 @@ class HashReadTool(AgentTool):
 
         # Read file
         try:
-            async with aiofiles.open(absolute_path, "r") as f:
+            # newline=""（H12）：避免 universal newlines 折叠 \r\n，
+            # 否则锚点/内容与磁盘实际行尾不一致，hash_edit 会整文件改写行尾。
+            async with aiofiles.open(absolute_path, "r", newline="") as f:
                 content = await f.read()
         except UnicodeDecodeError:
             return AgentToolResult(

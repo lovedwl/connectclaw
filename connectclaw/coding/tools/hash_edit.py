@@ -197,7 +197,9 @@ class HashEditTool(AgentTool):
 
         # ── Read file ─────────────────────────────────────
         try:
-            async with aiofiles.open(absolute_path, "r") as f:
+            # newline=""（H12）：缺省 universal newlines 会把 \r\n 折叠为 \n，
+            # detect_line_ending 恒返回 "\n"，restore 永远还原不了 CRLF。
+            async with aiofiles.open(absolute_path, "r", newline="") as f:
                 content = await f.read()
         except UnicodeDecodeError:
             return AgentToolResult(
@@ -372,8 +374,15 @@ async def _write_file_atomically(path: str, content: str) -> None:
 
     tmp_path = os.path.join(dir_name, f".tmp-hashline-{uuid.uuid4().hex[:12]}")
     try:
-        async with aiofiles.open(tmp_path, "w") as f:
+        async with aiofiles.open(tmp_path, "w", newline="") as f:
             await f.write(content)
+        # H14：os.replace 迁移的是临时文件的 mode；不还原的话原文件的
+        # 可执行位/权限位会被默认 umask 静默覆盖（0o755 → 0o664）。
+        try:
+            st = os.stat(path)
+            os.chmod(tmp_path, st.st_mode & 0o7777)
+        except FileNotFoundError:
+            pass
         os.replace(tmp_path, path)
     except Exception:
         if os.path.exists(tmp_path):

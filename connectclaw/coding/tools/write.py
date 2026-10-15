@@ -126,10 +126,18 @@ class WriteTool(AgentTool):
             dir_name = os.path.dirname(absolute_path) or "."
             fd, tmp_path = tempfile.mkstemp(dir=dir_name, prefix=".connectclaw_write_")
             try:
-                async with aiofiles.open(fd, "w", closefd=False) as f:
+                async with aiofiles.open(fd, "w", closefd=False, newline="") as f:
                     await f.write(content)
             finally:
                 os.close(fd)
+
+            # os.replace 迁移的是临时文件的 mode（mkstemp = 0600）；
+            # 覆盖已有文件时必须还原其权限位（H14 同款，可执行位会静默丢失）。
+            try:
+                st = os.stat(absolute_path)
+                os.chmod(tmp_path, st.st_mode & 0o7777)
+            except FileNotFoundError:
+                pass
 
             # Atomic rename
             os.replace(tmp_path, absolute_path)

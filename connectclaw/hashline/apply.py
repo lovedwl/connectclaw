@@ -790,11 +790,17 @@ def _resolve_edit_spans(
     _assert_no_conflicting_spans(resolved)
 
     # Sort back-to-front for safe in-place assembly
+    # H13：end 相同时 insert 必须先于 replace 应用。ReplaceSpan 的 span 不含
+    # 换行符，同边界 insert（boundary == rep.end）与 replace 的 end 相等；
+    # 若 replace 先应用，字符串长度变化后 insert 仍用原始坐标落点，
+    # 会把替换后的内容截断错位（实测 "XXXX" → "XX\nQXX"）。
+    # insert 先应用不影响 replace 的原始坐标（两者都引用应用前原文，
+    # 且 insert 位置 >= replace.end，从后往前拼装互不干扰）。
     return sorted(
         resolved,
         key=lambda s: (
             -s.end,
-            0 if isinstance(s, ReplaceSpan) else 1,
+            0 if isinstance(s, InsertSpan) else 1,
             -(s.boundary or -1) if isinstance(s, InsertSpan) else 0,
             s.index,  # ascending by index (TS: left.index - right.index)
         ),

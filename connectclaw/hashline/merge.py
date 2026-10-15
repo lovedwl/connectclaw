@@ -79,7 +79,12 @@ def _apply_patch(
         result_lines, hunk_offset = applied
         offset += hunk_offset
 
-    return "\n".join(result_lines)
+    merged = "\n".join(result_lines)
+    # H14："\n".join 丢弃文件末尾换行；原文件以换行结尾时必须补回，
+    # 否则 stale-anchor 恢复会永久吃掉 trailing newline。
+    if original.endswith("\n") and not merged.endswith("\n"):
+        merged += "\n"
+    return merged
 
 
 def _parse_hunks(patch_lines) -> list[dict]:

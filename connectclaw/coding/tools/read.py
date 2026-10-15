@@ -89,7 +89,8 @@ class ReadTool(AgentTool):
 
         # Read file
         try:
-            async with aiofiles.open(absolute_path, "r") as f:
+            # newline=""（H12）：保持磁盘真实行尾，与 hash_read/hash_edit 一致。
+            async with aiofiles.open(absolute_path, "r", newline="") as f:
                 content = await f.read()
         except Exception as e:
             return AgentToolResult(
