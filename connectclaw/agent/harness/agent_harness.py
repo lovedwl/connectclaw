@@ -111,6 +111,9 @@ class AgentHarness:
         self._get_api_key = get_api_key
         self._hooks = AgentHarnessHooks()
         self._live_card_callbacks: dict[str, Any] = {}
+        # H5：强引用持有落盘任务。CPython 事件循环只持弱引用，
+        # fire-and-forget 的 create_task 可能在执行中途被 GC（消息静默丢失）。
+        self._persist_tasks: set[asyncio.Task] = set()
 
         # Resolve system prompt
         if callable(system_prompt):
@@ -159,6 +162,15 @@ class AgentHarness:
         return lambda: self._listeners.remove(listener)
 
     # ── Prompt API ──────────────────────────────────────────
+
+    def _on_persist_done(self, task: asyncio.Task) -> None:
+        """H5：落盘任务完成后从强引用集合移除；异常必须 retrieve（防静默丢失）。"""
+        self._persist_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("Session persist failed", exc_info=exc)
 
     async def prompt(self, text: str, images: list[dict] | None = None) -> AssistantMessage | None:
         """Execute a prompt turn. Raises if busy.
@@ -455,11 +467,14 @@ class AgentHarness:
                     msg = event.get("message")
                     if msg:
                         try:
-                            asyncio.get_running_loop().create_task(
+                            task = asyncio.get_running_loop().create_task(
                                 self._session.append_message(_serialize_message(msg))
                             )
                         except RuntimeError:
                             pass  # No running loop, skip
+                        else:
+                            self._persist_tasks.add(task)
+                            task.add_done_callback(self._on_persist_done)
 
             agent.subscribe(on_agent_event)
             self._harness_subscribed = True
@@ -474,6 +489,11 @@ class AgentHarness:
             prompt_msg = text
         self._turn_aborted = False
         await agent.prompt(prompt_msg)
+
+        # H5：等本轮 message_end 落盘任务完成再返回，保证 turn 边界上会话文件
+        # 已完整（下一轮折叠/压缩读文件时不会缺尾部消息，也不会与下轮写入乱序）。
+        if self._persist_tasks:
+            await asyncio.gather(*list(self._persist_tasks), return_exceptions=True)
 
         # Return last assistant message
         for m in reversed(agent.state.messages):

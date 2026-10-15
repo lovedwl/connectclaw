@@ -5,6 +5,7 @@ Mirrors pi-mono's session tree model with simplified entry types.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -124,6 +125,10 @@ class JsonlSessionStorage:
         self._by_id: dict[str, SessionEntry] = {}
         self._current_leaf_id: str | None = None
         self._header: SessionHeader | None = None
+        # H5：序列化所有落盘写入。parent_id 必须与写入在同一临界区内决定，
+        # 否则并发 append（同一同步批次连续 emit 的多条 message_end）会读到
+        # 同一个尚未更新的 leaf，线性链被写成兄弟分支。
+        self._lock = asyncio.Lock()
 
     @classmethod
     async def open(cls, file_path: str) -> JsonlSessionStorage:
@@ -189,7 +194,11 @@ class JsonlSessionStorage:
         return storage
 
     async def append_entry(self, entry: SessionEntry) -> None:
-        """Append one line to JSONL file and update in-memory state."""
+        """Append one line to JSONL file and update in-memory state (serialized)."""
+        async with self._lock:
+            await self._append_entry_locked(entry)
+
+    async def _append_entry_locked(self, entry: SessionEntry) -> None:
         entry_data = _entry_to_dict(entry)
         async with aiofiles.open(self._file_path, "a") as f:
             await f.write(json.dumps(entry_data, default=str, ensure_ascii=False) + "\n")
@@ -200,27 +209,29 @@ class JsonlSessionStorage:
 
     async def append_message(self, message: dict[str, Any]) -> str:
         """Append a message entry, returns the entry ID."""
-        entry_id = str(uuid.uuid4()).replace("-", "")[:12]
-        entry = MessageEntry(
-            id=entry_id,
-            parent_id=self._current_leaf_id,
-            timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            message=message,
-        )
-        await self.append_entry(entry)
+        async with self._lock:
+            entry_id = str(uuid.uuid4()).replace("-", "")[:12]
+            entry = MessageEntry(
+                id=entry_id,
+                parent_id=self._current_leaf_id,
+                timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                message=message,
+            )
+            await self._append_entry_locked(entry)
         return entry_id
 
     async def append_context(self, ops: list[dict[str, Any]], note: str = "") -> str:
         """追加一条结构化上下文条目（本轮新增/更新的 op）。"""
-        entry_id = str(uuid.uuid4()).replace("-", "")[:12]
-        entry = ContextEntry(
-            id=entry_id,
-            parent_id=self._current_leaf_id,
-            timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            ops=list(ops),
-            note=note,
-        )
-        await self.append_entry(entry)
+        async with self._lock:
+            entry_id = str(uuid.uuid4()).replace("-", "")[:12]
+            entry = ContextEntry(
+                id=entry_id,
+                parent_id=self._current_leaf_id,
+                timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                ops=list(ops),
+                note=note,
+            )
+            await self._append_entry_locked(entry)
         return entry_id
 
     async def append_compaction(
@@ -233,18 +244,19 @@ class JsonlSessionStorage:
         region (see connectclaw/injection.py); it rides along with the summary
         so the model keeps its memories through compaction.
         """
-        entry_id = str(uuid.uuid4()).replace("-", "")[:12]
-        entry = CompactionEntry(
-            id=entry_id,
-            parent_id=self._current_leaf_id,
-            timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            summary=summary,
-            first_kept_entry_id=first_kept_entry_id,
-            tokens_before=tokens_before,
-            merged_context=merged_context,
-            context_state=context_state,
-        )
-        await self.append_entry(entry)
+        async with self._lock:
+            entry_id = str(uuid.uuid4()).replace("-", "")[:12]
+            entry = CompactionEntry(
+                id=entry_id,
+                parent_id=self._current_leaf_id,
+                timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                summary=summary,
+                first_kept_entry_id=first_kept_entry_id,
+                tokens_before=tokens_before,
+                merged_context=merged_context,
+                context_state=context_state,
+            )
+            await self._append_entry_locked(entry)
         return entry_id
 
     async def get_path_to_root(self, leaf_id: str | None = None) -> list[SessionEntry]:
