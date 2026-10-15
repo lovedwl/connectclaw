@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+from collections import OrderedDict
 from typing import Any, AsyncIterator
 
 from connectclaw.logging import get_logger
@@ -20,8 +21,9 @@ logger = get_logger(__name__)
 _provider = DeepSeekProvider()
 
 # Client cache — reuse AsyncOpenAI clients across calls.
-# Key: (base_url, api_key_first_8), Value: AsyncOpenAI
-_client_cache: dict[tuple[str, str], Any] = {}
+# Key: (base_url, api_key_first_8, proxy), Value: AsyncOpenAI
+# OrderedDict（非 dict）：popitem(last=False) 只属于 OrderedDict，普通 dict 会 TypeError。
+_client_cache: OrderedDict[tuple[str, str, str], Any] = OrderedDict()
 _client_cache_lock = asyncio.Lock()
 # Each client owns an httpx connection pool (~5-10 MB), so the cache is bounded
 # and the oldest client is closed when a config rotation pushes past the cap.
@@ -104,6 +106,7 @@ async def stream_simple(
     async with _client_cache_lock:
         if cache_key in _client_cache:
             client = _client_cache[cache_key]
+            _client_cache.move_to_end(cache_key)
         else:
             client = provider.build_client(key, base_url=base, proxy=proxy)
             _client_cache[cache_key] = client
