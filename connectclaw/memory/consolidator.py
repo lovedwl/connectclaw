@@ -212,8 +212,11 @@ class MemoryConsolidator:
             decay_factor = 2 ** (-elapsed / halflife_seconds)
             new_strength = entry.strength * decay_factor
 
-            floor = entry.importance * 0.3
-            new_strength = max(new_strength, floor)
+            # 软删条目（/forget 把 strength 恰置 0）不参与地板：地板会把它们
+            # 抬回 importance*0.3，重新越过召回线并逃过 cleanup（H8）。
+            if entry.strength > 0.0:
+                floor = entry.importance * 0.3
+                new_strength = max(new_strength, floor)
 
             changed = abs(new_strength - entry.strength) > 0.001
             if changed:
@@ -294,6 +297,11 @@ class MemoryConsolidator:
             return {}
 
         result = _parse_json(text)
+        if not result:
+            # 解析失败（非法 JSON）不能当作"无决定"继续走：
+            # _apply_consolidation 尾部会对整批 episode 无条件衰减。
+            logger.warning("Dream: consolidation 输出无法解析为 JSON，跳过")
+            return {}
         self._apply_consolidation(result, episodes)
         return result
 
@@ -437,6 +445,11 @@ class MemoryConsolidator:
                 )
             )
 
+        # 本轮被 LLM 决定触碰过的 id：合并组（含 ids[0]）、被删除项、强化项。
+        # 尾部的 episode 衰减写回（update = INSERT OR REPLACE）绝不能碰它们，
+        # 否则会把已删除条目复活、并用内存里合并前的旧 content 覆盖合并结果（H7）。
+        touched: set[str] = set()
+
         for group in result.get("merge_groups", []):
             ids = group.get("memory_ids", [])
             if len(ids) < 2:
@@ -457,6 +470,7 @@ class MemoryConsolidator:
 
             for mid in ids[1:]:
                 self._store.delete(mid)
+            touched.update(str(i) for i in ids)
 
         for mid in result.get("strengthen", []):
             entry = self._store.get(mid)
@@ -464,11 +478,15 @@ class MemoryConsolidator:
                 entry.strength = min(1.0, entry.strength + 0.1)
                 entry.last_accessed = now
                 self._store.update(entry)
+            touched.add(str(mid))
 
         for mid in result.get("forget", []):
             self._store.delete(mid)
+            touched.add(str(mid))
 
         for ep in episodes:
+            if str(ep.id) in touched:
+                continue
             ep.strength *= 0.7
             self._store.update(ep)
 
