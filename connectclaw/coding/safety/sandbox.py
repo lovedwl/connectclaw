@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shlex
 import shutil
 import subprocess
 import time
@@ -170,6 +171,11 @@ def detect_best_sandbox() -> type:
         return BwrapSandbox
     if shutil.which("unshare") and _probe_unshare():
         return NamespaceSandbox
+    logger.warning(
+        "[sandbox] no usable sandbox (bwrap/unshare missing or probing failed); "
+        "falling back to DIRECT — config.toml / models.toml lose their read-only "
+        "protection and are writable via bash; BashGuard is the only gate (H3)"
+    )
     return DirectSandbox
 
 
@@ -195,12 +201,18 @@ def resolve_sandbox_cls(mode: str = "auto") -> type:
     if mode == "bwrap":
         if shutil.which("bwrap") and _probe_bwrap():
             return BwrapSandbox
-        logger.warning("[sandbox] mode=bwrap unusable here; falling back to direct")
+        logger.warning(
+            "[sandbox] mode=bwrap unusable here; falling back to DIRECT — "
+            "protected config files are writable via bash (H3)"
+        )
         return DirectSandbox
     if mode == "unshare":
         if shutil.which("unshare") and _probe_unshare():
             return NamespaceSandbox
-        logger.warning("[sandbox] mode=unshare unusable here; falling back to direct")
+        logger.warning(
+            "[sandbox] mode=unshare unusable here; falling back to DIRECT — "
+            "protected config files are writable via bash (H3)"
+        )
         return DirectSandbox
     return detect_best_sandbox()
 
@@ -345,7 +357,8 @@ class NamespaceSandbox(Sandbox):
         return SandboxLevel.UNSHARE
 
     def build(self, command: str) -> list[str]:
-        inner = f"cd {self.cwd}; {command}"
+        # M19：cwd 必须 shell 引用——含空格/分号/反引号的 cwd 会拼成注入面
+        inner = f"cd {shlex.quote(self.cwd)}; {command}"
         return ["unshare", "--mount", "--fork", "--pid", "--mount-proc",
                 "--", "bash", "-c", inner]
 

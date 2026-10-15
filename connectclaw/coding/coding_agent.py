@@ -823,7 +823,24 @@ class CodingAgent:
                     "直接在宿主机上以 bot 用户身份运行，无文件系统隔离"
                 )
             else:
-                lines.append(f"- Bash 沙箱：[sandbox] mode={sb_mode}")
+                # H3：降级为 DirectSandbox 时逃生配置失去只读保护，
+                # 必须升格为强告警（做梦校验记忆真伪时据此判断）。
+                from connectclaw.coding.safety.sandbox import (
+                    DirectSandbox,
+                    resolve_sandbox_cls,
+                )
+
+                sb_cls = resolve_sandbox_cls(sb_mode)
+                if sb_cls is DirectSandbox:
+                    lines.append(
+                        f"- ⚠️ Bash 沙箱降级为无隔离直跑（[sandbox] mode={sb_mode} "
+                        "在本机探测失败）——config.toml / models.toml 无法经只读挂载"
+                        "保护，bash 理论上可修改它们；BashGuard 为唯一防线"
+                    )
+                else:
+                    lines.append(
+                        f"- Bash 沙箱：[sandbox] mode={sb_mode}（{sb_cls.__name__}）"
+                    )
             lines.append(f"- 记忆库文件：{self._config.memory.db_path}")
         except Exception as e:  # pragma: no cover - 防御性
             logger.debug("[CODING] 环境事实采集部分失败: %s", e)
