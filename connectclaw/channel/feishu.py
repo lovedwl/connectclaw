@@ -656,23 +656,31 @@ class FeishuChannel(Channel):
         auth = AuthRequest(request_id=rid, conversation_key=conversation_key, command=command)
         self._auth_requests[rid] = auth
 
-        card = _build_card(command, rid, title, description, template)
-        msg_id = await self.send_card(conversation_key, card)
-        auth.message_id = msg_id
-        logger.info("[AUTH] sent card for %s: message_id=%s command=%s",
-                    rid, msg_id, command[:80])
-
+        # try/finally 保证 rid 无论超时/取消/发卡失败都会从 _auth_requests 清掉，
+        # 否则僵尸授权条目（仍是可点按钮）只增不减（H10）。
+        msg_id = ""
         try:
-            async with asyncio.timeout(timeout):
-                await auth.event.wait()
-        except TimeoutError:
-            auth.approved = False
-            logger.info("[AUTH] %s timed out after %ss", rid, timeout)
-            if msg_id:
-                await self._update_auth_card(msg_id, command, rid,
-                                             approved=False, timed_out=True)
+            card = _build_card(command, rid, title, description, template)
+            msg_id = await self.send_card(conversation_key, card)
+            auth.message_id = msg_id
+            logger.info("[AUTH] sent card for %s: message_id=%s command=%s",
+                        rid, msg_id, command[:80])
 
-        self._auth_requests.pop(rid, None)
+            try:
+                async with asyncio.timeout(timeout):
+                    await auth.event.wait()
+            except TimeoutError:
+                auth.approved = False
+                logger.info("[AUTH] %s timed out after %ss", rid, timeout)
+                if msg_id:
+                    await self._update_auth_card(msg_id, command, rid,
+                                                 approved=False, timed_out=True)
+                # 超时终态已展示，return 跳过下方无条件二次更新——
+                # 否则 "⏰ 已超时" 会被覆盖成 "❌ 已拒绝"（H9）。
+                return auth.approved
+        finally:
+            self._auth_requests.pop(rid, None)
+
         if msg_id:
             await self._update_auth_card(msg_id, command, rid,
                                          approved=auth.approved, timed_out=False)
