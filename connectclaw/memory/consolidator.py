@@ -198,7 +198,7 @@ class MemoryConsolidator:
         halflife_seconds = self._config.decay_halflife_days * 86400
         count = 0
 
-        all_memories = self._store.list_all(min_strength=0.0)
+        all_memories = self._store.list_all(min_strength=0.0, limit=None)
         for entry in all_memories:
             # Decay by the time elapsed since the LAST dream, anchored on
             # last_decayed_at — NOT the full age since last_accessed. Applying
@@ -234,7 +234,7 @@ class MemoryConsolidator:
         """Strengthen memories that have been accessed recently."""
         count = 0
 
-        all_memories = self._store.list_all(min_strength=0.1)
+        all_memories = self._store.list_all(min_strength=0.1, limit=None)
         for entry in all_memories:
             if entry.access_count == 0:
                 continue
@@ -426,17 +426,22 @@ class MemoryConsolidator:
         now = time.time()
 
         for item in result.get("new_semantic", []):
-            content = item.get("content", "").strip()
+            # M32：LLM 输出 content:null / item 为 str 时不再崩（原整轮丢弃）
+            if not isinstance(item, dict):
+                continue
+            content = str(item.get("content") or "").strip()
             if not content:
                 continue
+            try:
+                importance = min(1.0, max(0.0, float(item.get("importance") or 0.6)))
+            except (TypeError, ValueError):
+                importance = 0.6
             self._store.add(
                 MemoryEntry(
                     type=MemoryType.SEMANTIC,
                     content=content,
-                    category=item.get("category", ""),
-                    importance=min(
-                        1.0, max(0.0, float(item.get("importance", 0.6)))
-                    ),
+                    category=str(item.get("category") or ""),
+                    importance=importance,
                     created_at=now,
                     last_accessed=now,
                     metadata={
@@ -451,10 +456,12 @@ class MemoryConsolidator:
         touched: set[str] = set()
 
         for group in result.get("merge_groups", []):
-            ids = group.get("memory_ids", [])
+            if not isinstance(group, dict):
+                continue
+            ids = [str(i) for i in (group.get("memory_ids") or []) if i]
             if len(ids) < 2:
                 continue
-            merged_content = group.get("merged_content", "")
+            merged_content = str(group.get("merged_content") or "")
             merged_detail = group.get("merged_detail")
             if not merged_content:
                 continue
@@ -473,6 +480,9 @@ class MemoryConsolidator:
             touched.update(str(i) for i in ids)
 
         for mid in result.get("strengthen", []):
+            if isinstance(mid, dict):
+                mid = mid.get("id", "")
+            mid = str(mid)
             entry = self._store.get(mid)
             if entry:
                 entry.strength = min(1.0, entry.strength + 0.1)
@@ -481,8 +491,11 @@ class MemoryConsolidator:
             touched.add(str(mid))
 
         for mid in result.get("forget", []):
+            if isinstance(mid, dict):
+                mid = mid.get("id", "")
+            mid = str(mid)
             self._store.delete(mid)
-            touched.add(str(mid))
+            touched.add(mid)
 
         for ep in episodes:
             if str(ep.id) in touched:

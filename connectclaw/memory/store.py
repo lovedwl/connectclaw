@@ -168,7 +168,7 @@ class MemoryStore:
         memory_type: MemoryType | None = None,
         category: str | None = None,
         min_strength: float = 0.0,
-        limit: int = 1000,
+        limit: int | None = 1000,
     ) -> list[MemoryEntry]:
         conn = self._connect()
         query = "SELECT * FROM memories WHERE strength >= ?"
@@ -185,8 +185,12 @@ class MemoryStore:
             query += " AND category = ?"
             params.append(category)
 
-        query += " ORDER BY importance DESC, last_accessed DESC LIMIT ?"
-        params.append(limit)
+        # limit=None = 不截断（M31：衰减/强化必须覆盖全量，
+        # 否则按 importance 排序的尾部记忆永不衰减，cleanup 却会误删）
+        query += " ORDER BY importance DESC, last_accessed DESC"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(limit)
 
         rows = conn.execute(query, params).fetchall()
         return [self._row_to_entry(r) for r in rows]
@@ -235,6 +239,7 @@ class MemoryStore:
         query_norm = np.linalg.norm(query_vec)
         if query_norm == 0:
             return []
+        dim = query_vec.shape[0]
 
         results: list[tuple[MemoryEntry, float]] = []
         for row in rows:
@@ -244,6 +249,10 @@ class MemoryStore:
             entry_vec = np.array(entry.embedding, dtype=np.float32)
             entry_norm = np.linalg.norm(entry_vec)
             if entry_norm == 0:
+                continue
+            # M34：维度不匹配（换过 embedding 模型的旧库）→ 跳过，
+            # 而不是 np.dot 抛 ValueError 冒到 recall 的 except 触发 H6
+            if entry_vec.shape[0] != dim:
                 continue
             similarity = float(
                 np.dot(query_vec, entry_vec) / (query_norm * entry_norm)

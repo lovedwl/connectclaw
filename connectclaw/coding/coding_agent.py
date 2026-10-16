@@ -109,6 +109,8 @@ class CodingAgent:
         self._hash_read_tool = create_hash_read_tool(config.agent.cwd, self._read_tool)
         self._hash_edit_tool = create_hash_edit_tool(config.agent.cwd)
         self._bash_guard = BashGuard()
+        # M35：后台任务强引用集合——fire-and-forget 的 create_task 可能被 GC
+        self._bg_tasks: set[asyncio.Task] = set()
         # [sandbox] mode decides isolation for the agent's OWN bash: "auto"
         # detects, "none" runs unsandboxed on the host (operator's full-trust
         # switch). config.toml is agent-read-only, so only the operator flips it.
@@ -465,7 +467,7 @@ class CodingAgent:
                         if hasattr(e, "type") and e.type == "message"
                     ]
                     if recent_messages:
-                        asyncio.create_task(
+                        self._spawn_bg(
                             self._memory.learn(
                                 recent_messages,
                                 self._model,
@@ -484,6 +486,18 @@ class CodingAgent:
                 return "我正在处理你上一条请求，请稍候。"
             raise
 
+    def _spawn_bg(self, coro) -> None:
+        """M35：持强引用的后台任务创建，完成后自动清理并 retrieve 异常。"""
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(task)
+
+        def _done(t: asyncio.Task) -> None:
+            self._bg_tasks.discard(t)
+            if not t.cancelled() and t.exception() is not None:
+                logger.warning("Background task failed: %s", t.exception())
+
+        task.add_done_callback(_done)
+
     async def new_session(self, conversation_key: str) -> None:
         # Fallback extraction before the context is wiped: a short conversation
         # may never hit the per-turn throttle, so /new is its last chance to
@@ -498,7 +512,7 @@ class CodingAgent:
                     if hasattr(e, "type") and e.type == "message"
                 ]
                 if recent_messages:
-                    asyncio.create_task(
+                    self._spawn_bg(
                         self._memory.force_learn(
                             recent_messages,
                             self._model,

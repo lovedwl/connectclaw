@@ -69,6 +69,8 @@ class MemorySubsystem:
         self._turn_counter: dict[str, int] = {}
         self._last_dream_time: float = 0.0
         self._dream_task: asyncio.Task | None = None
+        # M35：做梦互斥锁——/dream 与周期任务并发跑衰减/整理会重复衰减互相覆盖
+        self._dream_lock = asyncio.Lock()
         # 环境事实快照提供者（由 CodingAgent 接上）：做梦整理记忆时用来校验真伪
         self._env_facts_provider: Callable[[], str] | None = None
         # 召回决策评估集（~/.connectclaw/memory_recall_eval.jsonl），fail-open
@@ -382,10 +384,12 @@ class MemorySubsystem:
             if hours_since < self._config.dream_interval_hours:
                 return None
 
-        report = await self._consolidator.dream(
-            model, api_key=api_key, env_facts=self._env_facts()
-        )
-        self._last_dream_time = now
+        # M35：同一时刻只允许一个 dream 在跑
+        async with self._dream_lock:
+            report = await self._consolidator.dream(
+                model, api_key=api_key, env_facts=self._env_facts()
+            )
+            self._last_dream_time = now
 
         return {
             "decayed": report.decayed,

@@ -140,17 +140,22 @@ def _parse_extraction_result(
         except ValueError:
             mem_type = MemoryType.SEMANTIC
 
-        content = item.get("content", "").strip()
+        # M32：content:null 不再 AttributeError；importance 非法值回退默认
+        content = str(item.get("content") or "").strip()
         if not content:
             continue
+        try:
+            importance = min(1.0, max(0.0, float(item.get("importance") or 0.5)))
+        except (TypeError, ValueError):
+            importance = 0.5
 
         entries.append(
             MemoryEntry(
                 type=mem_type,
                 content=content,
                 detail=item.get("detail"),
-                category=item.get("category", ""),
-                importance=min(1.0, max(0.0, float(item.get("importance", 0.5)))),
+                category=str(item.get("category") or ""),
+                importance=importance,
                 created_at=now,
                 last_accessed=now,
                 source_session=source_session,

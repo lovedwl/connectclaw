@@ -19,6 +19,9 @@ from connectclaw.model_registry import ModelProfile, normalize_url
 
 logger = get_logger(__name__)
 
+# M35：做梦后台任务的强引用集合（fire-and-forget 防 GC）
+_DREAM_TASKS: set[asyncio.Task] = set()
+
 
 # ── Public API ─────────────────────────────────────────────────
 
@@ -197,7 +200,10 @@ async def _dream(conversation_key: str, agent: Any, args: str = "") -> str:
             except Exception as e:
                 logger.debug("Failed to push dream result: %s", e)
 
-    asyncio.create_task(_run())
+    # M35：持引用防 GC（事件循环只持弱引用，任务可能中途被静默丢弃）
+    _bg = asyncio.create_task(_run())
+    _DREAM_TASKS.add(_bg)
+    _bg.add_done_callback(_DREAM_TASKS.discard)
     return "💤 开始整合记忆（做梦）……完成后会告诉你。"
 
 

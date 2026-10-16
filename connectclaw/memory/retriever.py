@@ -23,6 +23,16 @@ from .types import MemoryEntry, MemoryType, SearchResult
 logger = get_logger(__name__)
 
 
+def _est_tokens(text: str) -> int:
+    """M30：真实分词估算（CJK-aware），失败时退回 len//3（仅拉丁文可用）。"""
+    try:
+        from connectclaw.provider.tokenizer import count_tokens
+
+        return max(1, count_tokens(text))
+    except Exception:
+        return max(1, len(text) // 3)
+
+
 def _content_referenced(content: str, reply_lower: str, *, min_chars: int = 4) -> bool:
     """True if a distinctive substring of ``content`` appears in the reply.
 
@@ -228,10 +238,12 @@ class MemoryRetriever:
         bm_hits: set[str] = set()
 
         for entry, similarity in raw:
-            if similarity < self._config.min_similarity:
+            bm = bm25_scores.get(entry.id, 0.0)
+            # M29：BM25 命中豁免绝对闸——精确术语（ID/路径/错误码）的余弦可能
+            # 很低，在用到 BM25 前就 continue 会把它们提前砍掉，融合形同虚设。
+            if similarity < self._config.min_similarity and bm <= 0.0:
                 continue
 
-            bm = bm25_scores.get(entry.id, 0.0)
             # Normalize bm25 into [0,1] against the max in this batch so it
             # can be folded into the weighted score alongside similarity.
             max_bm = max(bm25_scores.values()) if bm25_scores else 0.0
@@ -404,14 +416,18 @@ class MemoryRetriever:
             text = r.entry.content
             if r.detail_level == "full" and r.entry.detail:
                 text += " " + r.entry.detail
-            tokens = max(1, len(text) // 3)
+            tokens = max(1, _est_tokens(text))
 
             if used + tokens > budget:
                 if r.detail_level == "full":
                     r.detail_level = "summary"
-                    tokens = max(1, len(r.entry.content) // 3)
+                    tokens = max(1, _est_tokens(r.entry.content))
                     if used + tokens > budget:
                         break
+                else:
+                    # M30：summary 级同样受预算约束——此前恒 append，
+                    # 超预算后 summary 条目照样全部注入。
+                    break
 
             kept.append(r)
             used += tokens
