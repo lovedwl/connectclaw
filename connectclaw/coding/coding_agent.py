@@ -36,7 +36,6 @@ from .bg_tasks import BgTasksTool
 from .safety.sandbox import resolve_sandbox_cls
 from .tools.hash_edit import create_hash_edit_tool
 from .tools.hash_read import create_hash_read_tool
-from .tools.image_analyze import create_image_analyze_tool
 from .tools import lightpanda
 from .tools.read import create_read_tool
 from .tools.skills import SkillStore, SkillsTool
@@ -135,13 +134,6 @@ class CodingAgent:
             api_key_provider=lambda: self._config.llm.api_key or "",
             proxy=config.proxy.url,
         )
-        self._image_tool = create_image_analyze_tool(
-            api_key=config.vision.api_key,
-            base_url=config.vision.base_url,
-            model_id=config.vision.model_id,
-            cwd=config.agent.cwd,
-            proxy=config.vision.proxy,
-        )
         # Image attach registry: main.py registers downloaded images here and
         # the model re-attaches any of them to the current turn via the tool.
         self._attachment_store = AttachmentStore(DEFAULT_ATTACHMENTS_DIR)
@@ -215,7 +207,7 @@ class CodingAgent:
                 self._read_tool, self._write_tool, self._hash_read_tool,
                 self._hash_edit_tool, self._bash_tool, self._bg_tasks_tool,
                 self._web_search_tool,
-                self._web_fetch_tool, self._image_tool, self._attach_image_tool,
+                self._web_fetch_tool, self._attach_image_tool,
                 self._skills_tool, self._send_file_tool, self._memory_tool,
             ]
         }

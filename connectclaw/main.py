@@ -58,7 +58,7 @@ async def _download_feishu_images(
     a later turn. Returns a list of image_ref content blocks for this turn.
     """
     from connectclaw.coding.tools.attach_image import make_image_ref
-    from connectclaw.coding.tools.image_analyze import MIME_TO_EXT, detect_mime_type
+    from connectclaw.coding.tools.image_utils import MIME_TO_EXT, detect_mime_type
 
     import xxhash
 
