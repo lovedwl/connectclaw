@@ -180,7 +180,6 @@ async def main(argv: list[str] | None = None) -> None:
     except Exception:
         browser_ok = False
     logger.info("  Web/Browser: %s", "Lightpanda ready" if browser_ok else "lightpanda-py missing — uv add lightpanda-py")
-    logger.info("  Vision: %s", "configured" if config.vision.api_key else "not configured")
 
     if not config.llm.api_key:
         logger.error("LLM API key is required.")
