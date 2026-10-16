@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import time
 import uuid
@@ -20,6 +21,8 @@ import aiofiles.os
 from connectclaw.agent.types import CompactionSummaryMessage
 from connectclaw.injection import render_ops
 from connectclaw.provider.types import Message, UserMessage, normalize_message
+
+logger = logging.getLogger(__name__)
 
 
 # ── Session Entries ────────────────────────────────────────────
@@ -291,17 +294,39 @@ class JsonlSessionStorage:
 
         result: list[SessionEntry] = []
 
-        def walk(entry_id: str) -> None:
+        # 2026-10-16 fix: iterative DFS with a visited set. The old recursive
+        # walk had no cycle guard: once the in-memory entry graph ever held a
+        # parent cycle (observed after /stop cancelled a mid-flight session
+        # append while the subagent fleet kept writing), every subsequent
+        # get_path_to_root() died with RecursionError within milliseconds —
+        # poisoning recall / context_state / memory extraction for every
+        # later message in the chat. Iterative + visited: cycles and
+        # duplicate ids simply terminate.
+        visited: set[str] = set()
+        stack: list[str] = [root.id for root in reversed(roots)]
+        while stack:
+            entry_id = stack.pop()
+            if entry_id in visited:
+                continue
+            visited.add(entry_id)
             entry = self._by_id.get(entry_id)
             if entry is None:
-                return
+                continue
             result.append(entry)
-            # Visit children in insertion order (preserved by _entries list order).
-            for child in children.get(entry_id, []):
-                walk(child.id)
+            # Visit children in insertion order (preserved by _entries list
+            # order) — push in reverse so pop() yields the first child first.
+            stack.extend(child.id for child in reversed(children.get(entry_id, [])))
 
-        for root in roots:
-            walk(root.id)
+        if len(result) < len(self._entries):
+            # Entries not reachable from any root (e.g. parent_id points at a
+            # missing entry). Previously they were silently dropped.
+            unreachable = [e.id for e in self._entries if e.id not in visited]
+            logger.warning(
+                "session %s: %d/%d entries unreachable from root (dangling "
+                "parent refs?), first ids: %s",
+                self._file_path, len(unreachable), len(self._entries),
+                unreachable[:5],
+            )
 
         return result
 

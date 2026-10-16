@@ -344,7 +344,7 @@ async def main(argv: list[str] | None = None) -> None:
                 logger.info("[%s] Assistant: %s", conversation_key[:8], response[:100])
             return response
         except Exception as e:
-            logger.error("[%s] Error: %s", conversation_key[:8], e)
+            logger.error("[%s] Error: %s", conversation_key[:8], e, exc_info=True)
             return f"错误：{e}"
 
     # Handle graceful shutdown on SIGINT / SIGTERM (Ctrl+C vs systemd/docker stop)
