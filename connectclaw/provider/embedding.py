@@ -40,31 +40,37 @@ class EmbeddingProvider:
         # Auto-pick GPU when available — a big embedding model on CPU is ~10x
         # slower per query, and query embedding sits on the per-turn recall path.
         self._device = device or _resolve_device()
+        # M14：并发首次调用（RAG 与 memory 共享实例）会重复加载模型
+        self._load_lock = asyncio.Lock()
 
     async def ensure_loaded(self) -> None:
         """Lazy load the model. Called before first embed()."""
         if self._model is not None:
             return
 
-        # Hard-cap torch CPU threads (belt-and-braces over OMP_NUM_THREADS):
-        # some paths ignore the env var. On CPU, a single embedding query
-        # does not benefit from all cores and an unbounded pool spikes RSS.
-        try:
-            import os as _os
-            import torch
+        async with self._load_lock:
+            if self._model is not None:
+                return  # double-checked：等锁期间别人已加载完
 
-            n = int(_os.environ.get("CONNECTCLAW_ML_THREADS", "4"))
-            torch.set_num_threads(max(1, n))
-        except Exception:
-            pass
+            # Hard-cap torch CPU threads (belt-and-braces over OMP_NUM_THREADS):
+            # some paths ignore the env var. On CPU, a single embedding query
+            # does not benefit from all cores and an unbounded pool spikes RSS.
+            try:
+                import os as _os
+                import torch
 
-        from sentence_transformers import SentenceTransformer
+                n = int(_os.environ.get("CONNECTCLAW_ML_THREADS", "4"))
+                torch.set_num_threads(max(1, n))
+            except Exception:
+                pass
 
-        self._model = await asyncio.to_thread(
-            SentenceTransformer,
-            self._model_name,
-            device=self._device,
-        )
+            from sentence_transformers import SentenceTransformer
+
+            self._model = await asyncio.to_thread(
+                SentenceTransformer,
+                self._model_name,
+                device=self._device,
+            )
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         """Generate embeddings for a batch of texts."""

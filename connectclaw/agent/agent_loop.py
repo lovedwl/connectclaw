@@ -492,13 +492,26 @@ async def _execute_sequential(
                 current_context, assistant_message, tc, config, signal, emit
             )
         except Exception as e:
+            err_result = AgentToolResult(
+                content=[{"type": "text", "text": str(e)}],
+                details={"is_error": True},
+            )
             result_msg = ToolResultMessage(
                 tool_call_id=tc["id"],
                 tool_name=tc["name"],
-                content=[{"type": "text", "text": str(e)}],
+                content=err_result.content,
                 is_error=True,
                 timestamp=time.time() * 1000,
             )
+            # M4：预处理失败也要发 tool_execution_end，否则调用方
+            # pending_tool_calls 里这条永久残留（与并行路径行为一致）。
+            await emit({
+                "type": "tool_execution_end",
+                "tool_call_id": tc["id"],
+                "tool_name": tc["name"],
+                "result": err_result.__dict__,
+                "is_error": True,
+            })
         results.append(result_msg)
         await emit({"type": "message_start", "message": _message_to_dict(result_msg)})
         await emit({"type": "message_end", "message": _message_to_dict(result_msg)})
@@ -562,6 +575,10 @@ async def _execute_parallel(
             preparations.append((tc, tool, validated_args))
 
     # Phase 2: Execute prepared tools concurrently
+    # M3：/stop 前置检查——顺序路径有，并行路径此前没有，abort 后
+    # prepared 的工具仍会全量执行。
+    aborted_before_exec = bool(signal and signal.is_set())
+
     async def run_one(tc: dict, tool: AgentTool, args: dict) -> AgentToolResult:
         try:
             result = await tool.execute(
@@ -575,16 +592,26 @@ async def _execute_parallel(
                 details=None,
             )
 
-    tasks = [run_one(tc, tool, args) for tc, tool, args in preparations]
-    executed = await asyncio.gather(*tasks, return_exceptions=True)
+    if aborted_before_exec:
+        # 已 abort：不执行，但为每个 prepared 调用留一个占位，Phase 3
+        # 会补发中止结果保持 tool_call/result 配对。
+        executed: list[Any] = [None] * len(preparations)
+    else:
+        tasks = [run_one(tc, tool, args) for tc, tool, args in preparations]
+        executed = await asyncio.gather(*tasks, return_exceptions=True)
 
     # Phase 3: Finalize in source order
+    # M3：这里不再提前 break——工具已经执行完，break 会丢掉真实结果，
+    # 制造孤儿 toolCall；abort 时统一补中止结果。
     results: list[ToolResultMessage] = []
     for (tc, tool, args), exec_result in zip(preparations, executed):
-        if signal and signal.is_set():
-            break
-
-        if isinstance(exec_result, Exception):
+        if exec_result is None:
+            result = AgentToolResult(
+                content=[{"type": "text", "text": "已中止（/stop）：工具未执行"}],
+                details={"is_error": True},
+            )
+            is_error = True
+        elif isinstance(exec_result, Exception):
             result = AgentToolResult(
                 content=[{"type": "text", "text": str(exec_result)}],
                 details=None,
@@ -836,16 +863,43 @@ def _strip_orphan_tool_calls(messages: list) -> list:
             result.append(m)
             continue
 
-        # Check whether every tool_call in this message has a matching result.
-        orphan = False
-        for tb in tool_blocks:
-            tc_id = tb.get("id", "")
-            if tc_id and tc_id not in satisfied_ids:
-                orphan = True
-                break
+        # Check which tool_calls in this message have matching results.
+        # M5：只剥孤儿 tool_call——此前只要有一个无结果就把整条消息的
+        # 全部 tool_calls 剥掉，同消息里"有结果"的调用被剥后，其
+        # toolResult 反过来变成孤儿（API 400）。
+        orphan_ids = {
+            tb.get("id", "") for tb in tool_blocks
+            if tb.get("id", "") and tb.get("id") not in satisfied_ids
+        }
 
-        if not orphan:
+        if not orphan_ids:
             result.append(m)
+            continue
+
+        kept_tool_blocks = [
+            tb for tb in tool_blocks if tb.get("id", "") not in orphan_ids
+        ]
+
+        # 还有保留的 toolCall：只替换掉孤儿块，消息结构不变。
+        if kept_tool_blocks:
+            get_logger(__name__).warning(
+                "Stripping %d orphan tool_call(s) from assistant message "
+                "(kept %d with results — session was interrupted mid-turn)",
+                len(orphan_ids), len(kept_tool_blocks),
+            )
+            stripped = type(m)(
+                role="assistant",
+                content=list(non_tool_blocks) + kept_tool_blocks,
+                model=getattr(m, "model", ""),
+                stop_reason=getattr(m, "stop_reason", "stop"),
+                usage=getattr(m, "usage", {}),
+                error_message=getattr(m, "error_message", None),
+                timestamp=getattr(m, "timestamp", 0.0),
+                duration_ms=getattr(m, "duration_ms", 0.0),
+                ttft_ms=getattr(m, "ttft_ms", 0.0),
+                retry_count=getattr(m, "retry_count", 0),
+            )
+            result.append(stripped)
             continue
 
         # Orphan found — strip tool_calls, keep text + thinking only.

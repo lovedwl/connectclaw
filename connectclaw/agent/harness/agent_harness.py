@@ -163,6 +163,16 @@ class AgentHarness:
 
     # ── Prompt API ──────────────────────────────────────────
 
+    def _active_abort_event(self) -> asyncio.Event | None:
+        """M10：当前运行中的 abort 事件（/stop 信号源）；不在 turn 中则 None。"""
+        agent = self._agent
+        if agent is None:
+            return None
+        active = getattr(agent, "_active_run", None)
+        if isinstance(active, dict):
+            return active.get("abort_event")
+        return None
+
     def _on_persist_done(self, task: asyncio.Task) -> None:
         """H5：落盘任务完成后从强引用集合移除；异常必须 retrieve（防静默丢失）。"""
         self._persist_tasks.discard(task)
@@ -301,6 +311,7 @@ class AgentHarness:
             custom_instructions=custom_instructions,
             thinking_level=self._thinking_level,
             settings=self._compaction_settings,
+            signal=self._active_abort_event(),
         )
 
         if result:
@@ -372,6 +383,7 @@ class AgentHarness:
                     api_key=compaction_api_key,
                     thinking_level=self._thinking_level,
                     settings=self._compaction_settings,
+                    signal=self._active_abort_event(),
                 )
                 if result:
                     await self._session.append_compaction(
@@ -496,6 +508,13 @@ class AgentHarness:
             await asyncio.gather(*list(self._persist_tasks), return_exceptions=True)
 
         # Return last assistant message
+        # M8：被 abort 的轮次没有本轮 assistant 消息（abort 不 emit
+        # message_end）——从尾部找到的只会是**上一条**旧消息，返回它是
+        # 契约错误。abort 时返回 None。
+        if self._turn_aborted:
+            logger.info("Turn aborted — prompt() returns None (no fresh assistant message)")
+            return None
+
         for m in reversed(agent.state.messages):
             if m.role != "assistant":
                 continue

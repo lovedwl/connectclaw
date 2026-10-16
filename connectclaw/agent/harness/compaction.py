@@ -10,6 +10,7 @@ Pipeline:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
@@ -387,6 +388,7 @@ async def generate_summary(
     previous_summary: str | None = None,
     custom_instructions: str | None = None,
     thinking_level: ThinkingLevel = "off",
+    signal: asyncio.Event | None = None,
 ) -> str:
     """Generate or update a structured conversation summary."""
     max_tokens = min(int(0.8 * reserve_tokens), model.max_tokens or 8192)
@@ -416,7 +418,8 @@ async def generate_summary(
     reasoning = thinking_level if model.reasoning and thinking_level != "off" else None
 
     parts = []
-    async for event in stream_simple(model, context, api_key=api_key, reasoning=reasoning):
+    # M10：透传 signal——摘要 LLM 调用此前无法被 /stop 中断
+    async for event in stream_simple(model, context, api_key=api_key, reasoning=reasoning, signal=signal):
         if event.type == "text_delta" and event.delta:
             parts.append(event.delta)
         elif event.type == "done" and event.message:
@@ -443,6 +446,7 @@ async def _generate_turn_prefix_summary(
     api_key: str | None = None,
     reserve_tokens: int = 16384,
     thinking_level: ThinkingLevel = "off",
+    signal: asyncio.Event | None = None,
 ) -> str:
     """Summarize a split-turn prefix."""
     max_tokens = min(int(0.5 * reserve_tokens), model.max_tokens or 4096)
@@ -461,7 +465,7 @@ async def _generate_turn_prefix_summary(
     reasoning = thinking_level if model.reasoning and thinking_level != "off" else None
 
     parts = []
-    async for event in stream_simple(model, context, api_key=api_key, reasoning=reasoning):
+    async for event in stream_simple(model, context, api_key=api_key, reasoning=reasoning, signal=signal):
         if event.type == "text_delta" and event.delta:
             parts.append(event.delta)
         elif event.type == "done" and event.message:
@@ -663,6 +667,7 @@ async def compact(
     custom_instructions: str | None = None,
     thinking_level: ThinkingLevel = "off",
     settings: CompactionSettings | None = None,
+    signal: asyncio.Event | None = None,
 ) -> CompactionResult:
     """Run the full compaction."""
     settings = settings or CompactionSettings()
@@ -678,6 +683,7 @@ async def compact(
                 previous_summary=prep.previous_summary,
                 custom_instructions=custom_instructions,
                 thinking_level=thinking_level,
+                signal=signal,
             )
         else:
             history = "No prior history."
@@ -688,6 +694,7 @@ async def compact(
             api_key=api_key,
             reserve_tokens=settings.reserve_tokens,
             thinking_level=thinking_level,
+            signal=signal,
         )
         if prefix:
             summary = f"{history}\n\n---\n\n**Turn Context (split turn):**\n\n{prefix}"
@@ -704,6 +711,7 @@ async def compact(
             previous_summary=prep.previous_summary,
             custom_instructions=custom_instructions,
             thinking_level=thinking_level,
+            signal=signal,
         )
 
     summary += _format_file_ops(prep.file_ops)
@@ -736,6 +744,7 @@ async def compact_conversation(
     api_key: str | None = None,
     previous_summary: str | None = None,
     thinking_level: ThinkingLevel = "off",
+    signal: asyncio.Event | None = None,
 ) -> CompactionResult | None:
     """Legacy wrapper — run full compaction on a flat message list."""
     tokens_before = calculate_context_tokens(messages)
@@ -750,6 +759,7 @@ async def compact_conversation(
     summary = await generate_summary(
         to_summarize, model, api_key=api_key,
         previous_summary=previous_summary, thinking_level=thinking_level,
+        signal=signal,
     )
 
     return CompactionResult(

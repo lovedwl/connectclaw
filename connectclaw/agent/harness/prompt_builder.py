@@ -66,12 +66,16 @@ class PromptBuilder:
         skills: list[dict[str, str]] | None = None,
     ) -> str:
         """Assemble the prompt: base template + skills (XML) + RAG context."""
-        prompt = self._template.format(
-            cwd=self.cwd,
-            date=time.strftime("%Y-%m-%d"),
-            os=platform.system(),
-            shell=os.environ.get("SHELL", "/bin/bash"),
-        )
+        # M13：不用 str.format——用户自定义模板里任何裸 { }（JSON 示例、
+        # 代码块等）都会抛 KeyError/IndexError。只做占位符字面替换。
+        prompt = self._template
+        for key, value in {
+            "cwd": self.cwd,
+            "date": time.strftime("%Y-%m-%d"),
+            "os": platform.system(),
+            "shell": os.environ.get("SHELL", "/bin/bash"),
+        }.items():
+            prompt = prompt.replace("{" + key + "}", value)
 
         if skills:
             prompt += "\n\n" + _format_skills(skills)

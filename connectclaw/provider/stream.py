@@ -331,7 +331,10 @@ async def stream_simple(
                 error_message="Request cancelled",
                 message=partial,
             )
-            return
+            # M2：取消不能被吞——继续向上传播，维持任务取消语义。
+            # （若消费方已停止迭代，aclose 会把 GeneratorExit 掷入上方的 yield，
+            # 不会走到这行。）
+            raise
 
         except Exception as e:
             error_msg = str(e)
@@ -342,6 +345,15 @@ async def stream_simple(
                 # 重试原来只存在于 debug 日志里，上层完全不可见；记在消息上，
                 # 落盘后 trace 查看器才能显示"这次回复重试了两回"。
                 partial.retry_count += 1
+                # M1：重试必须从零开始——中途失败后 partial.content /
+                # _tool_call_slots 已有半截数据，不清空会把两次生成的文本
+                # 拼接、tool 参数 JSON 拼成损坏的（静默内容损坏）。
+                partial.content = []
+                partial.usage = {}
+                partial.stop_reason = "stop"
+                partial.error_message = None
+                _first_token_at = None
+                _tool_call_slots.clear()
                 await asyncio.sleep(delay)
                 continue
 
