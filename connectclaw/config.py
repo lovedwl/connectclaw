@@ -28,8 +28,59 @@ def _expand_env(value: str) -> str:
     pattern = re.compile(r'\$\{(\w+)\}|\$(\w+)')
     def replace(match):
         var_name = match.group(1) or match.group(2)
-        return os.environ.get(var_name, "")
+        val = os.environ.get(var_name)
+        if val is None:
+            # M42：缺失变量静默变空串会误导排障——至少告警一次
+            logger.warning("Environment variable %r referenced in config is not set; expanding to empty string", var_name)
+            return ""
+        return val
     return pattern.sub(replace, value)
+
+
+def _safe_int(value: Any, default: int) -> int:
+    """M36：宽容的数值转换——支持 '64k'/'8m' 后缀，非法值回退默认并告警。"""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return int(value)
+    s = str(value).strip().lower().replace("_", "")
+    try:
+        if s.endswith("k"):
+            return int(float(s[:-1]) * 1024)
+        if s.endswith("m"):
+            return int(float(s[:-1]) * 1024 * 1024)
+        return int(s)
+    except (ValueError, TypeError):
+        logger.warning("Invalid numeric config value %r; using default %d", value, default)
+        return default
+
+
+def _safe_bool(value: Any, default: bool) -> bool:
+    """M36：统一 bool 归一——接受 1/true/yes/on 与 0/false/no/off。"""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    s = str(value).strip().lower()
+    if s in ("1", "true", "yes", "on"):
+        return True
+    if s in ("0", "false", "no", "off"):
+        return False
+    logger.warning("Invalid bool config value %r; using default %s", value, default)
+    return default
+
+
+def _safe_float(value: Any, default: float) -> float:
+    """M36：宽容的浮点转换（显式区分 0 与缺失，不像 `or` 会吞掉 0）。"""
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        logger.warning("Invalid float config value %r; using default %s", value, default)
+        return default
 
 
 def _load_toml(path: str) -> dict[str, Any]:
@@ -49,8 +100,10 @@ def _load_toml(path: str) -> dict[str, Any]:
     except FileNotFoundError:
         return {}
     except Exception as e:
-        logger.warning("Failed to load %s: %s", path, e)
-        return {}
+        # M43：TOML 语法错误不再吞掉照常启动——既没 key 又连错端点的
+        # 静默降级比启动失败更难排查。
+        logger.error("Failed to load %s: %s", path, e)
+        raise
 
 
 def _find_config_path() -> str | None:
@@ -288,9 +341,9 @@ class Config:
             model_id=os.environ.get("LLM_MODEL")
                 or os.environ.get("DEEPSEEK_MODEL")
                 or llm_raw.get("model_id", "deepseek-chat"),
-            context_window=int(llm_raw.get("context_window", 65536)),
-            max_tokens=int(llm_raw.get("max_tokens", 8192)),
-            reasoning=llm_raw.get("reasoning", True),
+            context_window=_safe_int(llm_raw.get("context_window"), 65536),
+            max_tokens=_safe_int(llm_raw.get("max_tokens"), 8192),
+            reasoning=_safe_bool(llm_raw.get("reasoning"), True),
         )
 
         # Proxy (model clients today; the single place for future consumers)
@@ -338,7 +391,7 @@ class Config:
                 or ag.get("cwd", os.getcwd()),
             thinking_level=os.environ.get("CONNECTCLAW_THINKING")
                 or ag.get("thinking_level", "off"),
-            max_images=int(ag.get("max_images", 5)),
+            max_images=_safe_int(ag.get("max_images"), 5),
         )
         # Exposed-tool whitelist: only override the default when config gives a
         # non-empty list; otherwise keep AgentConfig's default (all primitives).
@@ -383,55 +436,58 @@ class Config:
         # RAG
         ra = raw.get("rag", {})
         rag = RAGConfig(
-            enabled=os.environ.get("CONNECTCLAW_RAG_ENABLED", "") == "1"
-                or ra.get("enabled", False),
+            # M36：env 开关与 toml 开关统一走 _safe_bool（此前 =="1" 与裸透传并存）
+            enabled=_safe_bool(
+                os.environ.get("CONNECTCLAW_RAG_ENABLED") or ra.get("enabled"), False
+            ),
             docs_dir=os.environ.get("CONNECTCLAW_RAG_DOCS_DIR")
                 or ra.get("docs_dir", ""),
             db_path=os.environ.get("CONNECTCLAW_RAG_DB_PATH")
                 or ra.get("db_path", "~/.connectclaw/rag_db"),
-            top_k=int(ra.get("top_k", 20)),
-            top_n=int(ra.get("top_n", 5)),
+            top_k=_safe_int(ra.get("top_k"), 20),
+            top_n=_safe_int(ra.get("top_n"), 5),
         )
 
         # Web Search
         ws = raw.get("web_search", {})
         web_search = WebSearchConfig(
-            max_chars=int(
-                os.environ.get("WEB_SEARCH_MAX_CHARS", "")
-                or ws.get("max_chars", 8000)
+            max_chars=_safe_int(
+                os.environ.get("WEB_SEARCH_MAX_CHARS")
+                or ws.get("max_chars"), 8000
             ),
-            timeout=int(
-                os.environ.get("WEB_SEARCH_TIMEOUT", "")
-                or ws.get("timeout", 30)
+            timeout=_safe_int(
+                os.environ.get("WEB_SEARCH_TIMEOUT")
+                or ws.get("timeout"), 30
             ),
-            pool_size=int(ws.get("pool_size", 16)),
+            pool_size=_safe_int(ws.get("pool_size"), 16),
             extract_model=str(ws.get("extract_model", "") or ""),
         )
 
         # Compaction
         co = raw.get("compaction", {})
         compaction = CompactionConfig(
-            enabled=co.get("enabled", True),
-            reserve_tokens=int(co.get("reserve_tokens", 16384)),
-            keep_recent_tokens=int(co.get("keep_recent_tokens", 20000)),
+            enabled=_safe_bool(co.get("enabled"), True),
+            reserve_tokens=_safe_int(co.get("reserve_tokens"), 16384),
+            keep_recent_tokens=_safe_int(co.get("keep_recent_tokens"), 20000),
         )
 
         # Memory
         me = raw.get("memory", {})
         memory = MemoryConfig(
-            enabled=os.environ.get("CONNECTCLAW_MEMORY_ENABLED", "") != "0"
-            and me.get("enabled", True),
+            enabled=_safe_bool(
+                os.environ.get("CONNECTCLAW_MEMORY_ENABLED") or me.get("enabled"), True
+            ),
             db_path=os.environ.get("CONNECTCLAW_MEMORY_DB_PATH")
             or me.get("db_path", "~/.connectclaw/memory.db"),
-            extract_after_turn=me.get("extract_after_turn", True),
-            extract_min_turns=int(me.get("extract_min_turns", 3)),
-            extract_interval_turns=int(me.get("extract_interval_turns", 5)),
-            max_context_tokens=int(me.get("max_context_tokens", 2000)),
-            recency_threshold_days=int(me.get("recency_threshold_days", 7)),
-            use_embeddings=me.get("use_embeddings", True),
-            dream_interval_hours=float(me.get("dream_interval_hours", 24.0)),
-            decay_halflife_days=float(me.get("decay_halflife_days", 30.0)),
-            consolidation_enabled=me.get("consolidation_enabled", True),
+            extract_after_turn=_safe_bool(me.get("extract_after_turn"), True),
+            extract_min_turns=_safe_int(me.get("extract_min_turns"), 3),
+            extract_interval_turns=_safe_int(me.get("extract_interval_turns"), 5),
+            max_context_tokens=_safe_int(me.get("max_context_tokens"), 2000),
+            recency_threshold_days=_safe_int(me.get("recency_threshold_days"), 7),
+            use_embeddings=_safe_bool(me.get("use_embeddings"), True),
+            dream_interval_hours=_safe_float(me.get("dream_interval_hours"), 24.0),
+            decay_halflife_days=_safe_float(me.get("decay_halflife_days"), 30.0),
+            consolidation_enabled=_safe_bool(me.get("consolidation_enabled"), True),
         )
 
         return cls(

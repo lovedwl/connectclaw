@@ -144,8 +144,10 @@ class ModelsStore:
         try:
             self._registry.write_text(text, encoding="utf-8")
             os.chmod(self._path, 0o600)
-        except OSError:
-            pass
+        except OSError as e:
+            # M38：写盘失败必须上报——调用方仍会回报"已持久化"，静默吞掉
+            # 会让重启后回退旧模型而无人知晓。
+            raise OSError(f"无法写入模型注册表 {self._registry}: {e}") from e
 
     # ── CRUD ───────────────────────────────────────────────
 
@@ -210,8 +212,8 @@ class ModelsStore:
         try:
             with open(self._config_path, encoding="utf-8") as f:
                 text = f.read()
-        except OSError:
-            return
+        except OSError as e:
+            raise OSError(f"无法读取 config.toml {self._config_path}: {e}") from e
         if _LLM_BLOCK_RE.search(text):
             text = _LLM_BLOCK_RE.sub(block, text, count=1)
         else:
@@ -219,5 +221,5 @@ class ModelsStore:
         try:
             with open(self._config_path, "w", encoding="utf-8") as f:
                 f.write(text)
-        except OSError:
-            pass
+        except OSError as e:
+            raise OSError(f"无法写入 config.toml {self._config_path}: {e}") from e

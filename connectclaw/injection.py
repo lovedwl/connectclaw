@@ -57,12 +57,26 @@ _MERGED_HEADER = (
 )
 
 
+_ESCAPED_CLOSE = "<\\/remembered-context>"
+
+
+def _escape_close_tag(text: str) -> str:
+    """M37：内容里的 </remembered-context> 会提前闭合注入块、让后续行
+    以模型上下文的身份执行——记忆内容来自群聊成员对话，必须转义。"""
+    return text.replace("</remembered-context>", _ESCAPED_CLOSE)
+
+
 def render_memory_block(lines: list[str], *, header: str = "") -> str:
     """把若干条目行包成一个注入块。记忆检索、op 渲染都走它，别在别处再拼一遍。"""
     if not lines:
         return ""
     return "\n".join(
-        ["<remembered-context>", header or FULL_HEADER, *lines, "</remembered-context>"]
+        [
+            "<remembered-context>",
+            header or FULL_HEADER,
+            *(_escape_close_tag(ln) for ln in lines),
+            "</remembered-context>",
+        ]
     )
 
 
@@ -164,7 +178,8 @@ class ContextState:
         header = _MERGED_HEADER if snapshot else (INCREMENTAL_HEADER if incremental else FULL_HEADER)
         if lines:
             blocks.append(render_memory_block([ln for ln in lines if ln], header=header))
-        blocks.extend(catalogs)
+        # M37：catalog 内容同样来自外部（工具清单等），统一转义闭合序列
+        blocks.extend(_escape_close_tag(c) for c in catalogs)
         return "\n\n".join(blocks)
 
     def snapshot_ops(self) -> list[dict[str, Any]]:

@@ -60,6 +60,16 @@ class AttachmentStore:
     def _manifest_path(self) -> str:
         return os.path.join(self._dir, "manifest.json")
 
+    def _path_inside_dir(self, path: str) -> bool:
+        """M26：manifest 的 path 字段不可信任——伪造 manifest 可把任意可读
+        文件（~/.ssh/id_rsa）base64 内联进模型请求。只接受附件目录内的路径。"""
+        try:
+            real = os.path.realpath(path)
+            dir_real = os.path.realpath(self._dir)
+            return real == dir_real or real.startswith(dir_real + os.sep)
+        except Exception:
+            return False
+
     def _load_manifest(self) -> None:
         try:
             with open(self._manifest_path, "r", encoding="utf-8") as f:
@@ -67,7 +77,9 @@ class AttachmentStore:
             if isinstance(items, dict):
                 self._items = {
                     k: v for k, v in items.items()
-                    if isinstance(v, dict) and os.path.isfile(v.get("path", ""))
+                    if isinstance(v, dict)
+                    and os.path.isfile(v.get("path", ""))
+                    and self._path_inside_dir(v.get("path", ""))
                 }
         except FileNotFoundError:
             pass
@@ -126,6 +138,9 @@ class AttachmentStore:
         self, image_id: str, path: str, mime_type: str, size: int
     ) -> dict:
         """Register a downloaded image (id -> image_ref dict)."""
+        # M26：注册路径必须落在附件目录内（realpath 判定，防 symlink）
+        if not self._path_inside_dir(path):
+            raise ValueError(f"attachment path outside attachments dir: {path}")
         async with self._lock:
             ref = {
                 "id": image_id,
@@ -158,10 +173,13 @@ class AttachmentStore:
                 dropped.append(entry)
                 total -= int(entry.get("size", 0))
         for entry in dropped:
-            try:
-                os.remove(entry.get("path", ""))
-            except OSError:
-                pass
+            p = entry.get("path", "")
+            # M26：绝不删除目录外的文件（哪怕条目被伪造过）
+            if p and self._path_inside_dir(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
         if dropped:
             logger.info("attachments: evicted %d image(s) over cap (%d kept)",
                         len(dropped), len(self._items))
@@ -169,7 +187,10 @@ class AttachmentStore:
     async def get(self, image_id: str) -> dict | None:
         async with self._lock:
             ref = self._items.get(image_id)
-            if ref and not os.path.isfile(ref.get("path", "")):
+            if ref and not (
+                os.path.isfile(ref.get("path", ""))
+                and self._path_inside_dir(ref.get("path", ""))
+            ):
                 return None
             return ref
 

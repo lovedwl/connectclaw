@@ -93,17 +93,22 @@ async def _download_feishu_images(
                            conversation_key[:8], file_key[:20])
             return None
 
-        mime_type = detect_mime_type(image_data)
-        ext = MIME_TO_EXT.get(mime_type, ".png")
-        image_id = xxhash.xxh128(image_data).hexdigest()
-        filepath = os.path.join(attachments_dir, f"{image_id}{ext}")
+        # M39：下载之后的处理也必须隔离——单张图失败不应打断整条消息
+        try:
+            mime_type = detect_mime_type(image_data)
+            ext = MIME_TO_EXT.get(mime_type, ".png")
+            image_id = xxhash.xxh128(image_data).hexdigest()
+            filepath = os.path.join(attachments_dir, f"{image_id}{ext}")
 
-        # Content-hash name makes this idempotent: re-sent images are no-ops.
-        if not os.path.exists(filepath):
-            with open(filepath, "wb") as f:
-                f.write(image_data)
+            # Content-hash name makes this idempotent: re-sent images are no-ops.
+            if not os.path.exists(filepath):
+                with open(filepath, "wb") as f:
+                    f.write(image_data)
 
-        item = await store.register(image_id, filepath, mime_type, len(image_data))
+            item = await store.register(image_id, filepath, mime_type, len(image_data))
+        except Exception as e:
+            logger.error("[%s] image post-process failed: %s", conversation_key[:8], e)
+            return None
 
         logger.info("[%s] saved image: id=%s (%s, %dKB)",
                      conversation_key[:8], image_id, mime_type, len(image_data) // 1024)
@@ -111,10 +116,18 @@ async def _download_feishu_images(
         return make_image_ref(item)
 
     # Downloads are independent — run them concurrently instead of serially.
+    # M39：return_exceptions 保证单张图的异常不吞掉其余图片/文本。
     results = await asyncio.gather(
-        *(download_one(i, res) for i, res in enumerate(to_process))
+        *(download_one(i, res) for i, res in enumerate(to_process)),
+        return_exceptions=True,
     )
-    refs = [r for r in results if r is not None]
+    refs = []
+    for r in results:
+        if isinstance(r, BaseException):
+            logger.error("[%s] image task failed: %s", conversation_key[:8], r)
+            continue
+        if r is not None:
+            refs.append(r)
 
     if overflow > 0:
         logger.info("[%s] %d image(s) skipped (max %d)",

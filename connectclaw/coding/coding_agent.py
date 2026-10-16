@@ -111,6 +111,9 @@ class CodingAgent:
         self._bash_guard = BashGuard()
         # M35：后台任务强引用集合——fire-and-forget 的 create_task 可能被 GC
         self._bg_tasks: set[asyncio.Task] = set()
+        # M41：模型切换互斥——并发 /model 时 self._model 与 llm.api_key
+        # 分两步落地，await 窗口内可能形成"A 的 base_url + B 的 api_key"
+        self._model_lock = asyncio.Lock()
         # [sandbox] mode decides isolation for the agent's OWN bash: "auto"
         # detects, "none" runs unsandboxed on the host (operator's full-trust
         # switch). config.toml is agent-read-only, so only the operator flips it.
@@ -584,26 +587,29 @@ class CodingAgent:
         profile, then persist it as the active [llm] in config.toml."""
         if not p.base_url or not p.model_id:
             raise ValueError("base_url 与 model_id 必填")
-        key = self._api_key_for(p)
-        model = self._build_model_from_profile(p)
-        self._model = model
-        self._agents_tool.set_model(model)
-        for harness in list(self._conversations.values()):
-            await harness.set_model(model)
-        # The live [llm] config MUST follow the switch: every request resolves
-        # its key from there (harness, agents tool, memory extraction, dream),
-        # so a stale api_key sends the PREVIOUS provider's key to the new
-        # endpoint — gateways answer that with 403 (dots.ai:
-        # governance.dots_platform_key_not_allowed). Swapping the model alone is
-        # only half a switch: without this the new model works on restart only.
-        llm = self._config.llm
-        llm.api_key = key
-        llm.base_url = p.base_url
-        llm.model_id = p.model_id
-        llm.reasoning = p.reasoning
-        llm.context_window = p.context_window
-        llm.max_tokens = p.max_tokens
-        ModelsStore().set_active(p)
+        # M41：原子切换——await set_model 让出点期间，并发请求会读到
+        # 新 model + 旧 api_key（403/串 key）。整段换到互斥锁内。
+        async with self._model_lock:
+            key = self._api_key_for(p)
+            model = self._build_model_from_profile(p)
+            self._model = model
+            self._agents_tool.set_model(model)
+            for harness in list(self._conversations.values()):
+                await harness.set_model(model)
+            # The live [llm] config MUST follow the switch: every request resolves
+            # its key from there (harness, agents tool, memory extraction, dream),
+            # so a stale api_key sends the PREVIOUS provider's key to the new
+            # endpoint — gateways answer that with 403 (dots.ai:
+            # governance.dots_platform_key_not_allowed). Swapping the model alone is
+            # only half a switch: without this the new model works on restart only.
+            llm = self._config.llm
+            llm.api_key = key
+            llm.base_url = p.base_url
+            llm.model_id = p.model_id
+            llm.reasoning = p.reasoning
+            llm.context_window = p.context_window
+            llm.max_tokens = p.max_tokens
+            ModelsStore().set_active(p)
         warn = "" if key else "\n⚠️ 该 profile 没有 api_key，请求可能被网关拒绝（`/model edit ... api_key=...` 或直接在 [llm] 里补）"
         return (
             f"✅ 已切换并持久化：**{p.name}** `{p.model_id}`\n"

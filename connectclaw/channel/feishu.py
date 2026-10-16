@@ -317,10 +317,13 @@ class FeishuChannel(Channel):
         if self._sdk is None:
             logger.error("_stream_text: not connected")
             return
-        result = await self._sdk.send(conversation_key, {"markdown": text})
-        if not result.ok:
-            logger.debug("markdown send failed, falling back to text: %s", result.error)
-            await self.send_message(conversation_key, text)
+        # M40：超长回复必须分片——此前无上限，超出飞书消息体积上限时
+        # markdown+text 双失败，用户端"完全没回复"。
+        for chunk in _split_long_message(text):
+            result = await self._sdk.send(conversation_key, {"markdown": chunk})
+            if not result.ok:
+                logger.debug("markdown send failed, falling back to text: %s", result.error)
+                await self.send_message(conversation_key, chunk)
 
     async def send_message(self, conversation_key: str, text: str) -> str:
         """Send text via SDK Channel.send()."""
@@ -776,6 +779,27 @@ class FeishuChannel(Channel):
         else:
             logger.warning("[AUTH] unknown or stale request_id=%s (pending: %s)",
                            rid, list(self._auth_requests.keys())[:5])
+
+
+def _split_long_message(text: str, max_chars: int = 20_000) -> list[str]:
+    """M40：超长回复按行边界分片（预留飞书消息体积余量，思考卡片用 22k 预算）。
+
+    返回至少一片；单行超限时该行独立成片（无法安全切分，宁可原样发出）。
+    """
+    if len(text) <= max_chars:
+        return [text]
+    chunks: list[str] = []
+    buf = ""
+    for line in text.split("\n"):
+        candidate = f"{buf}\n{line}" if buf else line
+        if len(candidate) > max_chars and buf:
+            chunks.append(buf)
+            buf = line
+        else:
+            buf = candidate
+    if buf:
+        chunks.append(buf)
+    return chunks
 
 
 def _split_for_streaming(text: str) -> list[str]:
