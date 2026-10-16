@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import shlex
 import subprocess
 from typing import Any, Literal
 
@@ -25,7 +26,7 @@ class BashGuard:
         r"rm\s+-rf\s+/(?:\s|$)",    # rm -rf / (root only, followed by space or end)
         r"rm\s+-rf\s+~\s*$",        # rm -rf ~ (home only, followed by space or end)
         r"mkfs\.",                   # format filesystem
-        r"dd\s+if=.*of=/dev/",      # dd to device
+        r"\bdd\b[^|]*\bof=/dev/",   # dd to device（of= 在 if= 之前也能命中）
         r">\s*/dev/sd[a-z]",        # redirect to raw device
         r":\(\)\s*\{",              # fork bomb
         r"shutdown\b",              # shutdown
@@ -53,6 +54,8 @@ class BashGuard:
         r"\bdocker\s+system\s+prune",  # docker prune
         r"\bnpm\s+publish\b",    # npm publish
         r"\bpip\s+uninstall\b",  # pip uninstall
+        r"\bcrontab\s+-r\b",     # remove crontab
+        r"\btruncate\b",          # truncate files
     ]
 
     def __init__(
@@ -72,10 +75,59 @@ class BashGuard:
         for pattern in [*self._extra_dangerous, *self.DANGEROUS_PATTERNS]:
             if re.search(pattern, command, re.IGNORECASE):
                 return "DANGEROUS"
+        # M16：结构化检查——正则黑名单可被参数换序（rm -fr）、glob（/*）、
+        # 子 shell 包裹（(rm -rf /)）、重定向到敏感路径等绕过。
+        tier = self._structural_check(command)
+        if tier:
+            return tier
         for pattern in [*self._extra_suspicious, *self.SUSPICIOUS_PATTERNS]:
             if re.search(pattern, command, re.IGNORECASE):
                 return "SUSPICIOUS"
         return "SAFE"
+
+    _COMPOUND_SPLIT_RE = re.compile(r"&&|\|\||[;|&]")
+    _BLACKHOLE_TARGETS = {"/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty"}
+
+    def _structural_check(self, command: str) -> Literal["SAFE", "SUSPICIOUS", "DANGEROUS"] | None:
+        """基于 shlex 分词的补充判定；返回 None 表示无结构性命中。"""
+        # 去掉子 shell 括号/命令替换边界，让内层命令可被分词识别
+        flat = command.replace("(", " ").replace(")", " ")
+        home = os.path.expanduser("~")
+        for segment in self._COMPOUND_SPLIT_RE.split(flat):
+            segment = segment.strip()
+            if not segment:
+                continue
+            try:
+                tokens = shlex.split(segment)
+            except ValueError:
+                tokens = segment.split()
+            if not tokens:
+                continue
+            name = os.path.basename(tokens[0])
+
+            if name == "rm":
+                targets = [t for t in tokens[1:] if not t.startswith("-")]
+                for tgt in targets:
+                    if tgt in ("/*", "$HOME", "${HOME}"):
+                        return "DANGEROUS"
+                    expanded = os.path.expanduser(tgt).rstrip("/")
+                    if expanded in ("", "/", home):
+                        return "DANGEROUS"
+            elif name == "chmod" and "-R" in tokens[1:]:
+                targets = [t for t in tokens[2:] if not t.startswith("-")]
+                if any(os.path.expanduser(t).rstrip("/") in ("", "/") for t in targets):
+                    return "DANGEROUS"
+
+            # 重定向到系统敏感路径（黑洞设备除外）
+            for m in re.finditer(r">>?>?\s*([^\s;|&\"']+)", segment):
+                target = os.path.expanduser(m.group(1))
+                if target in self._BLACKHOLE_TARGETS:
+                    continue
+                if re.match(r"/dev/(?:sd|nvme|mapper)", target):
+                    return "DANGEROUS"
+                if target.startswith(("/etc/", "/boot/", "/proc/", "/sys/")) or "/.ssh/" in target:
+                    return "DANGEROUS"
+        return None
 
 
 class BashTool(AgentTool):

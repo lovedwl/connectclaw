@@ -488,6 +488,10 @@ async def _ensure_server() -> str:
         if _shared_ws_url is not None:
             return _shared_ws_url
         proc = _serve_process(DEFAULT_PORT, cdp_max_connections=_CDP_MAX_CONNECTIONS)
+        # M18：先登记再探测——就绪探测失败时 _kill_shared_proc 才能杀掉它。
+        # 此前只在成功路径赋值 _shared_proc，探测失败即泄漏 spawn 的 serve 进程
+        # （正是文件头说要避免的 orphan 堆积；对照 LightpandaEngine.start 的顺序）。
+        _shared_proc = proc
         atexit.register(_kill_shared_proc)
         try:
             url = f"http://127.0.0.1:{DEFAULT_PORT}/json/version"
@@ -505,7 +509,6 @@ async def _ensure_server() -> str:
         except BaseException:
             _kill_shared_proc()
             raise
-        _shared_proc = proc
         _shared_ws_url = ws_url
         _sem = asyncio.Semaphore(_MAX_CONCURRENCY)
         return ws_url

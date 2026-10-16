@@ -15,6 +15,7 @@ systemd on the host, not here.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import contextlib
 import glob
 import os
@@ -57,12 +58,17 @@ class BgTaskManager:
     """Spawn / supervise / kill background tasks owned by the bot process."""
 
     MAX_LOGS = 50  # keep at most this many finished-task logs on disk
+    MAX_FINISHED = 20  # M25：内存里最多保留这么多个已结束任务（_tasks 只增不减的解药）
 
     def __init__(self, log_dir: str | None = None):
         self.log_dir = log_dir or os.path.expanduser("~/.connectclaw/tasks")
         self._tasks: dict[str, BgTask] = {}
         self._seq = 0
         self._watchers: set[asyncio.Task] = set()
+        # M25：bot 退出时杀掉所有存活后台任务——mode=none/DirectSandbox 的
+        # 任务没有 --die-with-parent，不杀就成孤儿（与文档"存活到 bot 退出"
+        # 的契约一致：退出即回收）。
+        atexit.register(self._kill_all_sync)
 
     async def start(self, command: str, argv: list[str], cwd: str) -> BgTask:
         os.makedirs(self.log_dir, exist_ok=True)
@@ -91,6 +97,17 @@ class BgTaskManager:
     async def _reap(self, task: BgTask) -> None:
         with contextlib.suppress(Exception):
             task.exit_code = await task.proc.wait()
+        # M25：已结束任务只保留最近 MAX_FINISHED 条，防止 _tasks 缓慢增长
+        finished = [t for t in self._tasks.values() if not t.running]
+        for t in sorted(finished, key=lambda t: t.started_at)[:-self.MAX_FINISHED]:
+            self._tasks.pop(t.task_id, None)
+
+    def _kill_all_sync(self) -> None:
+        """atexit：同步杀掉所有存活后台任务（事件循环已停，只能发信号）。"""
+        for t in list(self._tasks.values()):
+            if t.running:
+                with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                    os.killpg(os.getpgid(t.pid), signal.SIGKILL)
 
     def list_tasks(self) -> list[BgTask]:
         return list(self._tasks.values())
@@ -116,10 +133,16 @@ class BgTaskManager:
                 await asyncio.wait_for(task.proc.wait(), timeout=3)
         return True, f"任务 {task_id} 已终止"
 
-    def tail(self, task_id: str, max_bytes: int = 4000) -> tuple[bool, str]:
+    def tail(self, task_id: str, max_bytes: int | str | None = 4000) -> tuple[bool, str]:
         task = self._tasks.get(task_id)
         if task is None:
             return False, f"未找到任务 {task_id}"
+        # M25：max_bytes 非数字入参不再抛 ValueError 炸掉工具调用
+        try:
+            max_bytes = int(max_bytes)
+        except (TypeError, ValueError):
+            max_bytes = 4000
+        max_bytes = max(1, min(max_bytes, 20000))
         try:
             with open(task.log_path, "rb") as f:
                 f.seek(0, os.SEEK_END)
@@ -223,7 +246,11 @@ class BgTasksTool(AgentTool):
             if not task_id:
                 text, is_error = "tail 需要 id 参数", True
             else:
-                max_bytes = min(int(params.get("max_bytes") or 4000), 20000)
+                # M25：非法 max_bytes 不再炸 ValueError
+                try:
+                    max_bytes = min(int(params.get("max_bytes") or 4000), 20000)
+                except (TypeError, ValueError):
+                    max_bytes = 4000
                 ok, text = mgr.tail(task_id, max_bytes)
                 is_error = not ok
                 if ok:

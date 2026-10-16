@@ -24,9 +24,11 @@ Auto-detects best available at runtime.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import time
 from dataclasses import dataclass
@@ -447,6 +449,8 @@ async def _run_command(
             *cmd_args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            # M17：独立进程组，超时可杀整组（含 bash 拉起的孙进程）
+            start_new_session=True,
         )
 
         try:
@@ -456,16 +460,21 @@ async def _run_command(
         except asyncio.TimeoutError:
             result.timed_out = True
             try:
-                proc.kill()
+                # M17：killpg 杀整个进程组——只 kill 单进程会留下孙进程
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except Exception:
-                pass
+                with contextlib.suppress(Exception):
+                    proc.kill()
             try:
                 # Try to read whatever was captured before timeout
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(
                     proc.communicate(), timeout=3
                 )
             except asyncio.TimeoutError:
-                await proc.wait()
+                # M17：wait 也要有超时——进程卡 D 状态时裸 await proc.wait()
+                # 会永久阻塞工具调用
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(proc.wait(), timeout=5)
                 stdout_bytes, stderr_bytes = b"", b""
             result.exit_code = proc.returncode or -1
             result.wall_time_ms = (time.time() - t0) * 1000

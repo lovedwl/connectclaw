@@ -166,3 +166,44 @@ def test_real_operator_lines_still_route_to_bash():
     assert is_operator_bash("你好") is False
     # markdown 里非开头的图片引用不影响命令判定
     assert is_operator_bash("!cat a.md\n![image](img_x)") is True
+
+
+# ── M16: BashGuard 结构化检查 ─────────────────────────────────
+
+from connectclaw.coding.tools.bash import BashGuard  # noqa: E402
+
+
+def test_bashguard_rm_flag_order_and_subshell():
+    g = BashGuard()
+    # 参数换序 / glob / 子 shell 包裹，此前全部漏判
+    assert g.check("rm -fr /") == "DANGEROUS"
+    assert g.check("rm -rf /*") == "DANGEROUS"
+    assert g.check("(rm -rf /)") == "DANGEROUS"
+    assert g.check("rm -rf $HOME") == "DANGEROUS"
+    assert g.check("rm -rf ~") == "DANGEROUS"
+
+
+def test_bashguard_redirect_sensitive_paths():
+    g = BashGuard()
+    assert g.check("echo x > /etc/passwd") == "DANGEROUS"
+    assert g.check("cat key > ~/.ssh/authorized_keys") == "DANGEROUS"
+    assert g.check("chmod -R 000 /") == "DANGEROUS"
+    assert g.check("dd of=/dev/sda if=x") == "DANGEROUS"
+    # 黑洞设备与普通文件不受影响
+    assert g.check("echo hi > /dev/null") == "SAFE"
+    assert g.check("echo hi > out.txt") == "SAFE"
+
+
+def test_bashguard_benign_commands_still_safe():
+    g = BashGuard()
+    assert g.check("ls -la && git status") == "SAFE"
+    assert g.check("grep foo /etc/passwd") == "SAFE"  # 读不拦
+    assert g.check("rm -rf ./build") == "SUSPICIOUS"  # 普通删除仍走授权
+
+
+def test_bashguard_crontab_truncate_suspicious():
+    g = BashGuard()
+    assert g.check("crontab -r") == "SUSPICIOUS"
+    # truncate 命令本身走授权（结构性检查只覆盖 rm/chmod/重定向）
+    assert g.check("truncate -s 0 /etc/passwd") == "SUSPICIOUS"
+    assert g.check("truncate -s 0 app.log") == "SUSPICIOUS"

@@ -885,25 +885,10 @@ class CodingAgent:
                 notes: list[str] = []
                 _auth_notes[tc_id] = notes
 
-                # Write tool hooks — auto-detect path outside cwd
-                if tool_name == "write":
-                    file_path = args.get("file_path", "")
-                    if file_path:
-                        import os
-                        abs_path = os.path.abspath(file_path)
-                        cwd_abs = os.path.abspath(self._config.agent.cwd)
-                        if not abs_path.startswith(cwd_abs + os.sep) and abs_path != cwd_abs:
-                            notes.append("🚀 写操作沙箱逃逸授权")
-                            approved = await self.request_unsandboxed_auth(
-                                key, f"写入 {file_path}"
-                            )
-                            if not approved:
-                                notes.append("  → ❌ 用户已拒绝")
-                                return {"block": True, "reason": "用户拒绝了沙箱逃逸"}
-                            notes.append("  → ✅ 用户已批准")
-                            # Mark args so write tool knows it's approved
-                            args["_unsandboxed_retry"] = True
-                            tool_call["arguments"] = args
+                # M23：write 逃逸授权已删除——此前设置的 args["_unsandboxed_retry"]
+                # 全仓无读取方，授权批准后 write 仍被自身 cwd 检查拒绝，
+                # 弹窗既无效又误导。H2 修复后 write 严格限 cwd 内，
+                # bash（经沙箱/授权）才是跨目录操作的合法路径。
 
                 # Bash tool hooks
                 if tool_name == "bash":
