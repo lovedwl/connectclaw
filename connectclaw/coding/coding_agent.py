@@ -842,7 +842,15 @@ class CodingAgent:
             lines.append(f"- RAG：{'enabled' if getattr(rag, 'enabled', False) else 'disabled'}")
             vision = getattr(self._config, "vision", None)
             configured = bool(getattr(vision, "model_id", "")) if vision else False
-            lines.append(f"- Vision（图片分析）：{'已配置' if configured else '未配置'}")
+            # 2026-10-16 卡死事故：这里曾写"Vision（图片分析）已配置"，但
+            # image_analyze 工具已退役、[vision] 无任何工具消费——模型据此
+            # 去找不存在的工具，无限挣扎。必须说清真实能力边界。
+            lines.append(
+                "- 图片能力：看图靠主模型多模态（用户发来的图片直接内联在本轮上下文）；"
+                "attach_image 仅能按 id 重放会话内已注册的图片；"
+                "没有独立的图片分析工具，本地图片文件无法「看」，发送用 send_file"
+                + ("（[vision] 配置存在但当前无工具消费）" if configured else "")
+            )
             proxy = getattr(self._config, "proxy", None)
             purl = getattr(proxy, "url", "") if proxy else ""
             if purl:

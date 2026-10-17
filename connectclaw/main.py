@@ -335,7 +335,9 @@ async def main(argv: list[str] | None = None) -> None:
                 parts = [text] if text else []
                 parts.append(
                     f"---\n图片已直接附加到上下文（id: {ids}）。"
-                    f"需要再次查看历史图片时可使用 attach_image 工具。"
+                    f"再次查看这些图片可用 attach_image（按 id）；"
+                    f"注意 attach_image 不能读取磁盘本地文件，"
+                    f"要把本地文件/图片发给用户请用 send_file。"
                 )
                 text = "\n".join(parts)
 

@@ -217,10 +217,13 @@ class AttachImageTool(AgentTool):
     name = "attach_image"
     label = "attach_image"
     description = (
-        "Re-attach an image that was sent earlier in this conversation into "
-        "the current turn so you can look at it again. Pass the image id "
-        "shown next to the image (e.g. from '[image id=a1b2 ...]'). "
-        "Use list_images=true to see all available images."
+        "Re-attach an image that was sent by the USER earlier in this "
+        "conversation (registry of downloaded chat images, keyed by id from "
+        "the '[image id=...]' marker) so you can look at it again. "
+        "Use list_images=true to see all available images.\n"
+        "限制：只能重放这些已注册的会话图片，不能读取磁盘上的任意本地文件。"
+        "要把本地文件/图片发给用户，用 send_file；主模型为多模态时，"
+        "用户刚发的图片已直接内联在本轮上下文中，无需调用本工具。"
     )
     parameters = {
         "type": "object",
@@ -271,9 +274,20 @@ class AttachImageTool(AgentTool):
 
         item = await self._store.get(image_id)
         if item is None:
+            looks_like_path = "/" in image_id or "." in image_id
+            hint = (
+                "attach_image 只能按 id 重放用户在会话中发送过的图片，"
+                "不能读取磁盘上的本地文件。" 
+                "可用 list_images=true 查看全部已注册图片。"
+            )
+            if looks_like_path:
+                hint += (
+                    f"'{image_id}' 看起来是路径——发送本地文件给用户请用 send_file 工具；"
+                    "查看本地图片内容需要视觉能力（当前无独立图片分析工具，"
+                    "主模型多模态仅覆盖用户发来的内联图片）。"
+                )
             return AgentToolResult(
-                content=[{"type": "text",
-                          "text": f"错误：找不到图片 id={image_id}。可用 list_images=true 查看全部。"}],
+                content=[{"type": "text", "text": f"错误：找不到图片 id={image_id}。{hint}"}],
                 details={"is_error": True},
             )
 
