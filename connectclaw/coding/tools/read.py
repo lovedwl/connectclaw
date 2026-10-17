@@ -21,8 +21,8 @@ class ReadTool(AgentTool):
         "Returns the file content with line numbers. "
         "Supports offset and limit for reading specific ranges.\n"
         "限制：仅支持文本文件（UTF-8）。图片/二进制文件无法读取——"
-        "本工具没有看图能力，当前也没有独立的图片分析工具（用户在聊天中"
-        "发来的图片会由多模态主模型直接看到，无需读取磁盘）；"
+        "要看本地磁盘上的图片用 view_image 工具；用户在聊天中发来的图片"
+        "已由多模态主模型直接看到，无需读取磁盘；"
         "要把本地文件/图片发给用户，用 send_file 工具。"
     )
     parameters = {
@@ -93,10 +93,10 @@ class ReadTool(AgentTool):
                 content=[{
                     "type": "text",
                     "text": (
-                        f"错误：'{file_path}' 是图片，read 只能读文本文件，没有看图能力。\n"
+                        f"错误：'{file_path}' 是图片，read 只能读文本文件。\n"
+                        f"- 要查看该图片：用 view_image 工具\n"
                         f"- 要把该图片发给用户：用 send_file 工具\n"
-                        f"- 用户在聊天中发来的图片已由多模态主模型直接看到；"
-                        f"本地图片文件当前无法「看」（无独立看图工具）\n"
+                        f"- 用户在聊天中发来的图片已由多模态主模型直接看到\n"
                         f"- 要查看图片元信息：用 bash（file/identify）"
                     ),
                 }],
@@ -141,9 +141,8 @@ class ReadTool(AgentTool):
                     "type": "text",
                     "text": (
                         f"错误：'{file_path}' 是二进制文件（可能是图片），read 只能读文本。\n"
+                        f"- 要查看该图片：用 view_image 工具\n"
                         f"- 要把该文件发给用户：用 send_file 工具\n"
-                        f"- 要查看图片内容：当前无独立看图工具（用户在聊天中发来的图"
-                        f"片由多模态主模型直接看到）\n"
                         f"- 要检查文件类型/元信息：用 bash（file/identify）"
                     ),
                 }],

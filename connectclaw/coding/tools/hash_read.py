@@ -160,8 +160,8 @@ class HashReadTool(AgentTool):
                     "type": "text",
                     "text": (
                         f"错误：文件为二进制或非 UTF-8：{file_path}。"
-                        f"hashline 编辑仅适用于文本文件；图片无法用 read/hash_read 查看"
-                        f"（发送给用户用 send_file；查看图片元信息用 bash file/identify）。"
+                        f"hashline 编辑仅适用于文本文件；要看图片用 view_image，"
+                        f"发送给用户用 send_file，查看图片元信息用 bash file/identify。"
                     ),
                 }],
                 details={"is_error": True},

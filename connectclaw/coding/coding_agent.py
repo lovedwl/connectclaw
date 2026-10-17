@@ -40,6 +40,7 @@ from .tools.hash_read import create_hash_read_tool
 from .tools import lightpanda
 from .tools.read import create_read_tool
 from .tools.skills import SkillStore, SkillsTool
+from .tools.view_image import create_view_image_tool
 from .tools.web_search import create_web_fetch_tool, create_web_search_tool
 from .tools.write import create_write_tool
 
@@ -149,6 +150,9 @@ class CodingAgent:
         # the model re-attaches any of them to the current turn via the tool.
         self._attachment_store = AttachmentStore(DEFAULT_ATTACHMENTS_DIR)
         self._attach_image_tool = AttachImageTool(self._attachment_store)
+        # 本地图片"看"的能力（codex view_image 同款）：多模态主模型按路径
+        # 看工作目录内的图片，image_ref 阅后即弃不污染前缀缓存。
+        self._view_image_tool = create_view_image_tool(config.agent.cwd)
 
         # Skill library gateway: the model sees ONE `skills` tool and searches /
         # loads SKILL.md packages on demand (see tools/skills.py).
@@ -223,6 +227,7 @@ class CodingAgent:
                 self._hash_edit_tool, self._bash_tool, self._bg_tasks_tool,
                 self._web_search_tool,
                 self._web_fetch_tool, self._attach_image_tool,
+                self._view_image_tool,
                 self._skills_tool, self._send_file_tool, self._memory_tool,
             ]
         }
@@ -846,9 +851,9 @@ class CodingAgent:
             # image_analyze 工具已退役、[vision] 无任何工具消费——模型据此
             # 去找不存在的工具，无限挣扎。必须说清真实能力边界。
             lines.append(
-                "- 图片能力：看图靠主模型多模态（用户发来的图片直接内联在本轮上下文）；"
-                "attach_image 仅能按 id 重放会话内已注册的图片；"
-                "没有独立的图片分析工具，本地图片文件无法「看」，发送用 send_file"
+                "- 图片能力：看用户聊天中发来的图靠多模态内联（无需工具）；"
+                "看磁盘上的本地图片用 view_image；重放会话历史图片用 attach_image；"
+                "发送本地文件给用户用 send_file"
                 + ("（[vision] 配置存在但当前无工具消费）" if configured else "")
             )
             proxy = getattr(self._config, "proxy", None)
