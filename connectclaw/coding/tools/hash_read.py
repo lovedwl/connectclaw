@@ -124,6 +124,23 @@ class HashReadTool(AgentTool):
                 details={"is_error": True},
             )
 
+        # M27：超大文件整读会打爆内存——超限拒绝
+        _MAX_READ_BYTES = 32 * 1024 * 1024
+        try:
+            if os.path.getsize(absolute_path) > _MAX_READ_BYTES:
+                return AgentToolResult(
+                    content=[{
+                        "type": "text",
+                        "text": (
+                            f"错误：文件过大（> {_MAX_READ_BYTES // (1024 * 1024)}MB），"
+                            f"hashline 编辑仅适用于常规文本文件。"
+                        ),
+                    }],
+                    details={"is_error": True},
+                )
+        except OSError:
+            pass
+
         # Check is not a directory
         if os.path.isdir(absolute_path):
             return AgentToolResult(

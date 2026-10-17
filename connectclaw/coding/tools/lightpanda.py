@@ -570,6 +570,8 @@ async def _run_stateless(action, nav_timeout: int = DEFAULT_NAV_TIMEOUT) -> str:
 
 _FASTPATH_MIN_CHARS = 200
 _FASTPATH_TIMEOUT = 12.0
+# M27：单页读取硬上限（流式截断，不依赖 Content-Length）
+_MAX_FETCH_BYTES = 32 * 1024 * 1024
 _HTTP_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/120.0 Safari/537.36"
@@ -802,15 +804,25 @@ async def http_fetch_once(url: str, timeout: float = _FASTPATH_TIMEOUT) -> tuple
     ctype = (resp.headers.get("content-type") or "").lower()
     if ctype and "html" not in ctype and "text/plain" not in ctype:
         return "", f"内容类型不是 HTML/文本（{ctype}）"
+    # M27：流式读取并以硬上限截断——resp.text 会把任意大页面整读进内存
+    buf = bytearray()
     try:
-        text = _html_to_markdown(resp.text, base_url=str(resp.url))
+        async for chunk in resp.aiter_bytes(64 * 1024):
+            buf.extend(chunk)
+            if len(buf) > _MAX_FETCH_BYTES:
+                return "", f"页面体积超限（> {_MAX_FETCH_BYTES // (1024 * 1024)}MB）"
+    except Exception as e:  # noqa: BLE001
+        return "", _err_text(e)
+    body_text = bytes(buf).decode(resp.charset_encoding or "utf-8", errors="replace")
+    try:
+        text = _html_to_markdown(body_text, base_url=str(resp.url))
     except Exception as e:  # noqa: BLE001
         return "", f"HTML 转 Markdown 失败：{type(e).__name__}: {str(e)[:120]}"
     # Tiny content WITH scripts is the classic JS-app shell signature — the
     # server sent a loader, the real text renders client-side. Hand those (and
     # empty results) to the browser engine; genuinely small static pages come
     # back as-is instead of paying for a browser session.
-    if len(text.strip()) < _FASTPATH_MIN_CHARS and "<script" in resp.text.lower():
+    if len(text.strip()) < _FASTPATH_MIN_CHARS and "<script" in body_text.lower():
         return "", f"JS 壳页面（正文仅 {len(text.strip())} 字且含 script）"
     return _cap_page(text), ""
 

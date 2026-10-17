@@ -87,6 +87,24 @@ class ReadTool(AgentTool):
                 details={"is_error": True},
             )
 
+        # M27：超大文件整读会打爆内存——超限拒绝，让模型用 offset/limit
+        # 分段读取，或用 bash（head/grep）处理。
+        _MAX_READ_BYTES = 64 * 1024 * 1024
+        try:
+            if os.path.getsize(absolute_path) > _MAX_READ_BYTES:
+                return AgentToolResult(
+                    content=[{
+                        "type": "text",
+                        "text": (
+                            f"错误：文件过大（> {_MAX_READ_BYTES // (1024 * 1024)}MB），拒绝整读。"
+                            f"请用 offset/limit 分段读取，或用 bash（head/grep）处理。"
+                        ),
+                    }],
+                    details={"is_error": True},
+                )
+        except OSError:
+            pass
+
         # Read file
         try:
             # newline=""（H12）：保持磁盘真实行尾，与 hash_read/hash_edit 一致。
