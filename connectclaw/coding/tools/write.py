@@ -21,9 +21,9 @@ class WriteTool(AgentTool):
     name = "write"
     label = "write"
     description = (
-        "Write content to a file. Only files within the working directory can be written. "
-        "If the file already exists, you MUST read it first using the read tool. "
-        "The file will be written atomically."
+        "Write content to a file. Only files within the working directory can "
+        "be written. If the file already exists, read it first (read or "
+        "hash_read). The write is atomic."
     )
     parameters = {
         "type": "object",

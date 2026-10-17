@@ -63,15 +63,10 @@ class ViewImageTool(AgentTool):
     name = "view_image"
     label = "View Image"
     description = (
-        "Load a local image file from disk so you (the multimodal model) can "
-        "see it. Pass a path (relative to the working directory, or absolute "
-        "within it). Validates the file is a real image (png/jpeg/gif/webp/"
-        "bmp/tiff/svg, max 20MB) and returns it as an inline image for the "
-        "current turn. Use this when the user asks you to look at, check, or "
-        "pick image files on disk — e.g. photos, screenshots, stickers.\n"
-        "限制：只能看工作目录内的图片文件；不能看用户聊天中发来的历史图片"
-        "（那些用 attach_image 按 id 重放）；要把文件发给用户用 send_file。"
-        "若当前模型不支持图片输入，调用会失败并返回说明。"
+        "Show a local image file (png/jpeg/gif/webp/bmp/tiff/svg, max 20MB, "
+        "within the working directory) to you as an inline image. "
+        "Use when asked to look at, check, or pick image files on disk. "
+        "Chat history images: attach_image; send files: send_file."
     )
     parameters = {
         "type": "object",

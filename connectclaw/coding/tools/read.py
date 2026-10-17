@@ -17,13 +17,9 @@ class ReadTool(AgentTool):
     name = "read"
     label = "read"
     description = (
-        "Read the contents of a TEXT file from the filesystem. "
-        "Returns the file content with line numbers. "
-        "Supports offset and limit for reading specific ranges.\n"
-        "限制：仅支持文本文件（UTF-8）。图片/二进制文件无法读取——"
-        "要看本地磁盘上的图片用 view_image 工具；用户在聊天中发来的图片"
-        "已由多模态主模型直接看到，无需读取磁盘；"
-        "要把本地文件/图片发给用户，用 send_file 工具。"
+        "Read the contents of a TEXT file (UTF-8) with line numbers. "
+        "Supports offset/limit for ranges. Images and binaries cannot be read: "
+        "use view_image to view images, send_file to send files to the user."
     )
     parameters = {
         "type": "object",
@@ -93,11 +89,8 @@ class ReadTool(AgentTool):
                 content=[{
                     "type": "text",
                     "text": (
-                        f"错误：'{file_path}' 是图片，read 只能读文本文件。\n"
-                        f"- 要查看该图片：用 view_image 工具\n"
-                        f"- 要把该图片发给用户：用 send_file 工具\n"
-                        f"- 用户在聊天中发来的图片已由多模态主模型直接看到\n"
-                        f"- 要查看图片元信息：用 bash（file/identify）"
+                        f"错误：'{file_path}' 是图片，read 只能读文本文件。"
+                        f"查看用 view_image，发送给用户用 send_file。"
                     ),
                 }],
                 details={"is_error": True},
@@ -140,10 +133,8 @@ class ReadTool(AgentTool):
                 content=[{
                     "type": "text",
                     "text": (
-                        f"错误：'{file_path}' 是二进制文件（可能是图片），read 只能读文本。\n"
-                        f"- 要查看该图片：用 view_image 工具\n"
-                        f"- 要把该文件发给用户：用 send_file 工具\n"
-                        f"- 要检查文件类型/元信息：用 bash（file/identify）"
+                        f"错误：'{file_path}' 是二进制文件，read 只能读文本。"
+                        f"若它是图片：查看用 view_image，发送用 send_file。"
                     ),
                 }],
                 details={"is_error": True},
