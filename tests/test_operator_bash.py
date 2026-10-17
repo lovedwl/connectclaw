@@ -103,7 +103,8 @@ async def test_operator_bash_safe_runs_directly():
     ag = _agent_with_operators(["ou_owner"])
     r = await ag.run_operator_bash("oc", "ou_owner", "echo operator-ok")
     assert "operator-ok" in r
-    assert "[退出码：0]" in r
+    # Codex JsonToolOutput 同款：结构化 JSON，exit_code 为固定字段
+    assert '"exit_code": 0' in r
 
 
 # ── /whoami self-discovery ─────────────────────────────────────

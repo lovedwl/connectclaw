@@ -75,6 +75,15 @@ class ViewImageTool(AgentTool):
                 "type": "string",
                 "description": "Path to the image file (relative to cwd, or absolute within cwd)",
             },
+            "detail": {
+                "type": "string",
+                "enum": ["high", "low", "auto"],
+                "description": (
+                    "Optional image processing fidelity hint for the model gateway. "
+                    "high = full resolution (more tokens); low = downscaled (fewer "
+                    "tokens); auto (default) = gateway decides."
+                ),
+            },
         },
         "required": ["path"],
     }
@@ -183,6 +192,9 @@ class ViewImageTool(AgentTool):
             "mime_type": mime,
             "size": size,
         }
+        detail = (params.get("detail") or "").strip().lower()
+        if detail in ("high", "low", "auto"):
+            image_ref["detail"] = detail
         logger.info("view_image: %s (%s, %dKB)", absolute_path, mime, size // 1024)
         return AgentToolResult(
             content=[

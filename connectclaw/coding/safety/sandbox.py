@@ -61,6 +61,26 @@ class SandboxResult:
     wall_time_ms: float = 0.0
 
 
+def head_tail_truncate(text: str, max_bytes: int) -> tuple[str, bool]:
+    """Codex HeadTailBuffer 同款：保留头部与尾部、掐中间。
+
+    错误堆栈/汇总信息常在输出的**尾部**，纯头部截断会把它丢掉。
+    返回 (截断后文本, 是否发生了截断)。
+    """
+    if max_bytes <= 0 or len(text) <= max_bytes:
+        return text, False
+    half = max(1, max_bytes // 2)
+    omitted = len(text) - 2 * half
+    if omitted <= 0:
+        return text, False
+    return (
+        text[:half]
+        + f"\n\n…[输出过长，中间省略约 {omitted} 字符]…\n\n"
+        + text[-half:],
+        True,
+    )
+
+
 # ── Sandbox Factory ────────────────────────────────────────────
 
 
@@ -254,15 +274,7 @@ class Sandbox:
         return ["/bin/bash", "-c", command]
 
     def _truncate_output(self, output: str) -> tuple[str, bool]:
-        if len(output) <= self.max_output_bytes:
-            return output, False
-        half = self.max_output_bytes // 2
-        truncated = (
-            output[:half]
-            + f"\n\n... （{len(output) - self.max_output_bytes} 字节已截断） ...\n\n"
-            + output[-half:]
-        )
-        return truncated, True
+        return head_tail_truncate(output, self.max_output_bytes)
 
 
 # ── Tier 1: Bubblewrap ────────────────────────────────────────
@@ -483,19 +495,10 @@ async def _run_command(
         raw_stdout = stdout_bytes.decode("utf-8", errors="replace")
         raw_stderr = stderr_bytes.decode("utf-8", errors="replace")
 
-        # Truncate
-        if len(raw_stdout) > max_bytes:
-            half = max_bytes // 2
-            result.stdout = (
-                raw_stdout[:half]
-                + f"\n\n... （{len(raw_stdout) - max_bytes} 字节已截断） ...\n\n"
-                + raw_stdout[-half:]
-            )
-            result.truncated = True
-        else:
-            result.stdout = raw_stdout
-
-        result.stderr = raw_stderr[:max_bytes]
+        # 截断（stderr 同样头尾保留——错误堆栈常在尾部）
+        result.stdout, truncated = head_tail_truncate(raw_stdout, max_bytes)
+        result.stderr, stderr_truncated = head_tail_truncate(raw_stderr, max_bytes)
+        result.truncated = truncated or stderr_truncated
         result.exit_code = proc.returncode or 0
         result.wall_time_ms = (time.time() - t0) * 1000
 

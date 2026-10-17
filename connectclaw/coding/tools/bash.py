@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import shlex
@@ -275,24 +276,21 @@ class BashTool(AgentTool):
         result = await sandbox.execute(command, timeout=timeout)
 
         # ── Build output visible to LLM ────────────────────────
-        parts = []
-
-        # Timeout header
+        # Codex JsonToolOutput 同款：结构化 JSON 作为 tool 消息内容——
+        # exit_code / wall_time 是固定字段，模型不再需要从文本里猜。
+        payload: dict[str, Any] = {
+            "output": result.stdout.rstrip(),
+            "exit_code": result.exit_code,
+            "wall_time_s": round(result.wall_time_ms / 1000, 1),
+        }
+        if result.stderr.strip():
+            payload["stderr"] = result.stderr.rstrip()
         if result.timed_out:
-            parts.append(f"命令在 {timeout}s 后超时：`{command}`")
-
-        # stdout (always include, even if empty — avoids confusion)
-        if result.stdout:
-            parts.append(result.stdout.rstrip())
-
-        # stderr (the error details the LLM needs to see!)
-        if result.stderr:
-            parts.append("[stderr]\n" + result.stderr.rstrip())
-
-        # Exit code summary
-        parts.append(f"[退出码：{result.exit_code}]")
-
-        output = "\n\n".join(parts)
+            payload["timed_out"] = True
+            payload["timeout_s"] = timeout
+        if result.truncated:
+            payload["truncated"] = True
+        output = json.dumps(payload, ensure_ascii=False)
 
         details = {
             "exit_code": result.exit_code,

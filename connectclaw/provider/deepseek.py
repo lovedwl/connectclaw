@@ -4,6 +4,7 @@ import base64
 import json
 import os
 from collections import OrderedDict
+from typing import Any
 
 from openai import AsyncOpenAI
 
@@ -208,9 +209,14 @@ class DeepSeekProvider:
                 except OSError:
                     mtime_ns = 0
                 data = _read_base64(path, mtime_ns)
+                image_url: dict[str, Any] = {"url": f"data:{mime};base64,{data}"}
+                # view_image 的保真度提示（OpenAI 标准 detail 取值），透传给网关
+                detail = block.get("detail")
+                if detail in ("high", "low", "auto"):
+                    image_url["detail"] = detail
                 return {
                     "type": "image_url",
-                    "image_url": {"url": f"data:{mime};base64,{data}"},
+                    "image_url": image_url,
                 }
             size_kb = int(block.get("size", 0)) // 1024
             return {
