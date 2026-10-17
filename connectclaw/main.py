@@ -289,7 +289,8 @@ async def main(argv: list[str] | None = None) -> None:
         **kwargs,
     ) -> str | None:
         # Remember who's talking — /whoami needs it for whitelist discovery.
-        coding_agent.set_sender(kwargs.get("sender_open_id", ""))
+        # M22：per-conversation 记录，并发会话下 /whoami 不再报别人的 id
+        coding_agent.set_sender(kwargs.get("sender_open_id", ""), conversation_key)
         # Model wizard feed (escape hatch): a pending /model add wizard consumes
         # non-command replies; any slash command cancels it. Runs BEFORE image
         # handling and the agent loop, so it never depends on a working model.

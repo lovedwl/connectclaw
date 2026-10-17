@@ -7,6 +7,7 @@ This is a general-purpose AI assistant. Coding is one capability among many.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import os
 import time
 from dataclasses import replace
@@ -78,6 +79,11 @@ def _url_host(url: str) -> str:
         return (urlparse(url or "").hostname or "").lower()
     except ValueError:
         return ""
+
+
+# M22：当前会话上下文——每个 dispatch 是独立 task，contextvar 天然隔离。
+# 全局单值（_active_chat）在并发会话下串台：A 的 send_file 把文件发到 B。
+_current_chat: contextvars.ContextVar[str] = contextvars.ContextVar("active_chat", default="")
 
 
 class CodingAgent:
@@ -155,14 +161,18 @@ class CodingAgent:
         self._active_chat = ""
         self._send_file_tool = create_send_file_tool(
             channel_provider=lambda: self._channel,
-            chat_provider=lambda: self._active_chat,
+            # M22：优先读当前 dispatch 的 contextvar，并发会话不再串台
+            chat_provider=lambda: _current_chat.get("") or self._active_chat,
         )
         # Multi-step /model wizard state per conversation (add profile without
         # a working model: ask base_url → model_id → api_key via chat replies).
         self._wizard: dict[str, dict] = {}
         # Last message sender (open_id) per dispatch — used by /whoami so the
         # operator can self-discover their id for the [bash] whitelist.
-        self._last_sender = ""
+        # M22：per-conversation 记录——全局单值在并发会话下 /whoami 会报出
+        # 别人会话的 open_id（可能被误填进 shell 白名单）。
+        self._last_senders: dict[str, str] = {}
+        self._last_sender = ""  # 兼容：无 conversation_key 时的兜底
 
         # RAG subsystem (optional, lazy init)
         self._rag = RAGSubsystem(
@@ -352,9 +362,11 @@ class CodingAgent:
             if prev is not None and not prev.done():
                 prev.cancel()
             self._running_tasks[conversation_key] = task
-        # The active chat for outbound tools (send_file). With per-chat
-        # serialization upstream, this is unambiguous during a turn.
+        # The active chat for outbound tools (send_file).
+        # M22：contextvar 随 dispatch task 走，并发会话互不可见；
+        # 实例属性仅作兜底（非 dispatch 上下文）。
         self._active_chat = conversation_key
+        _current_chat.set(conversation_key)
 
         try:
             return await self._handle_message_impl(
@@ -709,11 +721,25 @@ class CodingAgent:
 
     @property
     def last_sender(self) -> str:
-        """Open_id of the sender of the message being processed (main.py sets
-        it each dispatch). Used by /whoami for whitelist self-discovery."""
+        """Open_id of the sender of the message being processed.
+
+        M22：优先取当前会话上下文的 sender——并发会话下不再串台。
+        Used by /whoami for whitelist self-discovery.
+        """
+        key = _current_chat.get("")
+        if key:
+            rid = self._last_senders.get(key)
+            if rid is not None:
+                return rid
         return self._last_sender
 
-    def set_sender(self, sender_open_id: str) -> None:
+    def sender_for(self, conversation_key: str) -> str:
+        """M22：显式按会话取 sender（/whoami 用，避免任何隐式上下文依赖）。"""
+        return self._last_senders.get(conversation_key) or ""
+
+    def set_sender(self, sender_open_id: str, conversation_key: str = "") -> None:
+        if conversation_key:
+            self._last_senders[conversation_key] = sender_open_id or ""
         self._last_sender = sender_open_id or ""
 
     async def run_operator_bash(

@@ -267,7 +267,11 @@ async def _restart(conversation_key: str, agent: Any, args: str = "") -> str:
 
 @register("/whoami", "查看自己的 open_id（填入 [bash] operator_open_ids 即可加入 !/bash 直连白名单）")
 async def _whoami(conversation_key: str, agent: Any, args: str = "") -> str:
-    rid = getattr(agent, "last_sender", "") or ""
+    # M22：按会话取 sender——并发会话下全局单值会串台
+    if hasattr(agent, "sender_for"):
+        rid = agent.sender_for(conversation_key)
+    else:
+        rid = getattr(agent, "last_sender", "") or ""
     if not rid:
         return "❌ 获取不到你的 open_id（只支持在飞书会话中使用）"
     ops: list = []
