@@ -110,3 +110,39 @@ def test_resolve_tool_path_normalizes_absolute_dotdot():
     assert p == "/proj2/f.txt"
     p = resolve_tool_path("/proj", "../proj2/f.txt")
     assert p == "/proj2/f.txt"
+
+
+# ── P2：read 读图片/二进制的明确指引 ──────────────────────────
+
+
+async def test_read_image_extension_gives_clear_guidance(layout):
+    from connectclaw.coding.tools.read import create_read_tool as _crt
+
+    cwd, _ = layout
+    img = os.path.join(cwd, "sticker.gif")
+    with open(img, "wb") as f:
+        f.write(b"GIF89a" + b"\x00" * 32)
+    rt = _crt(cwd)
+    r = await rt.execute("t", {"file_path": img})
+    assert r.details.get("is_error") is True
+    text = r.content[0]["text"]
+    assert "图片" in text
+    assert "send_file" in text  # 必须指路正确工具
+    # 不能是晦涩的 codec 报错
+    assert "codec" not in text
+
+
+async def test_read_binary_file_gives_clear_guidance(layout):
+    from connectclaw.coding.tools.read import create_read_tool as _crt
+
+    cwd, _ = layout
+    blob = os.path.join(cwd, "blob.dat")
+    with open(blob, "wb") as f:
+        f.write(bytes(range(256)) * 8)
+    rt = _crt(cwd)
+    r = await rt.execute("t", {"file_path": blob})
+    assert r.details.get("is_error") is True
+    text = r.content[0]["text"]
+    assert "二进制" in text
+    assert "send_file" in text
+    assert "codec" not in text

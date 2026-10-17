@@ -17,9 +17,13 @@ class ReadTool(AgentTool):
     name = "read"
     label = "read"
     description = (
-        "Read the contents of a file from the filesystem. "
+        "Read the contents of a TEXT file from the filesystem. "
         "Returns the file content with line numbers. "
-        "Supports offset and limit for reading specific ranges."
+        "Supports offset and limit for reading specific ranges.\n"
+        "限制：仅支持文本文件（UTF-8）。图片/二进制文件无法读取——"
+        "本工具没有看图能力，当前也没有独立的图片分析工具（用户在聊天中"
+        "发来的图片会由多模态主模型直接看到，无需读取磁盘）；"
+        "要把本地文件/图片发给用户，用 send_file 工具。"
     )
     parameters = {
         "type": "object",
@@ -80,6 +84,25 @@ class ReadTool(AgentTool):
                 details={"is_error": True},
             )
 
+        # P2（表情包事故）：图片扩展名直接拦截——不等 UTF-8 解码失败才报错，
+        # 提示更早、更明确（模型该知道 read 从来不是看图的工具）。
+        if os.path.splitext(absolute_path)[1].lower() in {
+            ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico", ".tiff",
+        }:
+            return AgentToolResult(
+                content=[{
+                    "type": "text",
+                    "text": (
+                        f"错误：'{file_path}' 是图片，read 只能读文本文件，没有看图能力。\n"
+                        f"- 要把该图片发给用户：用 send_file 工具\n"
+                        f"- 用户在聊天中发来的图片已由多模态主模型直接看到；"
+                        f"本地图片文件当前无法「看」（无独立看图工具）\n"
+                        f"- 要查看图片元信息：用 bash（file/identify）"
+                    ),
+                }],
+                details={"is_error": True},
+            )
+
         # Check file exists
         if not os.path.isfile(absolute_path):
             return AgentToolResult(
@@ -110,6 +133,22 @@ class ReadTool(AgentTool):
             # newline=""（H12）：保持磁盘真实行尾，与 hash_read/hash_edit 一致。
             async with aiofiles.open(absolute_path, "r", newline="") as f:
                 content = await f.read()
+        except UnicodeDecodeError:
+            # P2（2026-10-16 表情包事故）：读图片/二进制不再返回晦涩的
+            # codec 报错——直接告诉模型能力边界与替代路径，避免它病急乱投医。
+            return AgentToolResult(
+                content=[{
+                    "type": "text",
+                    "text": (
+                        f"错误：'{file_path}' 是二进制文件（可能是图片），read 只能读文本。\n"
+                        f"- 要把该文件发给用户：用 send_file 工具\n"
+                        f"- 要查看图片内容：当前无独立看图工具（用户在聊天中发来的图"
+                        f"片由多模态主模型直接看到）\n"
+                        f"- 要检查文件类型/元信息：用 bash（file/identify）"
+                    ),
+                }],
+                details={"is_error": True},
+            )
         except Exception as e:
             return AgentToolResult(
                 content=[{"type": "text", "text": f"读取文件错误：{e}"}],

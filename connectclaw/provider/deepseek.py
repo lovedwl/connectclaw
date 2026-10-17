@@ -97,7 +97,10 @@ class DeepSeekProvider:
 
         result: list[dict] = []
         for i, m in enumerate(messages):
-            resolve = i >= last_user_idx
+            # P2：last_user_idx == -1（无 user 消息的轮，如 follow-up/
+            # toolResult-only 轮）时不能 resolve 恒 True——否则全历史的
+            # image_ref 全部重新内联，图片按轮计费直接爆炸。
+            resolve = last_user_idx >= 0 and i >= last_user_idx
             if m.role == "user":
                 result.append(self._convert_user_message(m, resolve))
             elif m.role == "assistant":
