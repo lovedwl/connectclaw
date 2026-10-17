@@ -113,7 +113,8 @@ class ReadTool(AgentTool):
                         "type": "text",
                         "text": (
                             f"错误：文件过大（> {_MAX_READ_BYTES // (1024 * 1024)}MB），拒绝整读。"
-                            f"请用 offset/limit 分段读取，或用 bash（head/grep）处理。"
+                            f"注意 offset/limit 也无法读取（实现仍需整读），"
+                            f"请用 bash（head -c / tail -c / grep）处理。"
                         ),
                     }],
                     details={"is_error": True},

@@ -796,9 +796,10 @@ async def http_fetch_once(url: str, timeout: float = _FASTPATH_TIMEOUT) -> tuple
     if resp.status_code >= 400:
         return "", f"HTTP {resp.status_code}"
     # H4：follow_redirects=True 会让公网外链 302 到内网——必须复查**最终** URL
+    # （check_public_http_url 含阻塞 DNS，进线程池防卡事件循环）
     from connectclaw.security import check_public_http_url
 
-    redirect_reason = check_public_http_url(str(resp.url))
+    redirect_reason = await asyncio.to_thread(check_public_http_url, str(resp.url))
     if redirect_reason:
         return "", f"重定向目标被拒绝：{redirect_reason}"
     ctype = (resp.headers.get("content-type") or "").lower()

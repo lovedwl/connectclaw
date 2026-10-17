@@ -778,12 +778,12 @@ class FeishuChannel(Channel):
         approved = action_value.get("action") == "approve"
 
         # P2：校验点击者身份——群聊里任何成员都能点按钮批准 SUSPICIOUS 命令。
-        # 配置了 operator 白名单时，仅白名单成员可点。
+        # 配置了 operator 白名单时，仅白名单成员可点；身份缺失时 fail-closed。
         operator = getattr(event, "operator", None)
         clicker = (getattr(operator, "open_id", "") or "") if operator is not None else ""
-        if self._operator_open_ids and clicker and clicker not in self._operator_open_ids:
+        if self._operator_open_ids and (not clicker or clicker not in self._operator_open_ids):
             logger.warning(
-                "[AUTH] clicker %s not in operator whitelist — click ignored",
+                "[AUTH] clicker %r not in operator whitelist — click ignored",
                 clicker[:12],
             )
             return

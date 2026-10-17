@@ -208,3 +208,16 @@ def test_bashguard_crontab_truncate_suspicious():
     # truncate 命令本身走授权（结构性检查只覆盖 rm/chmod/重定向）
     assert g.check("truncate -s 0 /etc/passwd") == "SUSPICIOUS"
     assert g.check("truncate -s 0 app.log") == "SUSPICIOUS"
+
+
+def test_bashguard_redirect_bypasses_closed():
+    """Review 2026-10-17：引号包裹 / $VAR / tee 三种写路径绕过封堵。"""
+    g = BashGuard()
+    assert g.check('echo x > "/etc/passwd"') == "DANGEROUS"
+    assert g.check("echo x > '/etc/passwd'") == "DANGEROUS"
+    assert g.check("F=/etc/passwd; echo x > $F") == "DANGEROUS"
+    assert g.check("echo x | tee /etc/passwd") == "DANGEROUS"
+    # 黑洞设备与普通文件不受影响
+    assert g.check("echo x > /dev/null") == "SAFE"
+    assert g.check("echo x | tee out.txt") == "SAFE"
+    assert g.check("echo x > out.txt") == "SAFE"

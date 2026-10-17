@@ -94,10 +94,28 @@ class BashGuard:
         # 去掉子 shell 括号/命令替换边界，让内层命令可被分词识别
         flat = command.replace("(", " ").replace(")", " ")
         home = os.path.expanduser("~")
-        for segment in self._COMPOUND_SPLIT_RE.split(flat):
-            segment = segment.strip()
-            if not segment:
-                continue
+        segments = [s.strip() for s in self._COMPOUND_SPLIT_RE.split(flat) if s.strip()]
+
+        # $VAR 有限展开表：跨 segment 收集 VAR=value 赋值（F=/etc/x; echo > $F）
+        assignments: dict[str, str] = {}
+        for segment in segments:
+            try:
+                tokens = shlex.split(segment)
+            except ValueError:
+                tokens = segment.split()
+            if tokens and re.fullmatch(r"[A-Za-z_]\w*", tokens[0].split("=", 1)[0]) \
+                    and "=" in tokens[0] and not tokens[0].startswith("="):
+                var, val = tokens[0].split("=", 1)
+                assignments[var] = val.strip("\"'")
+
+        def _expand(target: str) -> str:
+            if target.startswith("$"):
+                var = target[1:].lstrip("{").rstrip("}")
+                if var in assignments:
+                    return assignments[var]
+            return os.path.expanduser(target)
+
+        for segment in segments:
             try:
                 tokens = shlex.split(segment)
             except ValueError:
@@ -119,9 +137,15 @@ class BashGuard:
                 if any(os.path.expanduser(t).rstrip("/") in ("", "/") for t in targets):
                     return "DANGEROUS"
 
-            # 重定向到系统敏感路径（黑洞设备除外）
-            for m in re.finditer(r">>?>?\s*([^\s;|&\"']+)", segment):
-                target = os.path.expanduser(m.group(1))
+            # 写路径目标收集：重定向（含引号包裹，shlex 分词已去引号）+ tee
+            # Review 2026-10-17：原正则字符类排除引号，`> "/etc/passwd"` 直接绕过。
+            targets: list[str] = []
+            for m in re.finditer(r">>?>?\s*(\"[^\"]*\"|'[^']*'|[^\s;|&]+)", segment):
+                targets.append(m.group(1).strip("\"'"))
+            if name == "tee":
+                targets.extend(t for t in tokens[1:] if not t.startswith("-"))
+            for target in targets:
+                target = _expand(target)
                 if target in self._BLACKHOLE_TARGETS:
                     continue
                 if re.match(r"/dev/(?:sd|nvme|mapper)", target):

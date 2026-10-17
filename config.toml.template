@@ -46,7 +46,9 @@ thinking_level = "off"
 # `agents` meta-tool, so a newly created agent is usable the same turn and the
 # tools array stays byte-stable (prefix cache). Omit this line to expose all.
 # Unknown names are dropped (warning); empty resolves to ["read","bash"].
-tools = ["read", "write", "hash_read", "hash_edit", "bash", "web_search", "web_fetch", "attach_image"]
+# NOTE: explicit non-empty list REPLACES the default — keep it in sync when
+# new base tools land (e.g. view_image for local-image viewing).
+tools = ["read", "write", "hash_read", "hash_edit", "bash", "web_search", "web_fetch", "attach_image", "view_image", "send_file"]
 # Idle seconds before a stateful scripted-tool session (e.g. the browser) is reaped.
 tool_session_idle_timeout = 300
 

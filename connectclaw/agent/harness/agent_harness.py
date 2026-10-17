@@ -314,7 +314,10 @@ class AgentHarness:
             signal=self._active_abort_event(),
         )
 
-        if result:
+        # M10 后续：abort 中断的摘要可能是半截/降级原文——不能落盘。
+        abort_event = self._active_abort_event()
+        aborted = abort_event is not None and abort_event.is_set()
+        if result and not aborted:
             await self._session.append_compaction(
                 result.summary, result.first_kept_entry_id, result.tokens_before,
                 merged_context=result.merged_context,
@@ -385,7 +388,9 @@ class AgentHarness:
                     settings=self._compaction_settings,
                     signal=self._active_abort_event(),
                 )
-                if result:
+                # M10 后续：abort 中断的半截/降级摘要不落盘。
+                abort_event = self._active_abort_event()
+                if result and not (abort_event is not None and abort_event.is_set()):
                     await self._session.append_compaction(
                         result.summary, result.first_kept_entry_id, result.tokens_before,
                         merged_context=result.merged_context,
