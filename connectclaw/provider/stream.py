@@ -200,9 +200,11 @@ async def stream_simple(
                         # 前缀缓存命中量：把它留下，缓存行为才可观测。
                         partial.usage["cached"] = int(cached)
                     completion_details = getattr(usage_obj, "completion_tokens_details", None)
-                    reasoning = getattr(completion_details, "reasoning_tokens", None) if completion_details else None
-                    if reasoning is not None:
-                        partial.usage["reasoning"] = int(reasoning)
+                    # P2：局部变量改名为 _reasoning_tokens——原变量遮蔽了
+                    # 外层的 reasoning 参数（str | None），读代码易混。
+                    _reasoning_tokens = getattr(completion_details, "reasoning_tokens", None) if completion_details else None
+                    if _reasoning_tokens is not None:
+                        partial.usage["reasoning"] = int(_reasoning_tokens)
 
                 # Skip chunks without choices
                 if not chunk.choices:

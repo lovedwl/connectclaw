@@ -263,6 +263,10 @@ class MemorySubsystem:
             return 0
 
         turns = self._turn_counter.get(conversation_key, 0) + 1
+        # P2：_turn_counter 无界增长（/new 也不清）——超容量直接重置，
+        # 只影响节流计数（最坏情况：多等 extract_min_turns 轮）
+        if len(self._turn_counter) > 1000:
+            self._turn_counter.clear()
         self._turn_counter[conversation_key] = turns
 
         # Fire at extract_min_turns, then every extract_interval_turns after:
@@ -420,8 +424,9 @@ class MemorySubsystem:
         async def _dream_loop() -> None:
             while True:
                 try:
+                    # P2：interval 配置为 0 时 sleep(0) 会变成带 LLM 调用的死循环
                     await asyncio.sleep(
-                        self._config.dream_interval_hours * 3600
+                        max(self._config.dream_interval_hours, 0.05) * 3600
                     )
                     await self.dream(
                         model() if callable(model) else model,

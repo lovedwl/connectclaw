@@ -109,8 +109,12 @@ class ContextState:
             elif kind == OP_STATE_SNAPSHOT:
                 # 快照 = 整份替换。折叠时它会被放在保留区之前（见 harness.context_state），
                 # 所以这里的"清空"语义是对的。
+                # P2：畸形快照（value 非 dict，如手改过的会话文件）不再抛异常——
+                # 这是每轮折叠的必经路径。
                 self.memory = {
-                    str(k): dict(v) for k, v in (op.get("memory") or {}).items()
+                    str(k): dict(v)
+                    for k, v in (op.get("memory") or {}).items()
+                    if isinstance(v, dict)
                 }
                 self.catalog = op.get("catalog", "") or ""
             else:

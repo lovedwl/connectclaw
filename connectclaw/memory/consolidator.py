@@ -196,6 +196,10 @@ class MemoryConsolidator:
         """Apply exponential decay to all memories based on age."""
         now = time.time()
         halflife_seconds = self._config.decay_halflife_days * 86400
+        # P2：halflife 配置为 0 时 2**(-elapsed/0) 除零
+        if halflife_seconds <= 0:
+            logger.warning("decay_halflife_days <= 0 — decay skipped")
+            return 0
         count = 0
 
         all_memories = self._store.list_all(min_strength=0.0, limit=None)

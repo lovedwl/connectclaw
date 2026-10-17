@@ -255,20 +255,29 @@ async def _pick_options(existing: dict | None = None) -> dict:
 # ── Write Config ──────────────────────────────────────────────
 
 
+def _toml_escape(v: str) -> str:
+    """P2：TOML 字符串字面量转义——用户输入含引号/反斜杠会破坏配置结构
+    （甚至把 key 拼进别的 section）。"""
+    return str(v).replace("\\", "\\\\").replace('"', '\\"')
+
+
 def _write_config(feishu: dict, model: dict, opts: dict) -> str:
     os.makedirs(CONFIG_DIR, exist_ok=True)
+    esc = _toml_escape
     c = (
         f"# ConnectClaw 配置\n\n"
-        f"[llm]\napi_key = \"{model['api_key']}\"\nbase_url = \"https://api.deepseek.com\"\nmodel_id = \"{model['model_id']}\"\n\n"
-        f"[feishu]\napp_id = \"{feishu['app_id']}\"\napp_secret = \"{feishu['app_secret']}\"\n\n"
-        f"[vision]\napi_key = \"{opts['vision_api_key']}\"\nbase_url = \"{opts['vision_base_url']}\"\nmodel_id = \"{opts['vision_model_id']}\"\n\n"
-        f"[agent]\ncwd = \"{os.getcwd()}\"\nthinking_level = \"{opts['thinking_level']}\"\n\n"
+        f"[llm]\napi_key = \"{esc(model['api_key'])}\"\nbase_url = \"https://api.deepseek.com\"\nmodel_id = \"{esc(model['model_id'])}\"\n\n"
+        f"[feishu]\napp_id = \"{esc(feishu['app_id'])}\"\napp_secret = \"{esc(feishu['app_secret'])}\"\n\n"
+        f"[vision]\napi_key = \"{esc(opts['vision_api_key'])}\"\nbase_url = \"{esc(opts['vision_base_url'])}\"\nmodel_id = \"{esc(opts['vision_model_id'])}\"\n\n"
+        f"[agent]\ncwd = \"{esc(os.getcwd())}\"\nthinking_level = \"{esc(opts['thinking_level'])}\"\n\n"
         f"[session]\ndir = \"~/.connectclaw/sessions\"\n\n"
-        f"[rag]\nenabled = {str(opts['rag_enabled']).lower()}\ndocs_dir = \"{opts['rag_docs_dir']}\"\ndb_path = \"~/.connectclaw/rag_db\"\ntop_k = 20\ntop_n = 5\n\n"
+        f"[rag]\nenabled = {str(opts['rag_enabled']).lower()}\ndocs_dir = \"{esc(opts['rag_docs_dir'])}\"\ndb_path = \"~/.connectclaw/rag_db\"\ntop_k = 20\ntop_n = 5\n\n"
         f"[web_search]\nmax_chars = 8000\ntimeout = 30\n\n"
         f"[compaction]\nenabled = true\nreserve_tokens = 16384\nkeep_recent_tokens = 20000\n"
     )
-    with open(CONFIG_PATH, "w") as f:
+    # P2：以 0600 直接创建——原 open() 后再 chmod 之间存在密钥可读窗口
+    fd = os.open(CONFIG_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
         f.write(c)
     try:
         os.chmod(CONFIG_PATH, 0o600)

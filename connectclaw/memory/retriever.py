@@ -363,7 +363,9 @@ class MemoryRetriever:
         """
         c = self._config
 
-        age_days_recency = (now - entry.last_accessed) / 86400
+        # P2：未来时间戳（时钟回拨/手工改库）会把 age 变负——除零与
+        # 超额 boost，一律下限 0。
+        age_days_recency = max(0.0, (now - entry.last_accessed) / 86400)
         recency = 1.0 / (1.0 + age_days_recency / 30)
 
         # Embedding similarity and BM25 together carry the same "relevance"
@@ -378,7 +380,7 @@ class MemoryRetriever:
 
         # Freshness boost: memories < 7 days old get up to +30% lift
         # so newly extracted info has a chance to be recalled and confirmed.
-        age_days_created = (now - entry.created_at) / 86400
+        age_days_created = max(0.0, (now - entry.created_at) / 86400)
         if age_days_created < 7:
             boost = 1.0 + (7.0 - age_days_created) / 7.0 * 0.3
             score *= boost

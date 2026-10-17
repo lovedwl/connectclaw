@@ -382,7 +382,7 @@ class SessionRepo:
         except FileNotFoundError:
             return []
 
-        for fname in sorted(entries, reverse=True):
+        for fname in entries:
             if not fname.endswith(".jsonl"):
                 continue
             fpath = os.path.join(self._dir, fname)
@@ -399,6 +399,8 @@ class SessionRepo:
             except Exception:
                 continue
 
+        # P2：按创建时间排序（文件名是随机 uuid，旧排序无意义）
+        sessions.sort(key=lambda s: s.get("created_at", ""), reverse=True)
         return sessions
 
     async def get_or_create_for_chat(self, chat_id: str, cwd: str) -> JsonlSessionStorage:

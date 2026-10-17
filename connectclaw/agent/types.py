@@ -39,10 +39,13 @@ AgentToolUpdateCallback = Callable[["AgentToolResult"], Awaitable[None]]
 class AgentTool:
     """Tool definition used by the agent runtime."""
 
+    # 注意：本类刻意不是 @dataclass（子类以类属性覆盖这些字段）。
+    # 不能用 field(default_factory=...)——非 dataclass 上它是 Field 对象。
+    # schema dict 是只读约定，共享可变默认在此无碍。
     name: str = ""
     label: str = ""
     description: str = ""
-    parameters: dict[str, Any] = field(default_factory=dict)
+    parameters: dict[str, Any] = {}
     execution_mode: ToolExecutionMode = "parallel"
 
     async def execute(
