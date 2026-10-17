@@ -18,6 +18,7 @@ sub-tool-call — which is exactly the "information explosion" we want to avoid.
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any, Callable
 
 from connectclaw.agent.agent import Agent
@@ -50,6 +51,9 @@ async def _persist_subagent_session(
     try:
         pid = (parent_session_id or "root")[:12]
         tid = (subagent_id or name or "sub")[:16]
+        # M21：id 直接拼进文件名，防御性清洗（agents 工具入口已校验，这里兜底）
+        pid = re.sub(r"[^A-Za-z0-9_-]", "_", pid) or "root"
+        tid = re.sub(r"[^A-Za-z0-9_-]", "_", tid) or "sub"
         sid = f"sub-{pid}-{tid}"
         storage = await session_repo.create_session(cwd, session_id=sid)
         # Lead with the task prompt so the file is self-explanatory.

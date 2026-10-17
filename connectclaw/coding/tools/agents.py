@@ -32,6 +32,7 @@ roster.
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 from typing import Any, Callable
 
@@ -58,6 +59,10 @@ TASK_SYSTEM_PROMPT = """You are a focused sub-agent. Complete the assigned task 
 
 # How much of a dependency's output to inject into a dependent's prompt.
 _DEP_INJECT_LIMIT = 2000
+
+# M20：一轮 ready 任务的并发上限——此前全量 gather，模型传 100 个任务
+# 就是 100 个并发 Agent（每个都带 LLM 调用与工具执行）。
+_MAX_FLEET_CONCURRENCY = 8
 
 
 def _resolve_tools(names: list[str], available: list[AgentTool]) -> list[AgentTool]:
@@ -337,6 +342,23 @@ class AgentsTool(AgentTool):
         for i, t in enumerate(tasks):
             if not t.get("id"):
                 t["id"] = f"task{i + 1}"
+        # M21：模型给的 id 会拼进 session 文件名（sub-{pid}-{tid}.jsonl），
+        # 含 '/' 或 '..' 即可越目录写任意 .jsonl —— 严格校验字符集。
+        for t in tasks:
+            tid = str(t["id"])
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", tid):
+                return AgentToolResult(content=[{
+                    "type": "text",
+                    "text": (
+                        f"任务 id 非法：'{tid}'。"
+                        f"仅允许字母/数字/下划线/连字符，长度 1-64。"
+                    ),
+                }])
+        if len({t["id"] for t in tasks}) != len(tasks):
+            return AgentToolResult(content=[{
+                "type": "text",
+                "text": "任务 id 重复：请为每个任务使用唯一 id。",
+            }])
         id_to_task = {t["id"]: t for t in tasks}
         for t in tasks:
             for dep in t.get("depends_on", []) or []:
@@ -445,8 +467,12 @@ class AgentsTool(AgentTool):
                         failed_ids.add(t["id"])
                 break
 
+            # M20：信号量限并发 + 透传 signal（/stop 可中断 DAG 子 agent）
+            sem = asyncio.Semaphore(_MAX_FLEET_CONCURRENCY)
             batch = await asyncio.gather(*[
-                self._run_task(t, outputs, fleet, grantable, named) for t in ready
+                self._run_task(t, outputs, fleet, grantable, named,
+                               signal=signal, sem=sem)
+                for t in ready
             ])
             for t, res in zip(ready, batch):
                 tid = t["id"]
@@ -463,6 +489,8 @@ class AgentsTool(AgentTool):
         fleet: dict[str, dict],
         grantable: list[AgentTool],
         named: list[AgentTool],
+        signal: asyncio.Event | None = None,
+        sem: asyncio.Semaphore | None = None,
     ) -> dict:
         """Build the spec (named agent or ad-hoc), inject deps, run it."""
         tid = task["id"]
@@ -506,16 +534,23 @@ class AgentsTool(AgentTool):
                 "prompt": prompt,
             }
 
-        return await run_subagent(
-            spec,
-            model=self._model,
-            api_key=self._resolve_api_key(),
-            thinking_level=self._thinking_level,
-            on_progress=_on_progress,
-            subagent_id=tid,
-            session_repo=self._session_repo,
-            cwd=self._cwd,
-        )
+        async def _execute() -> dict:
+            return await run_subagent(
+                spec,
+                model=self._model,
+                api_key=self._resolve_api_key(),
+                thinking_level=self._thinking_level,
+                on_progress=_on_progress,
+                signal=signal,
+                subagent_id=tid,
+                session_repo=self._session_repo,
+                cwd=self._cwd,
+            )
+
+        if sem is not None:
+            async with sem:
+                return await _execute()
+        return await _execute()
 
 
 # ── Module helpers (migrated from task.py) ──────────────────────
