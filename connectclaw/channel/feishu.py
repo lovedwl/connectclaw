@@ -51,6 +51,9 @@ class FeishuChannel(Channel):
         self._running = False
         self._stop_event: asyncio.Event = asyncio.Event()
         self._auth_requests: dict[str, AuthRequest] = {}
+        # P2：授权按钮点击者白名单（main.py 从 [bash] operator_open_ids 注入）；
+        # 非白名单成员的点击直接忽略，群聊任意成员不再能批准危险命令。
+        self._operator_open_ids: list[str] = []
         # /model picker card clicks (kind="model_switch") dispatch here; wired
         # in main.py. Async fn(value: dict, chat_id: str, message_id: str).
         self._model_card_handler = None
@@ -728,6 +731,10 @@ class FeishuChannel(Channel):
         except Exception as e:
             logger.debug("update_card for auth result failed: %s", e)
 
+    def set_operator_open_ids(self, ids: list[str]) -> None:
+        """P2：注入 [bash] operator_open_ids，用于授权卡点击者校验。"""
+        self._operator_open_ids = list(ids or [])
+
     def handle_card_action(self, event) -> None:
         """Handle card button callback (WebSocket mode).
 
@@ -769,6 +776,18 @@ class FeishuChannel(Channel):
 
         rid = action_value.get("request_id", "")
         approved = action_value.get("action") == "approve"
+
+        # P2：校验点击者身份——群聊里任何成员都能点按钮批准 SUSPICIOUS 命令。
+        # 配置了 operator 白名单时，仅白名单成员可点。
+        operator = getattr(event, "operator", None)
+        clicker = (getattr(operator, "open_id", "") or "") if operator is not None else ""
+        if self._operator_open_ids and clicker and clicker not in self._operator_open_ids:
+            logger.warning(
+                "[AUTH] clicker %s not in operator whitelist — click ignored",
+                clicker[:12],
+            )
+            return
+
         logger.info("[AUTH] request_id=%s approved=%s pending_requests=%s",
                     rid, approved, list(self._auth_requests.keys()))
 

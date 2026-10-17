@@ -202,6 +202,8 @@ async def main(argv: list[str] | None = None) -> None:
 
     # Create channel first, then agent (agent needs channel for auth cards)
     channel = FeishuChannel(config.feishu)
+    # P2：授权卡点击者校验——仅 [bash] operator 白名单成员可批准
+    channel.set_operator_open_ids(list(config.bash.operator_open_ids or []))
     coding_agent = CodingAgent(config, channel=channel)
 
     # /model picker card clicks → hot-switch dispatcher (see model_card.py).
