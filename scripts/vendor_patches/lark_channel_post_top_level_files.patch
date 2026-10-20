@@ -1,0 +1,16 @@
+--- a/lark_channel/channel/normalize/converters/post.py	2026-10-20 16:42:53.066594331 +0800
++++ b/lark_channel/channel/normalize/converters/post.py	2026-10-20 16:42:53.087752710 +0800
+@@ -107,6 +107,13 @@
+         )
+ 
+     for doc in _iter_documents(post):
++        # Vendor patch 2026-10: Feishu post messages can carry attachments
++        # in a TOP-LEVEL files[] array (multi-file forward: content=[[]] and
++        # files=[...]). Without this the whole message normalizes to empty
++        # and is dropped as "empty inbound".
++        for att in doc.get("files") or []:
++            if isinstance(att, dict) and not att.get("is_folder"):
++                add("file", att.get("file_key"), file_name=att.get("file_name"))
+         for para in doc.get("content") or []:
+             for el in para or []:
+                 if not isinstance(el, dict):
