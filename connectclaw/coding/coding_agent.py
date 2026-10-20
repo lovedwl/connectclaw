@@ -124,8 +124,9 @@ class CodingAgent:
         # [sandbox] mode decides isolation for the agent's OWN bash: "auto"
         # detects, "none" runs unsandboxed on the host (operator's full-trust
         # switch). config.toml is agent-read-only, so only the operator flips it.
-        self._sandbox_cls = resolve_sandbox_cls(
-            getattr(getattr(config, "sandbox", None), "mode", "auto"))
+        self._sandbox_mode = getattr(
+            getattr(config, "sandbox", None), "mode", "auto")
+        self._sandbox_cls = resolve_sandbox_cls(self._sandbox_mode)
         self._bash_tool = create_bash_tool(
             config.agent.cwd, self._bash_guard, self._sandbox_cls)
         # Control plane for bash(background=true) tasks: list / tail / kill.
@@ -956,12 +957,20 @@ class CodingAgent:
                     # with open network by default (see sandbox redesign).
                     check = self._bash_guard.check(command)
                     if check == "SUSPICIOUS":
-                        notes.append("🔐 Bash 命令授权")
-                        approved = await self._request_bash_auth(key, command)
-                        if not approved:
-                            notes.append("  → ❌ 用户已拒绝")
-                            return {"block": True, "reason": "用户拒绝执行命令"}
-                        notes.append("  → ✅ 用户已批准")
+                        # sandbox=none 即主人显式授予完全权限：SUSPICIOUS
+                        # 自动放行并留痕（DANGEROUS 仍由上层硬拦截）。
+                        if self._sandbox_mode == "none":
+                            logger.info(
+                                "bashguard: sandbox=none，SUSPICIOUS 自动放行: %s",
+                                command,
+                            )
+                        else:
+                            notes.append("🔐 Bash 命令授权")
+                            approved = await self._request_bash_auth(key, command)
+                            if not approved:
+                                notes.append("  → ❌ 用户已拒绝")
+                                return {"block": True, "reason": "用户拒绝执行命令"}
+                            notes.append("  → ✅ 用户已批准")
 
                 return None
 
