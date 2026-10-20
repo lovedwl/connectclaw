@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from lark_channel import FeishuChannel as SdkChannel  # noqa: F401 — must import before asyncio loop starts
+from lark_channel.channel.config import InboundConfig
 
 from connectclaw.logging import get_logger
 
@@ -128,6 +129,10 @@ class FeishuChannel(Channel):
         sdk = SdkChannel(
             app_id=self._config.app_id,
             app_secret=self._config.app_secret,
+            # Observability (2026-10): file events vanished with zero trace
+            # between WS and dispatch; raw-event stream makes the drop layer
+            # attributable. Volume is one INFO line per inbound event.
+            inbound=InboundConfig(emit_raw_events=True),
         )
         self._sdk = sdk
         channel = self
@@ -162,6 +167,13 @@ class FeishuChannel(Channel):
 
             # Allow pure-image messages (no text but has resources)
             if not text and not resources:
+                # INFO (was silent): an event that yields an empty message
+                # must not be indistinguishable from "never sent" (2026-10).
+                logger.info(
+                    "[%s] empty inbound dropped: msg_id=%s raw_type=%s",
+                    chat_id[:8], message_id[:24],
+                    getattr(msg, "raw_content_type", "?"),
+                )
                 return
 
             logger.info(
@@ -214,6 +226,42 @@ class FeishuChannel(Channel):
             )
 
         sdk.on("reject", on_reject)
+
+        def _find_msg_dict(obj):
+            """Depth-first search for the message dict in a raw event bag."""
+            if isinstance(obj, dict):
+                if "message_type" in obj or "msg_type" in obj:
+                    return obj
+                for v in obj.values():
+                    hit = _find_msg_dict(v)
+                    if hit is not None:
+                        return hit
+            elif isinstance(obj, (list, tuple)):
+                for v in obj:
+                    hit = _find_msg_dict(v)
+                    if hit is not None:
+                        return hit
+            return None
+
+        async def on_raw(raw) -> None:
+            """INFO trace of every inbound message event, *before* any
+            normalize/safety filter — the drop layer becomes attributable."""
+            try:
+                m = _find_msg_dict(raw)
+                if m is None:
+                    return
+                mt = m.get("message_type") or m.get("msg_type") or "?"
+                chat = str(m.get("chat_id", ""))
+                logger.info(
+                    "[raw] msg_type=%s chat=%s msg_id=%s content=%.200s",
+                    mt, chat[:20],
+                    str(m.get("message_id", ""))[:24],
+                    str(m.get("content", "")),
+                )
+            except Exception:
+                pass  # observability must never break the pipeline
+
+        sdk.on("raw", on_raw)
 
         async def on_error(error) -> None:
             logger.error("Channel error: %s", error)
