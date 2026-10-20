@@ -1,0 +1,47 @@
+diff --git a/lark_channel/channel/safety/chat_pipeline.py b/lark_channel/channel/safety/chat_pipeline.py
+index 8c62a95..f63d319 100644
+--- a/lark_channel/channel/safety/chat_pipeline.py
++++ b/lark_channel/channel/safety/chat_pipeline.py
+@@ -41,11 +41,30 @@ def merge_batch(batch: List[InboundMessage]) -> InboundMessage:
+     mentioned_bot = False
+     chat_mode = last.chat_mode
+     seen_mention_ids = set()
++    content_texts: List[str] = []
++    safe_texts: List[str] = []
++    merged_resources: List[Any] = []
++    seen_res: set = set()
+     for m in batch:
+         content = m.content
+         text = getattr(content, "text", "") or getattr(content, "title", "") or ""
+         if text:
+             texts.append(text)
++        # Preserve the flattened view + media descriptors of every source:
++        # rebuilding the message without them silently drops file/image
++        # messages merged together with text (2026-10 bug).
++        ct = getattr(m, "content_text", "") or ""
++        if ct and ct not in content_texts:
++            content_texts.append(ct)
++        st = getattr(m, "safe_content_text", "") or ""
++        if st and st not in safe_texts:
++            safe_texts.append(st)
++        for r in getattr(m, "resources", None) or []:
++            sig = (getattr(r, "type", ""), getattr(r, "file_key", ""))
++            if sig in seen_res:
++                continue
++            seen_res.add(sig)
++            merged_resources.append(r)
+         if m.mentioned_all:
+             mentioned_all = True
+         if m.mentioned_bot:
+@@ -76,6 +95,11 @@ def merge_batch(batch: List[InboundMessage]) -> InboundMessage:
+         content=merged_content,
+         raw=last.raw,
+         chat_mode=chat_mode,
++        content_text="\n\n".join(content_texts),
++        safe_content_text="\n\n".join(safe_texts) or "\n\n".join(content_texts),
++        resources=merged_resources,
++        raw_content_type=last.raw_content_type,
++        batched_sources=list(batch),
+     )
+     return merged
+ 

@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import re
 import shutil
 import signal
 import sys
@@ -134,6 +135,105 @@ async def _download_feishu_images(
                      conversation_key[:8], overflow, max_images)
 
     return refs
+
+
+MAX_INBOUND_FILE_BYTES = 100 * 1024 * 1024
+"""Hard cap for inbound (Feishu) file attachments — bigger files are skipped."""
+
+
+def _safe_upload_name(name: str | None) -> str:
+    """Sanitize an inbound file name for on-disk storage.
+
+    Keeps only path-safe characters; strips directory components and leading
+    dots so a hostile name like ``../../etc/passwd`` cannot escape the
+    uploads dir.
+    """
+    base = os.path.basename(str(name or "").replace("\\", "/")).strip()
+    base = re.sub(r"[^\w.\- +(){}\[\]]", "_", base, flags=re.UNICODE)
+    base = base.strip(" .")
+    return base or "file"
+
+
+async def _download_feishu_files(
+    *,
+    channel: FeishuChannel,
+    base_dir: str,
+    conversation_key: str,
+    resources: list,
+    message_id: str,
+    max_files: int = 5,
+) -> list[dict]:
+    """Download non-image Feishu attachments (``type == "file"``) to disk.
+
+    Files land in ``<base_dir>/<hash12>_<safe-name>`` — content-hash prefix
+    dedupes repeats and keeps the final path whitespace-free while the
+    original name is preserved in the returned ``name`` field. Returns a
+    list of ``{path, name, size}`` dicts; the agent can then read/unzip
+    them with the normal file tools.
+    """
+    import xxhash
+
+    file_resources = [r for r in resources if getattr(r, "type", "") == "file"]
+    if not file_resources:
+        return []
+
+    os.makedirs(base_dir, exist_ok=True)
+    to_process = file_resources[:max_files]
+
+    async def download_one(i: int, res) -> dict | None:
+        file_key = getattr(res, "file_key", "") or ""
+        if not file_key:
+            return None
+        logger.info(
+            "[%s] downloading file %d/%d: %s",
+            conversation_key[:8], i + 1, len(to_process), file_key[:20],
+        )
+        try:
+            data = await channel.download_resource(
+                file_key, resource_type="file", message_id=message_id,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.error("[%s] file download failed: %s", conversation_key[:8], e)
+            return None
+        if not data:
+            logger.warning("[%s] file download returned empty: %s",
+                           conversation_key[:8], file_key[:20])
+            return None
+        if len(data) > MAX_INBOUND_FILE_BYTES:
+            logger.warning(
+                "[%s] file too large (%d bytes > %d), skipped: %s",
+                conversation_key[:8], len(data), MAX_INBOUND_FILE_BYTES,
+                getattr(res, "file_name", "") or file_key[:20],
+            )
+            return None
+        digest = xxhash.xxh128(data).hexdigest()[:12]
+        disp = _safe_upload_name(getattr(res, "file_name", None))
+        disp = disp.replace(" ", "_")
+        filepath = os.path.join(base_dir, f"{digest}_{disp}")
+        if not os.path.exists(filepath):
+            with open(filepath, "wb") as f:
+                f.write(data)
+        logger.info("[%s] saved file: %s (%dKB)",
+                    conversation_key[:8], filepath, len(data) // 1024)
+        return {"path": filepath,
+                "name": getattr(res, "file_name", None) or disp,
+                "size": len(data)}
+
+    results = await asyncio.gather(
+        *(download_one(i, res) for i, res in enumerate(to_process)),
+        return_exceptions=True,
+    )
+    saved = []
+    for r in results:
+        if isinstance(r, BaseException):
+            logger.error("[%s] file task failed: %s", conversation_key[:8], r)
+        elif r is not None:
+            saved.append(r)
+    overflow = len(file_resources) - len(to_process)
+    if overflow > 0:
+        logger.info("[%s] %d file(s) skipped (max %d)",
+                    conversation_key[:8], overflow, max_files)
+    return saved
 
 
 def _parse_args(argv: list[str]) -> dict:
@@ -321,6 +421,25 @@ async def main(argv: list[str] | None = None) -> None:
         images: list[dict] | None = None
 
         if resources:
+            saved_files = await _download_feishu_files(
+                channel=channel,
+                base_dir=os.path.join(DEFAULT_ATTACHMENTS_DIR, "uploads"),
+                conversation_key=conversation_key,
+                resources=resources,
+                message_id=message_id,
+            )
+            if saved_files:
+                listing = "\n".join(
+                    f"- {it['name']}（{max(it['size'] // 1024, 1)}KB）: {it['path']}"
+                    for it in saved_files
+                )
+                parts = [text] if text else []
+                parts.append(
+                    "---\n已收到文件，已保存到本地磁盘，可直接用 read/bash 工具读取或解压：\n"
+                    + listing
+                )
+                text = "\n".join(parts)
+
             saved_images = await _download_feishu_images(
                 channel=channel,
                 store=coding_agent.attachment_store,

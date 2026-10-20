@@ -204,7 +204,14 @@ class FeishuChannel(Channel):
         sdk.on("message", on_msg)
 
         async def on_reject(reject) -> None:
-            logger.debug("Message rejected: reason=%s", getattr(reject, 'reason', reject))
+            # INFO (was DEBUG): dropped inbound messages must leave a trace in
+            # production logs — a silently vanishing file/image message is
+            # otherwise indistinguishable from "never sent".
+            logger.info(
+                "Message rejected: chat=%s reason=%s",
+                getattr(reject, "chat_id", "?"),
+                getattr(reject, "reason", reject),
+            )
 
         sdk.on("reject", on_reject)
 
