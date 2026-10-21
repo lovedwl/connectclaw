@@ -144,6 +144,11 @@ class AgentLoopConfig:
     ) = None
     get_api_key: Callable[[str], Awaitable[str | None] | str | None] | None = None
     api_key: str | None = None
+    # 每次发起 LLM 请求前调用（内层循环每轮一次）。回调可原地替换
+    # ``context.messages`` 让本轮后续请求立刻瘦身 —— 这是 turn 内部自动
+    # 压缩的挂点：只靠 _execute_turn 开头的检查，一个长 turn 跑到顶穿
+    # context window 才会在下一轮用户消息时才压（2026-10-21 修）。
+    compact_if_needed: Callable[["AgentContext"], Awaitable[None]] | None = None
     get_steering_messages: Callable[[], Awaitable[list[AgentMessage]]] | None = None
     get_follow_up_messages: Callable[[], Awaitable[list[AgentMessage]]] | None = None
     tool_execution: ToolExecutionMode = "parallel"

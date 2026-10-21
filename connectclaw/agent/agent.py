@@ -54,6 +54,7 @@ class Agent:
         max_retry_delay_ms: int = 60_000,
         before_tool_call: Callable | None = None,
         after_tool_call: Callable | None = None,
+        compact_if_needed: Callable | None = None,
     ):
         self._state = AgentState(
             system_prompt=system_prompt,
@@ -75,6 +76,8 @@ class Agent:
         self._after_tool_call = after_tool_call
         self.convert_to_llm = convert_to_llm or _default_convert_to_llm
         self.transform_context = transform_context
+        # 每次 LLM 请求前的自动压缩闸（turn 内部也能压）。见 AgentLoopConfig。
+        self.compact_if_needed = compact_if_needed
         self.stream_fn = stream_fn or stream_simple
         self._live_card: dict[str, Any] = {}
 
@@ -324,6 +327,7 @@ class Agent:
             reasoning=reasoning,
             convert_to_llm=self.convert_to_llm,
             transform_context=self.transform_context,
+            compact_if_needed=self.compact_if_needed,
             get_api_key=self._get_api_key,
             get_steering_messages=self._drain_steering,
             get_follow_up_messages=self._drain_follow_up,

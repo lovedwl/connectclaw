@@ -138,6 +138,22 @@ async def _run_loop(
                     new_messages.append(msg)
                 pending_messages = []
 
+            # 自动压缩闸：每次发起 LLM 请求前检查一次 token 压力。
+            # 只挂在 _execute_turn 开头时，一个长 turn 里几十次工具调用把上下文
+            # 顶穿 context window 也不会压 —— 要等用户发下一条消息才触发，而且
+            # 顶穿的那次请求直接 400。回调负责估算 → 压缩 → 原地替换
+            # current_context.messages。压缩失败必须降级放行，不能掀翻 turn。
+            if config.compact_if_needed:
+                try:
+                    await config.compact_if_needed(current_context)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning(
+                        "[COMPACT-GATE] mid-turn compaction failed, continuing uncompacted",
+                        exc_info=True,
+                    )
+
             # Stream assistant response
             message = await _stream_assistant_response(
                 current_context, config, signal, emit,

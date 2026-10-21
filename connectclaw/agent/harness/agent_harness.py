@@ -114,6 +114,8 @@ class AgentHarness:
         # H5：强引用持有落盘任务。CPython 事件循环只持弱引用，
         # fire-and-forget 的 create_task 可能在执行中途被 GC（消息静默丢失）。
         self._persist_tasks: set[asyncio.Task] = set()
+        # 防止 mid-turn 压缩闸重入（压缩本身要发 LLM 请求，别自己套自己）
+        self._midturn_compacting = False
 
         # Resolve system prompt
         if callable(system_prompt):
@@ -331,6 +333,119 @@ class AgentHarness:
 
     # ── Internal ────────────────────────────────────────────
 
+    async def _run_compaction(
+        self,
+        api_key: str | None,
+        messages: list[Any],
+        tokens: int,
+    ) -> bool:
+        """跑一次 entry-based 压缩并落盘。
+
+        返回 True 表示成功落盘（调用方应重建上下文），False 表示无需/未压缩。
+        abort 中断的半截摘要是不能落盘的（M10）。
+        """
+        # Fire before_compact hook so memory extraction can happen
+        # while raw conversation detail is still available.
+        for hook in self._hooks.before_compact:
+            result = hook({"tokens": tokens, "messages": messages})
+            if asyncio.iscoroutine(result):
+                await result
+
+        entries = await self._session.get_path_to_root()
+        if not entries:
+            return False
+
+        # Use entry-based pipeline so first_kept_entry_id is properly set
+        prep = prepare_compaction(
+            [asdict(e) for e in entries],
+            self._compaction_settings,
+            context_window=self._model.context_window,
+        )
+        if not prep:
+            return False
+
+        result = await entry_based_compact(
+            prep, self._model,
+            api_key=api_key,
+            thinking_level=self._thinking_level,
+            settings=self._compaction_settings,
+            signal=self._active_abort_event(),
+        )
+        abort_event = self._active_abort_event()
+        if not result or (abort_event is not None and abort_event.is_set()):
+            return False
+
+        await self._session.append_compaction(
+            result.summary, result.first_kept_entry_id, result.tokens_before,
+            merged_context=result.merged_context,
+            context_state=result.context_state,
+        )
+        if not prep.fits_budget:
+            logger.warning(
+                "compaction under-delivered: freed~%d, post-compact est~%d "
+                "(budget %d) — recent window at floor; summary may still be large",
+                prep.liberated_tokens,
+                prep.post_compact_estimate,
+                self._model.context_window - self._compaction_settings.reserve_tokens,
+            )
+        return True
+
+    async def _compact_mid_turn(self, context: Any) -> None:
+        """每次发起 LLM 请求前的自动压缩闸（挂到 AgentLoopConfig）。
+
+        没有这道闸时，压缩只在 ``_execute_turn`` 开头检查一次 —— 也就是
+        「主人不发新消息就永远不压」。一个长 turn 里几十次工具调用能把上下文
+        从 100k 灌到顶穿 context window，下一次请求直接 400。
+
+        契约：本方法可在 turn 执行途中把 context.messages 原地替换成压缩后的
+        上下文；任何失败都必须静默降级（不压，继续跑），绝不能掀翻 turn。
+        """
+        if self._midturn_compacting:
+            return
+
+        tokens = calculate_context_tokens(context.messages)
+        if not should_compact(
+            tokens, self._model.context_window, self._compaction_settings
+        ):
+            return
+
+        self._midturn_compacting = True
+        try:
+            # 本轮消息是异步落盘的。压缩切点基于 session 内容，若尾部还悬在
+            # 落盘任务里，切点会算错、first_kept_entry_id 可能指向不存在的条目。
+            if self._persist_tasks:
+                await asyncio.gather(*list(self._persist_tasks), return_exceptions=True)
+
+            api_key: str | None = None
+            if self._get_api_key:
+                key_result = self._get_api_key(self._model.provider)
+                if asyncio.iscoroutine(key_result):
+                    api_key = await key_result
+                else:
+                    api_key = key_result
+
+            if not await self._run_compaction(api_key, context.messages, tokens):
+                return
+
+            entries = await self._session.get_path_to_root()
+            rebuilt = list(build_session_context(entries).messages)
+            if rebuilt:
+                before_len = len(context.messages)
+                context.messages = rebuilt
+                logger.info(
+                    "[COMPACT-GATE] mid-turn compaction: %d tok, %d msgs → %d msgs",
+                    tokens, before_len, len(rebuilt),
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "[COMPACT-GATE] mid-turn compaction failed; continuing uncompacted",
+                exc_info=True,
+            )
+        finally:
+            self._midturn_compacting = False
+
     async def _execute_turn(
         self, text: str, images: list[dict] | None = None
     ) -> AssistantMessage | None:
@@ -363,51 +478,11 @@ class AgentHarness:
         # Check if compaction is needed
         tokens = calculate_context_tokens(messages)
         if should_compact(tokens, self._model.context_window, self._compaction_settings):
-            # Fire before_compact hook so memory extraction can happen
-            # while raw conversation detail is still available.
-            for hook in self._hooks.before_compact:
-                result = hook({
-                    "tokens": tokens,
-                    "messages": messages,
-                })
-                if asyncio.iscoroutine(result):
-                    await result
-
-            # Use entry-based pipeline so first_kept_entry_id is properly set
-            entries_dicts = [asdict(e) for e in entries]
-            prep = prepare_compaction(
-                entries_dicts,
-                self._compaction_settings,
-                context_window=self._model.context_window,
-            )
-            if prep:
-                result = await entry_based_compact(
-                    prep, self._model,
-                    api_key=compaction_api_key,
-                    thinking_level=self._thinking_level,
-                    settings=self._compaction_settings,
-                    signal=self._active_abort_event(),
-                )
-                # M10 后续：abort 中断的半截/降级摘要不落盘。
-                abort_event = self._active_abort_event()
-                if result and not (abort_event is not None and abort_event.is_set()):
-                    await self._session.append_compaction(
-                        result.summary, result.first_kept_entry_id, result.tokens_before,
-                        merged_context=result.merged_context,
-                        context_state=result.context_state,
-                    )
-                    if not prep.fits_budget:
-                        logger.warning(
-                            "compaction under-delivered: freed~%d, post-compact est~%d "
-                            "(budget %d) — recent window at floor; summary may still be large",
-                            prep.liberated_tokens,
-                            prep.post_compact_estimate,
-                            self._model.context_window - self._compaction_settings.reserve_tokens,
-                        )
-                    # Rebuild context after compaction
-                    entries = await self._session.get_path_to_root()
-                    ctx = build_session_context(entries)
-                    messages = list(ctx.messages)
+            if await self._run_compaction(compaction_api_key, messages, tokens):
+                # Rebuild context after compaction
+                entries = await self._session.get_path_to_root()
+                ctx = build_session_context(entries)
+                messages = list(ctx.messages)
 
         # Wrap harness hooks into callables for the agent loop
         _before_tool_hooks = list(self._hooks.before_tool)
@@ -443,6 +518,8 @@ class AgentHarness:
                 get_api_key=self._get_api_key,
                 before_tool_call=_before_tool_wrapper if _before_tool_hooks else None,
                 after_tool_call=_after_tool_wrapper if _after_tool_hooks else None,
+                # turn 内部的自动压缩闸：每次 LLM 请求前检查一次
+                compact_if_needed=self._compact_mid_turn,
             )
             self._agent.set_live_card_callbacks(**self._live_card_callbacks)
         else:
@@ -454,6 +531,7 @@ class AgentHarness:
             # Update hooks (may have changed since last turn)
             self._agent._before_tool_call = _before_tool_wrapper if _before_tool_hooks else None
             self._agent._after_tool_call = _after_tool_wrapper if _after_tool_hooks else None
+            self._agent.compact_if_needed = self._compact_mid_turn
             # Reset messages to session context
             self._agent.state.messages = list(messages)
 
