@@ -40,8 +40,13 @@ class ReadTool(AgentTool):
         "required": ["file_path"],
     }
 
-    def __init__(self, cwd: str):
+    def __init__(self, cwd: str, allow_outside_cwd: bool = False):
         self._cwd = cwd
+        # sandbox.mode = "none" 是主人显式授予的完全宿主权限：文件工具不再
+        # 被关在 cwd 里（逃生配置仍由 is_protected 保护）。
+        self._allow_outside_cwd = allow_outside_cwd
+        if allow_outside_cwd:
+            self.description += " Files outside the working directory are readable (full host access is enabled)."
         # Track recently read files for write-before-read enforcement
         self.recently_read: set[str] = set()
 
@@ -55,10 +60,10 @@ class ReadTool(AgentTool):
         file_path = params["file_path"]
         absolute_path = self._resolve_path(file_path)
 
-        # 2026-10 (H2)：read 与 write 同一契约——只读 cwd 内文件，且逃生配置
-        # （config.toml / models.toml）直接拒绝，否则模型一句 read ~/.connectclaw/
-        # config.toml 就把 app_secret / 所有 provider key 贴回聊天。
-        if not path_within_cwd(self._cwd, absolute_path):
+        # 2026-10 (H2)：read 与 write 同一契约——默认只读 cwd 内文件；sandbox
+        # 为 none（完全宿主权限）时解除。逃生配置（config.toml / models.toml）
+        # 无论如何都直接拒绝，否则模型一句 read 就把 app_secret 贴回聊天。
+        if not self._allow_outside_cwd and not path_within_cwd(self._cwd, absolute_path):
             return AgentToolResult(
                 content=[{
                     "type": "text",
@@ -184,5 +189,5 @@ class ReadTool(AgentTool):
         return resolve_tool_path(self._cwd, path)
 
 
-def create_read_tool(cwd: str) -> ReadTool:
-    return ReadTool(cwd)
+def create_read_tool(cwd: str, allow_outside_cwd: bool = False) -> ReadTool:
+    return ReadTool(cwd, allow_outside_cwd=allow_outside_cwd)

@@ -34,6 +34,7 @@ logger = get_logger(__name__)
 from .compaction import (
     CompactionSettings,
     calculate_context_tokens,
+    compaction_trigger,
     should_compact,
     prepare_compaction,
     compact as entry_based_compact,
@@ -116,6 +117,13 @@ class AgentHarness:
         self._persist_tasks: set[asyncio.Task] = set()
         # 防止 mid-turn 压缩闸重入（压缩本身要发 LLM 请求，别自己套自己）
         self._midturn_compacting = False
+        # 用户轮次的首个 LLM 请求跳过压缩闸：压缩要几分钟，放在首请求前
+        # 就是"消息已读、迟迟不思考"（2026-10 实测）。见 _execute_turn。
+        self._skip_gate_once = False
+        # 连续自动压缩失败熔断：摘要调用的失败通常是模型/网关级的，立刻重试
+        # 只会反复烧几分钟。连续 3 次失败后冷却 5 分钟；紧急线仍可强制尝试。
+        self._compact_failures = 0
+        self._compact_cooldown_until = 0.0
 
         # Resolve system prompt
         if callable(system_prompt):
@@ -338,57 +346,87 @@ class AgentHarness:
         api_key: str | None,
         messages: list[Any],
         tokens: int,
+        *,
+        force: bool = False,
     ) -> bool:
         """跑一次 entry-based 压缩并落盘。
 
         返回 True 表示成功落盘（调用方应重建上下文），False 表示无需/未压缩。
         abort 中断的半截摘要是不能落盘的（M10）。
+
+        自动路径吞掉异常并做失败熔断：摘要调用失败是模型/网关级问题，让它
+        掀翻整个 turn 只会把已完成的工作一起丢掉；连续失败 3 次后冷却 5 分钟。
         """
-        # Fire before_compact hook so memory extraction can happen
-        # while raw conversation detail is still available.
-        for hook in self._hooks.before_compact:
-            result = hook({"tokens": tokens, "messages": messages})
-            if asyncio.iscoroutine(result):
-                await result
-
-        entries = await self._session.get_path_to_root()
-        if not entries:
-            return False
-
-        # Use entry-based pipeline so first_kept_entry_id is properly set
-        prep = prepare_compaction(
-            [asdict(e) for e in entries],
-            self._compaction_settings,
-            context_window=self._model.context_window,
-        )
-        if not prep:
-            return False
-
-        result = await entry_based_compact(
-            prep, self._model,
-            api_key=api_key,
-            thinking_level=self._thinking_level,
-            settings=self._compaction_settings,
-            signal=self._active_abort_event(),
-        )
-        abort_event = self._active_abort_event()
-        if not result or (abort_event is not None and abort_event.is_set()):
-            return False
-
-        await self._session.append_compaction(
-            result.summary, result.first_kept_entry_id, result.tokens_before,
-            merged_context=result.merged_context,
-            context_state=result.context_state,
-        )
-        if not prep.fits_budget:
+        if not force and time.monotonic() < self._compact_cooldown_until:
             logger.warning(
-                "compaction under-delivered: freed~%d, post-compact est~%d "
-                "(budget %d) — recent window at floor; summary may still be large",
-                prep.liberated_tokens,
-                prep.post_compact_estimate,
-                self._model.context_window - self._compaction_settings.reserve_tokens,
+                "[COMPACT] cooling down after %d consecutive failures; "
+                "skipping automatic compaction",
+                self._compact_failures,
             )
-        return True
+            return False
+
+        try:
+            # Fire before_compact hook so memory extraction can happen
+            # while raw conversation detail is still available.
+            for hook in self._hooks.before_compact:
+                result = hook({"tokens": tokens, "messages": messages})
+                if asyncio.iscoroutine(result):
+                    await result
+
+            entries = await self._session.get_path_to_root()
+            if not entries:
+                return False
+
+            # Use entry-based pipeline so first_kept_entry_id is properly set
+            prep = prepare_compaction(
+                [asdict(e) for e in entries],
+                self._compaction_settings,
+                context_window=self._model.context_window,
+            )
+            if not prep:
+                return False
+
+            result = await entry_based_compact(
+                prep, self._model,
+                api_key=api_key,
+                thinking_level=self._thinking_level,
+                settings=self._compaction_settings,
+                signal=self._active_abort_event(),
+            )
+            abort_event = self._active_abort_event()
+            if not result or (abort_event is not None and abort_event.is_set()):
+                return False
+
+            await self._session.append_compaction(
+                result.summary, result.first_kept_entry_id, result.tokens_before,
+                merged_context=result.merged_context,
+                context_state=result.context_state,
+            )
+            self._compact_failures = 0
+            self._compact_cooldown_until = 0.0
+            if not prep.fits_budget:
+                logger.warning(
+                    "compaction under-delivered: freed~%d, post-compact est~%d "
+                    "(budget %d) — recent window at floor; summary may still be large",
+                    prep.liberated_tokens,
+                    prep.post_compact_estimate,
+                    compaction_trigger(
+                        self._model.context_window, self._compaction_settings
+                    ),
+                )
+            return True
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._compact_failures += 1
+            if self._compact_failures >= 3:
+                self._compact_cooldown_until = time.monotonic() + 300
+            logger.warning(
+                "[COMPACT] compaction failed (%d in a row); continuing uncompacted",
+                self._compact_failures,
+                exc_info=True,
+            )
+            return False
 
     async def _compact_mid_turn(self, context: Any) -> None:
         """每次发起 LLM 请求前的自动压缩闸（挂到 AgentLoopConfig）。
@@ -401,6 +439,10 @@ class AgentHarness:
         上下文；任何失败都必须静默降级（不压，继续跑），绝不能掀翻 turn。
         """
         if self._midturn_compacting:
+            return
+        if self._skip_gate_once:
+            # 本轮首请求：turn 开头已判断"不紧急"，别再把它拦下来压几分钟。
+            self._skip_gate_once = False
             return
 
         tokens = calculate_context_tokens(context.messages)
@@ -475,14 +517,35 @@ class AgentHarness:
             else:
                 compaction_api_key = key_result
 
-        # Check if compaction is needed
+        # Check if compaction is needed.
+        #
+        # 压缩放在 turn 开头 = 用户消息已经进来却要等几分钟才轮到第一次
+        # LLM 请求（/stop 后重发也一样，卡片秒出、模型不动）。所以这里只在
+        # **快要顶穿**时才压；只是"过阈值"的话把首个请求直接发出去，让模型
+        # 先响应，把压缩留给随后的 mid-turn 闸（那时用户已经看到进展）。
+        self._skip_gate_once = False
         tokens = calculate_context_tokens(messages)
         if should_compact(tokens, self._model.context_window, self._compaction_settings):
-            if await self._run_compaction(compaction_api_key, messages, tokens):
-                # Rebuild context after compaction
-                entries = await self._session.get_path_to_root()
-                ctx = build_session_context(entries)
-                messages = list(ctx.messages)
+            # Deferral is a UX optimisation, not permission to overfill the
+            # window. Past 90% of the usable budget, compact first: the last
+            # 10% (~34k here) is what keeps the 64k output reserve intact.
+            usable = self._model.context_window - self._compaction_settings.reserve_tokens
+            urgent_at = int(usable * 0.9)
+            if tokens > urgent_at:
+                if await self._run_compaction(
+                    compaction_api_key, messages, tokens, force=True
+                ):
+                    # Rebuild context after compaction
+                    entries = await self._session.get_path_to_root()
+                    ctx = build_session_context(entries)
+                    messages = list(ctx.messages)
+            else:
+                self._skip_gate_once = True
+                logger.info(
+                    "[COMPACT-GATE] deferred start-of-turn compaction: %d tok "
+                    "(urgent at %d) — first request goes out uncompacted",
+                    tokens, urgent_at,
+                )
 
         # Wrap harness hooks into callables for the agent loop
         _before_tool_hooks = list(self._hooks.before_tool)

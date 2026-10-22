@@ -24,6 +24,7 @@ from connectclaw.injection import (
     fold_ops,
     render_ops,
 )
+from connectclaw.provider.tokenizer import count_tokens
 from connectclaw.provider.types import AssistantMessage, UserMessage
 
 
@@ -152,20 +153,26 @@ def test_fold_ops_is_ordered_and_snapshot_replaces():
     assert set(state.memory) == {"a"}, "快照是「当时状态」，不是并集"
 
 
-def test_fold_ops_is_ordered_and_snapshot_replaces():
-    add_a = [{"op": OP_MEMORY_ADD, "id": "a", "line": "- 甲", "content": "甲"}]
-    add_b = [{"op": OP_MEMORY_ADD, "id": "b", "line": "- 乙", "content": "乙"}]
-    forget_a = [{"op": OP_MEMORY_FORGET, "id": "a"}]
+def test_snapshot_ops_caps_memory_budget():
+    """2026-10：快照会随摘要留在上下文里，必须按 token 预算裁剪。
+    旧实现每次压缩都带全部记忆（实测 83 条 / 16k token），压缩后仍超阈值。"""
+    state = ContextState()
+    state.apply([
+        {"op": OP_MEMORY_ADD, "id": f"m{i}",
+         "line": f"- [2026-08-01 · 0.80] 记忆{i} " + "内容" * 20,
+         "content": f"记忆{i}"}
+        for i in range(200)
+    ])
+    snap = state.snapshot_ops(max_tokens=300)[0]
+    assert len(snap["memory"]) < 200, "快照必须裁剪"
+    assert "m199" in snap["memory"], "保留最新的记忆"
+    assert "m0" not in snap["memory"], "最老的记忆先被丢弃"
+    assert count_tokens(state.render([snap], incremental=False)) <= 400
 
-    state = fold_ops([add_a, add_b])
-    assert set(state.memory) == {"a", "b"}
-    state = fold_ops([add_a, add_b, forget_a])
-    assert set(state.memory) == {"b"}
 
-    # 压缩快照 = 整份状态替换（折叠时它会被放在保留区之前）
-    snap = ContextState()
-    snap.apply(add_a)
-    state = fold_ops([add_a, add_b, snap.snapshot_ops()])
-    assert set(state.memory) == {"a"}, "快照是「当时状态」，不是并集"
+def test_snapshot_ops_without_budget_keeps_everything():
+    state = ContextState()
+    state.apply([{"op": OP_MEMORY_ADD, "id": "a", "line": "- 甲", "content": "甲"}])
+    assert set(state.snapshot_ops()[0]["memory"]) == {"a"}
 
 

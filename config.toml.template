@@ -100,10 +100,16 @@ extract_model = ""
 [compaction]
 # Enable automatic context compaction
 enabled = true
-# Token reserve before triggering compaction
+# Tokens reserved for output + system prompt/tools (not usable by history)
 reserve_tokens = 16384
+# Compact when history reaches this fraction of (context_window - reserve_tokens)
+trigger_ratio = 0.8
 # Tokens to keep in recent context after compaction
 keep_recent_tokens = 20000
+# Hard cap on the generated summary (it stays in context after compaction)
+summary_max_tokens = 4096
+# Hard cap on the merged memory/injection snapshot kept after compaction
+memory_snapshot_max_tokens = 2000
 
 [memory]
 # Layered memory: auto-extract facts/events/patterns from conversations,

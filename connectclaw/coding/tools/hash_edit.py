@@ -112,8 +112,14 @@ class HashEditTool(AgentTool):
         "required": ["path", "edits"],
     }
 
-    def __init__(self, cwd: str):
+    def __init__(self, cwd: str, allow_outside_cwd: bool = False):
         self._cwd = cwd
+        self._allow_outside_cwd = allow_outside_cwd
+        if allow_outside_cwd:
+            self.description += (
+                "\nFiles outside the working directory are editable "
+                "(full host access is enabled)."
+            )
 
     async def execute(
         self,
@@ -157,10 +163,10 @@ class HashEditTool(AgentTool):
                 details={"is_error": True},
             )
 
-        # 2026-10 (H2)：hash_edit 与 write 同一契约——只能编辑 cwd 内文件。
-        # 此前对绝对路径完全不设防，模型可 hash_edit ~/.ssh/authorized_keys 等
-        # 任意宿主文件绕过全部沙箱；且 on_before_tool 授权钩子也不拦 hash_edit。
-        if not path_within_cwd(self._cwd, absolute_path):
+        # 2026-10 (H2)：hash_edit 与 write 同一契约——默认只能编辑 cwd 内文件
+        # （sandbox 为 none 时解除）。此前对绝对路径完全不设防，模型可
+        # hash_edit ~/.ssh/authorized_keys 等任意宿主文件绕过全部沙箱。
+        if not self._allow_outside_cwd and not path_within_cwd(self._cwd, absolute_path):
             return AgentToolResult(
                 content=[{"type": "text",
                           "text": (
@@ -393,5 +399,5 @@ async def _write_file_atomically(path: str, content: str) -> None:
         raise
 
 
-def create_hash_edit_tool(cwd: str) -> HashEditTool:
-    return HashEditTool(cwd)
+def create_hash_edit_tool(cwd: str, allow_outside_cwd: bool = False) -> HashEditTool:
+    return HashEditTool(cwd, allow_outside_cwd=allow_outside_cwd)

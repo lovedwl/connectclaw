@@ -11,13 +11,14 @@ Pipeline:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from connectclaw.injection import fold_ops
+from connectclaw.injection import fold_ops, render_ops
 from connectclaw.provider.stream import stream_simple
 from connectclaw.provider.tokenizer import count_tokens, image_block_cost  # noqa: F401 (count_tokens re-exported for tests)
 from connectclaw.provider.types import Context, Model, UserMessage
@@ -39,7 +40,18 @@ from ..types import AgentMessage, ThinkingLevel
 class CompactionSettings:
     enabled: bool = True
     reserve_tokens: int = 16384
+    # Trigger = (context_window - reserve_tokens) × trigger_ratio. The unused
+    # 1-ratio is the buffer before the hard window: compact early, not when the
+    # next tool output can already blow the request.
+    trigger_ratio: float = 0.8
     keep_recent_tokens: int = 20000
+    # Hard caps on what a compaction may put BACK into the context. Without them
+    # the summary (incremental prompt said "preserve ALL previous information")
+    # and the merged injection snapshot grow without bound: measured 13k + 16k
+    # tokens in one real session, which pushed the post-compaction context back
+    # over the trigger threshold and caused 88 compactions in a row.
+    summary_max_tokens: int = 4096
+    memory_snapshot_max_tokens: int = 2000
 
 
 # ── Token Estimation ───────────────────────────────────────────
@@ -142,10 +154,22 @@ def calculate_context_tokens(messages: list[Any]) -> int:
     return provider_tokens + trailing
 
 
+def compaction_trigger(context_window: int, settings: CompactionSettings) -> int:
+    """Token count at which compaction starts.
+
+    The usable budget is ``window - reserve`` (reserve covers output + system
+    prompt/tools). Compacting at 80% of it — not at 100% — leaves a buffer so a
+    long turn cannot blow through the window between two gate checks.
+    """
+    usable = max(1, context_window - settings.reserve_tokens)
+    ratio = min(max(settings.trigger_ratio, 0.1), 1.0)
+    return max(1, int(usable * ratio))
+
+
 def should_compact(context_tokens: int, context_window: int, settings: CompactionSettings) -> bool:
     if not settings.enabled:
         return False
-    return context_tokens > context_window - settings.reserve_tokens
+    return context_tokens > compaction_trigger(context_window, settings)
 
 
 # ── Cut Point Finding ──────────────────────────────────────────
@@ -236,42 +260,55 @@ def find_cut_point(
 SUMMARIZATION_SYSTEM_PROMPT = (
     "You are a context summarization assistant. Read a conversation and produce "
     "a structured summary. Do NOT continue the conversation. Only output the summary. "
+    "Preserve exact file paths, commands, error strings, identifiers and numbers. "
     "You have NO tools available — never emit tool calls, function-call syntax, or "
     "special tokens; plain summary text only."
 )
 
 SUMMARIZATION_PROMPT = """Create a structured context summary for an LLM to continue the work.
+Preserve exact file paths, commands, error strings, identifiers and numbers.
+Do not invent progress; mark anything uncertain as uncertain.
 
 ## Goal
-[What is the user trying to accomplish?]
+[What the user is trying to accomplish — the original request]
 
-## Progress
-### Done
-- [x] [Completed tasks]
-
-### In Progress
-- [ ] [Current work]
+## Current State
+[Where the work stands right now: done / running / blocked / waiting]
 
 ## Key Decisions
 - **[Decision]**: [Rationale]
+
+## Files & Code
+- `path` — [what changed, or what matters about it]
+
+## Errors & Fixes
+- [Error string] → [cause] → [how it was fixed / still open]
+
+## Constraints & Preferences
+- [User requirements, environment limits, safety rules]
 
 ## Next Steps
 1. [Ordered next actions]
 
 ## Critical Context
-- [File paths, function names, error messages, constraints — anything needed to continue]
+- [Exact paths, commands, ids, versions, numbers needed to continue]
+
+BE CONCISE: this summary REPLACES the history it condenses. Keep only what is
+needed to continue the work; drop resolved questions, obsolete attempts and
+repeated detail. Aim for at most a few hundred lines.
 """
 
 UPDATE_SUMMARIZATION_PROMPT = """The above is NEW conversation to merge into the existing summary in <previous-summary>.
 
 RULES:
-- PRESERVE all existing information from the previous summary
+- REWRITE the whole summary in the same 8-section format; do not append a second summary
+- KEEP what is still relevant from the previous summary — but DROP details that
+  are resolved, obsolete or superseded (this summary replaces the history)
 - ADD new progress, decisions, context
-- UPDATE Progress: move "In Progress" to "Done" when completed
-- UPDATE Next Steps based on current state
-- PRESERVE exact file paths, function names, error messages
+- MOVE completed items into Current State; keep Next Steps current
+- PRESERVE exact file paths, commands, error strings, identifiers and numbers
 
-Use the SAME format as the previous summary.
+BE CONCISE: merge instead of appending; never let the summary keep growing.
 """
 
 TURN_PREFIX_PROMPT = """This is the PREFIX of a turn. The SUFFIX (recent work) is retained.
@@ -297,24 +334,81 @@ class FileOperations:
     edited: set[str] = field(default_factory=set)
 
 
+_EDIT_TOOLS = {"write", "edit", "hash_edit", "apply_patch", "patch"}
+_READ_TOOLS = {"read", "hash_read"}
+
+
+def _tool_call_files(messages: list[Any]) -> dict[str, tuple[str, str]]:
+    """Map tool_call_id → (tool_name, path) from assistant tool-call blocks.
+
+    Tool results do not carry the arguments they were called with, so the file
+    list has to be reconstructed by pairing each result with its call. Without
+    this, the summary's "Files" section only worked for tools that happened to
+    put `path` in result details — i.e. almost never.
+    """
+    calls: dict[str, tuple[str, str]] = {}
+    for msg in messages:
+        msg = _unwrap(msg)
+        if msg.get("role") != "assistant":
+            continue
+        content = msg.get("content", [])
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "toolCall":
+                continue
+            args = block.get("arguments") or {}
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except Exception:
+                    args = {}
+            if not isinstance(args, dict):
+                continue
+            path = (
+                args.get("path") or args.get("file_path") or args.get("filePath")
+            )
+            if isinstance(path, str) and path.strip():
+                calls[str(block.get("id", ""))] = (
+                    str(block.get("name", "")),
+                    path.strip(),
+                )
+    return calls
+
+
 def _extract_file_ops(messages: list[Any]) -> FileOperations:
-    """Extract read/modified file paths from messages."""
+    """Extract read/modified file paths from messages.
+
+    Two sources, in order: `details.path` on the result (legacy/attach_image),
+    then the paired assistant tool call arguments (the normal path for
+    read/hash_read/write/hash_edit, whose results do not persist arguments).
+    """
     ops = FileOperations()
+    calls = _tool_call_files(messages)
     for msg in messages:
         msg = _unwrap(msg)
         if msg.get("role") != "toolResult":
             continue
         details = msg.get("details", {})
-        if not isinstance(details, dict):
-            continue
-        path = details.get("path") or details.get("file_path") or details.get("filePath")
+        path = ""
+        if isinstance(details, dict):
+            path = (
+                details.get("path")
+                or details.get("file_path")
+                or details.get("filePath")
+                or ""
+            )
+        tool_name = str(msg.get("tool_name", msg.get("toolName", "")))
+        if not path:
+            call_name, call_path = calls.get(str(msg.get("tool_call_id", "")), ("", ""))
+            tool_name = tool_name or call_name
+            path = call_path
         if not (isinstance(path, str) and path.strip()):
             continue
         path = path.strip()[:_MAX_FILE_PATH_CHARS]
-        tool_name = msg.get("tool_name", msg.get("toolName", ""))
-        if tool_name in ("write", "edit"):
+        if tool_name in _EDIT_TOOLS:
             ops.edited.add(path)
-        elif tool_name == "read":
+        elif tool_name in _READ_TOOLS:
             ops.read.add(path)
     return ops
 
@@ -389,9 +483,16 @@ async def generate_summary(
     custom_instructions: str | None = None,
     thinking_level: ThinkingLevel = "off",
     signal: asyncio.Event | None = None,
+    max_tokens: int | None = None,
 ) -> str:
-    """Generate or update a structured conversation summary."""
-    max_tokens = min(int(0.8 * reserve_tokens), model.max_tokens or 8192)
+    """Generate or update a structured conversation summary.
+
+    ``max_tokens`` is a HARD output cap sent to the API. It used to be computed
+    (0.8 × reserve ≈ 13k) and then silently dropped, so summaries could grow to
+    the full model output limit every cycle.
+    """
+    max_tokens = max_tokens or min(int(0.8 * reserve_tokens), model.max_tokens or 8192)
+    max_tokens = min(max_tokens, model.max_tokens or max_tokens)
 
     # Choose prompt
     base_prompt = UPDATE_SUMMARIZATION_PROMPT if previous_summary else SUMMARIZATION_PROMPT
@@ -419,7 +520,10 @@ async def generate_summary(
 
     parts = []
     # M10：透传 signal——摘要 LLM 调用此前无法被 /stop 中断
-    async for event in stream_simple(model, context, api_key=api_key, reasoning=reasoning, signal=signal):
+    async for event in stream_simple(
+        model, context, api_key=api_key, reasoning=reasoning,
+        signal=signal, max_tokens=max_tokens,
+    ):
         if event.type == "text_delta" and event.delta:
             parts.append(event.delta)
         elif event.type == "done" and event.message:
@@ -447,9 +551,11 @@ async def _generate_turn_prefix_summary(
     reserve_tokens: int = 16384,
     thinking_level: ThinkingLevel = "off",
     signal: asyncio.Event | None = None,
+    max_tokens: int | None = None,
 ) -> str:
     """Summarize a split-turn prefix."""
-    max_tokens = min(int(0.5 * reserve_tokens), model.max_tokens or 4096)
+    max_tokens = max_tokens or min(int(0.5 * reserve_tokens), model.max_tokens or 4096)
+    max_tokens = min(max_tokens, model.max_tokens or max_tokens)
 
     conversation_text = _serialize(messages, max_tokens=_summarize_input_budget(model, reserve_tokens))
     prompt_text = f"<conversation>\n{conversation_text}\n</conversation>\n\n{TURN_PREFIX_PROMPT}"
@@ -465,7 +571,10 @@ async def _generate_turn_prefix_summary(
     reasoning = thinking_level if model.reasoning and thinking_level != "off" else None
 
     parts = []
-    async for event in stream_simple(model, context, api_key=api_key, reasoning=reasoning, signal=signal):
+    async for event in stream_simple(
+        model, context, api_key=api_key, reasoning=reasoning,
+        signal=signal, max_tokens=max_tokens,
+    ):
         if event.type == "text_delta" and event.delta:
             parts.append(event.delta)
         elif event.type == "done" and event.message:
@@ -493,7 +602,7 @@ class CompactionPreparation:
     # ── Hardening metadata ──
     liberated_tokens: int = 0          # estimated tokens condensed into summary
     post_compact_estimate: int = 0     # estimated kept + summary tokens after compaction
-    fits_budget: bool = True           # whether post-compaction fits window - reserve
+    fits_budget: bool = True           # whether post-compaction lands below the trigger
 
 
 def prepare_compaction(
@@ -510,10 +619,10 @@ def prepare_compaction(
         grows the JSONL and re-triggers on every turn.
       * **Budget fit**: when `context_window` is given, shrink the keep-recent
         window until post-compaction context (kept messages + new summary) fits
-        `context_window - reserve_tokens`. This is the direct livelock breaker:
-        the old code kept ~`keep_recent_tokens` by a chars/4 estimate that
-        under-counted CJK 2-4x, so the window alone could exceed the budget and
-        compaction never actually shrinks the context.
+        below the trigger line. This is the direct livelock breaker: the old
+        code kept ~`keep_recent_tokens` by a chars/4 estimate that under-counted
+        CJK 2-4x, so the window alone could exceed the budget and compaction
+        never actually shrinks the context.
 
     The search is bounded (at most 8 cut-point scans, no LLM calls), and the
     recent window never drops below `max(2048, keep_recent // 4)`.
@@ -554,12 +663,32 @@ def prepare_compaction(
     ]
     window_tokens = calculate_context_tokens(window_msgs)
 
-    budget = (context_window - settings.reserve_tokens) if context_window else None
+    # The post-compaction target is below the TRIGGER (not below the hard
+    # window): landing just under the trigger is exactly what caused the
+    # 88-compaction livelock. `budget` here means "the largest post-compaction
+    # size we accept", so it is the trigger line.
+    trigger = compaction_trigger(context_window, settings) if context_window else None
+    budget = trigger
     floor = max(2048, int(settings.keep_recent_tokens * 0.25))
-    summary_upper_est = max(2048, int(settings.reserve_tokens * 0.25))
+    # Summary output is hard-capped at generation time now (summary_max_tokens);
+    # when the knob is 0/misconfigured fall back to a conservative quarter-reserve.
+    summary_cap = settings.summary_max_tokens
+    if summary_cap <= 0:
+        summary_cap = max(2048, int(settings.reserve_tokens * 0.25))
+    # Post-compaction must land BELOW the trigger with room to spare, otherwise
+    # the very next request compacts again (the observed 88-compaction livelock).
+    headroom = max(2048, int((context_window or 0) * 0.05))
+    target = (budget - headroom) if budget is not None else None
+
+    # The usage anchor already counted injection blocks and the previous
+    # summary (they were part of that request). Only subtract those when an
+    # anchor exists — the raw-sum fallback never included them.
+    anchored = _get_last_usage(window_msgs) is not None
+    prev_summary_tokens = count_tokens(previous_summary) if (anchored and previous_summary) else 0
 
     keep = settings.keep_recent_tokens
-    chosen: tuple[CutPointResult, list[Any], int, int] | None = None  # cut, msgs, freed, post
+    chosen: tuple[CutPointResult, list[Any], int, int, str, dict | None] | None = None
+    #                        cut, msgs, freed, post, merged_context, context_state
 
     for _ in range(8):
         cut = find_cut_point(entries, boundary_start, boundary_end, keep)
@@ -584,16 +713,39 @@ def prepare_compaction(
             continue
 
         freed = sum(estimate_tokens(m) for m in msgs)
-        summary_est = min(summary_upper_est, freed)
-        post_est = max(0, window_tokens - freed) + summary_est
-        chosen = (cut, msgs, freed, post_est)
-        if budget is None or post_est <= budget or keep <= floor:
+        merged_context, merged_ops, old_injection = _squash_region(
+            entries, boundary_start, history_end, previous_snapshot,
+            max_memory_tokens=settings.memory_snapshot_max_tokens,
+        )
+        merged_tokens = count_tokens(merged_context) if merged_context else 0
+        summary_est = min(summary_cap, freed)
+        # What survives: kept messages + new summary + merged injection state.
+        # `old_injection`/`prev_summary_tokens` were counted by the usage anchor
+        # and are being replaced by `merged_tokens`/`summary_est`.
+        replaced = freed + (old_injection + prev_summary_tokens if anchored else 0)
+        post_est = max(0, window_tokens - replaced) + summary_est + merged_tokens
+        chosen = (cut, msgs, freed, post_est, merged_context, merged_ops[0] if merged_ops else None)
+        if target is None or post_est <= target or keep <= floor:
             break
         keep = max(floor, int(keep * 0.6))
 
     if chosen is None:
         return None
-    cut, msgs_to_summarize, freed, post_est = chosen
+    cut, msgs_to_summarize, freed, post_est, merged_context, context_state = chosen
+
+    # Shrink guard (DSH-style): never persist a compaction that barely moves the
+    # needle. Otherwise a large kept-window or summary can leave the context at
+    # or above its previous size while still paying for a full summarization —
+    # the "compact → still over → compact again" livelock.
+    min_gain = max(1024, int(window_tokens * 0.01))
+    if window_tokens - post_est <= min_gain:
+        _log.info(
+            "compaction skipped: estimated gain %d tok <= floor %d "
+            "(before=%d, after=%d)",
+            window_tokens - post_est, min_gain, window_tokens, post_est,
+        )
+        return None
+
     first_kept_id = entries[cut.first_kept_entry_index].get("id", "")
 
     # Split-turn prefix
@@ -607,22 +759,6 @@ def prepare_compaction(
     # File operations
     file_ops = _extract_file_ops(msgs_to_summarize)
 
-    # Squash the injections scattered across the compacted region into ONE
-    # "current state"（git 合并语义）：区域内每条 `context` 条目就是一批 op，直接折叠。
-    # 上一个压缩的快照也要并进来——它代表这次压缩正要替换掉的那段历史。
-    region_batches: list[list[dict]] = []
-    for e in entries[boundary_start:history_end]:
-        if e.get("type") == "context":
-            ops = list(e.get("ops") or [])
-            if ops:
-                region_batches.append(ops)
-    if previous_snapshot:
-        region_batches.insert(0, [previous_snapshot])
-
-    state = fold_ops(region_batches)
-    merged_ops = state.snapshot_ops()
-    merged_context = state.render(merged_ops, incremental=False)
-
     return CompactionPreparation(
         first_kept_entry_id=first_kept_id,
         messages_to_summarize=msgs_to_summarize,
@@ -635,8 +771,42 @@ def prepare_compaction(
         post_compact_estimate=post_est,
         fits_budget=(budget is None) or (post_est <= budget),
         merged_context=merged_context,
-        context_state=merged_ops[0] if merged_ops else None,
+        context_state=context_state,
     )
+
+
+def _squash_region(
+    entries: list[dict],
+    boundary_start: int,
+    history_end: int,
+    previous_snapshot: dict | None,
+    *,
+    max_memory_tokens: int,
+) -> tuple[str, list[dict], int]:
+    """Fold the region's injection ops into ONE current state (git-merge style).
+
+    返回 ``(merged_context, snapshot_ops, old_injection_tokens)``。第三条是这批
+    context 条目**当初**在请求里占的 token——预算估算要从 usage 锚点里扣掉它，
+    否则会重复计算、把压缩目标算得过于乐观/悲观。
+    """
+    region_batches: list[list[dict]] = []
+    old_tokens = 0
+    for e in entries[boundary_start:history_end]:
+        if e.get("type") != "context":
+            continue
+        ops = list(e.get("ops") or [])
+        if ops:
+            region_batches.append(ops)
+            old_tokens += count_tokens(render_ops(ops))
+    # 上一个压缩的快照也要并进来——它代表这次压缩正要替换掉的那段历史。
+    if previous_snapshot:
+        region_batches.insert(0, [previous_snapshot])
+        old_tokens += count_tokens(render_ops([previous_snapshot]))
+
+    state = fold_ops(region_batches)
+    merged_ops = state.snapshot_ops(max_tokens=max_memory_tokens)
+    merged_context = state.render(merged_ops, incremental=False)
+    return merged_context, merged_ops, old_tokens
 
 
 @dataclass
@@ -684,6 +854,7 @@ async def compact(
                 custom_instructions=custom_instructions,
                 thinking_level=thinking_level,
                 signal=signal,
+                max_tokens=settings.summary_max_tokens,
             )
         else:
             history = "No prior history."
@@ -695,6 +866,7 @@ async def compact(
             reserve_tokens=settings.reserve_tokens,
             thinking_level=thinking_level,
             signal=signal,
+            max_tokens=max(1024, settings.summary_max_tokens // 2),
         )
         if prefix:
             summary = f"{history}\n\n---\n\n**Turn Context (split turn):**\n\n{prefix}"
@@ -712,10 +884,12 @@ async def compact(
             custom_instructions=custom_instructions,
             thinking_level=thinking_level,
             signal=signal,
+            max_tokens=settings.summary_max_tokens,
         )
 
     summary += _format_file_ops(prep.file_ops)
-    summary = _cap_summary(summary, int(settings.reserve_tokens * 0.8))
+    # 二次硬封顶：文件清单尾巴 + split-turn 拼接都可能超出 API 输出上限。
+    summary = _cap_summary(summary, settings.summary_max_tokens)
 
     return CompactionResult(
         summary=summary,
@@ -790,12 +964,38 @@ def _unwrap(msg: Any) -> dict:
     return {"role": "unknown", "content": str(msg)}
 
 
+_SUMMARY_MSG_CHARS = {
+    "toolResult": 8000,
+    "assistant": 4000,
+    "user": 4000,
+    "bashExecution": 4000,
+}
+_SUMMARY_DEFAULT_CHARS = 2000
+_SUMMARY_THINKING_CHARS = 2000
+_SUMMARY_TOOL_ARGS_CHARS = 1000
+
+
+def _clip_for_summary(text: str, limit: int) -> str:
+    """Head+tail clip so the summarizer keeps both the setup and the result."""
+    if limit <= 0 or len(text) <= limit:
+        return text
+    head = int(limit * 0.75)
+    tail = max(0, limit - head)
+    omitted = len(text) - limit
+    return f"{text[:head]}\n…[{omitted} chars omitted]…\n{text[-tail:]}"
+
+
 def _serialize(messages: list[Any], max_tokens: int | None = None) -> str:
     """Convert messages to a compact text representation.
 
-    When `max_tokens` is given and the serialized size exceeds it, the OLDEST
-    messages are dropped (newest preserved) with a note, so the summarizer input
-    stays bounded even for very long sessions.
+    Per-message clipping is role-aware and head+tail (not the old flat 300-char
+    head cut): tool results keep 8k chars, so summaries retain command output
+    and file excerpts instead of a useless opening fragment. Thinking and tool
+    calls are included because they carry the reasoning and the exact actions.
+
+    When `max_tokens` is given and the serialized size still exceeds it, the
+    OLDEST messages are dropped (newest preserved) with a note, so the
+    summarizer input stays bounded even for very long sessions.
     """
     lines = []
     for msg in messages:
@@ -803,24 +1003,47 @@ def _serialize(messages: list[Any], max_tokens: int | None = None) -> str:
         role = msg.get("role", "?")
         content = msg.get("content", "")
         if isinstance(content, list):
-            text = " ".join(
-                b.get("text", "") for b in content
-                if isinstance(b, dict) and b.get("type") in ("text", None)
-            )
-            images = [
-                b for b in content
-                if isinstance(b, dict) and b.get("type") in ("image", "image_ref")
-            ]
+            parts: list[str] = []
+            images = []
+            for b in content:
+                if not isinstance(b, dict):
+                    continue
+                btype = b.get("type")
+                if btype in ("text", None):
+                    parts.append(str(b.get("text", "")))
+                elif btype == "thinking":
+                    parts.append(
+                        "[thinking] "
+                        + _clip_for_summary(str(b.get("thinking", "")), _SUMMARY_THINKING_CHARS)
+                    )
+                elif btype == "toolCall":
+                    args = b.get("arguments", {})
+                    if not isinstance(args, str):
+                        try:
+                            args = json.dumps(args, ensure_ascii=False)
+                        except Exception:
+                            args = str(args)
+                    parts.append(
+                        f"[toolCall {b.get('name', '')} "
+                        f"{_clip_for_summary(args, _SUMMARY_TOOL_ARGS_CHARS)}]"
+                    )
+                elif btype in ("image", "image_ref"):
+                    images.append(b)
+            content = " ".join(p for p in parts if p)
             if images:
-                text += " " + " ".join(
+                content += " " + " ".join(
                     f"[image {b.get('id', '')} {b.get('mime_type', '')} {int(b.get('size', 0)) // 1024}KB]"
                     for b in images
                 )
-            content = text
         command = msg.get("command", "")
         if command:
-            content = f"[bash: {command[:80]}] → {content[:200]}"
-        lines.append(f"[{role}] {str(content)[:300]}")
+            out = _clip_for_summary(str(content), _SUMMARY_MSG_CHARS["bashExecution"])
+            content = f"[bash: {command[:80]}] → {out}"
+        else:
+            content = _clip_for_summary(
+                str(content), _SUMMARY_MSG_CHARS.get(role, _SUMMARY_DEFAULT_CHARS)
+            )
+        lines.append(f"[{role}] {content}")
 
     if max_tokens and max_tokens > 0:
         counts = [count_tokens(line) for line in lines]

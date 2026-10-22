@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from connectclaw.logging import get_logger
+from connectclaw.provider.tokenizer import count_tokens
 
 logger = get_logger(__name__)
 
@@ -186,13 +187,49 @@ class ContextState:
         blocks.extend(_escape_close_tag(c) for c in catalogs)
         return "\n\n".join(blocks)
 
-    def snapshot_ops(self) -> list[dict[str, Any]]:
-        """把当前状态拍成一条快照 op（压缩用）。"""
-        return [{
-            "op": OP_STATE_SNAPSHOT,
-            "memory": {mid: dict(v) for mid, v in self.memory.items()},
-            "catalog": self.catalog,
-        }]
+    def snapshot_ops(self, max_tokens: int | None = None) -> list[dict[str, Any]]:
+        """把当前状态拍成一条快照 op（压缩用）。
+
+        ``max_tokens`` 是硬预算：压缩后的快照会**跟着摘要一起留在上下文里**，
+        不封顶的话它会随会话无限增长（实测 83 条 / 16k token 的合并记忆块，
+        直接把压缩后的上下文又顶回过期阈值）。超出预算时保留最新的记忆条目，
+        catalog 优先保留（工具清单是行为依据）。
+        """
+        memory = {mid: dict(v) for mid, v in self.memory.items()}
+        catalog = self.catalog or ""
+        if not max_tokens or max_tokens <= 0 or not memory and not catalog:
+            return [{"op": OP_STATE_SNAPSHOT, "memory": memory, "catalog": catalog}]
+
+        # catalog 先占预算，但最多占一半（防止把记忆全部挤掉）；超限按字符比例截断。
+        remaining = max_tokens
+        if catalog:
+            cat_tokens = count_tokens(catalog)
+            cat_cap = max(1, max_tokens // 2)
+            if cat_tokens > cat_cap:
+                char_budget = max(1, int(len(catalog) * cat_cap / cat_tokens))
+                catalog = catalog[:char_budget].rstrip() + "\n(catalog truncated)"
+                cat_tokens = count_tokens(catalog)
+            remaining = max(0, remaining - cat_tokens)
+
+        # dict 保持插入顺序；最新的在最后 → 倒序取，直到预算耗尽。
+        ordered = list(memory)
+        kept: set[str] = set()
+        for mid in reversed(ordered):
+            cost = count_tokens(memory[mid].get("line", ""))
+            if cost > remaining and kept:
+                continue
+            kept.add(mid)
+            remaining -= cost
+            if remaining <= 0:
+                break
+        if len(kept) < len(ordered):
+            logger.info(
+                "injection: memory snapshot capped at %d tokens — kept %d/%d entries",
+                max_tokens, len(kept), len(ordered),
+            )
+        memory = {mid: memory[mid] for mid in ordered if mid in kept}
+
+        return [{"op": OP_STATE_SNAPSHOT, "memory": memory, "catalog": catalog}]
 
 
 def render_ops(ops: list[dict[str, Any]], *, incremental: bool = True) -> str:

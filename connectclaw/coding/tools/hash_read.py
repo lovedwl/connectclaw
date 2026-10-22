@@ -78,9 +78,15 @@ class HashReadTool(AgentTool):
         "required": ["path"],
     }
 
-    def __init__(self, cwd: str, read_tool: object = None):
+    def __init__(self, cwd: str, read_tool: object = None, allow_outside_cwd: bool = False):
         self._cwd = cwd
         self._read_tool = read_tool
+        self._allow_outside_cwd = allow_outside_cwd
+        if allow_outside_cwd:
+            self.description += (
+                "\nFiles outside the working directory are readable "
+                "(full host access is enabled)."
+            )
 
     async def execute(
         self,
@@ -92,10 +98,10 @@ class HashReadTool(AgentTool):
         file_path = params["path"]
         absolute_path = self._resolve_path(file_path)
 
-        # 2026-10 (H2)：与 read/write 同一契约——只读 cwd 内文件，且逃生配置
-        # 直接拒绝。此前命中保护只是加警告后照样返回完整内容，
-        # config.toml / models.toml 里的密钥仍会被贴回聊天。
-        if not path_within_cwd(self._cwd, absolute_path):
+        # 2026-10 (H2)：与 read/write 同一契约——默认只读 cwd 内文件（sandbox
+        # 为 none 时解除），逃生配置直接拒绝。此前命中保护只是加警告后照样
+        # 返回完整内容，config.toml / models.toml 里的密钥仍会被贴回聊天。
+        if not self._allow_outside_cwd and not path_within_cwd(self._cwd, absolute_path):
             return AgentToolResult(
                 content=[{
                     "type": "text",
@@ -312,5 +318,7 @@ class HashReadTool(AgentTool):
         return resolve_tool_path(self._cwd, path)
 
 
-def create_hash_read_tool(cwd: str, read_tool: object = None) -> HashReadTool:
-    return HashReadTool(cwd, read_tool)
+def create_hash_read_tool(
+    cwd: str, read_tool: object = None, allow_outside_cwd: bool = False,
+) -> HashReadTool:
+    return HashReadTool(cwd, read_tool, allow_outside_cwd=allow_outside_cwd)

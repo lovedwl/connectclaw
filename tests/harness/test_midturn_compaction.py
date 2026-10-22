@@ -180,6 +180,7 @@ def _bare_harness(monkeypatch, *, compacted: bool, replace_with=None):
     h._persist_tasks = set()
     h._get_api_key = None
     h._midturn_compacting = False
+    h._skip_gate_once = False
 
     class _Sess:
         async def get_path_to_root(self):
@@ -246,3 +247,22 @@ def test_midturn_gate_reentrancy_guard(monkeypatch):
     ctx = _NS(messages=list(big))
     _a.run(h._compact_mid_turn(ctx))
     assert len(ctx.messages) == 4
+
+
+def test_first_request_of_turn_is_not_blocked_by_compaction(monkeypatch):
+    """2026-10：turn 开头判断"不紧急"→ 首请求跳过压缩闸（先让模型开口），
+    后续请求才恢复自动压缩。此前首请求前就压，用户只看到"思考中"干等几分钟。"""
+    import asyncio as _a
+
+    h = _bare_harness(monkeypatch, compacted=True, replace_with=["压缩后"])
+    h._skip_gate_once = True
+    big = [UserMessage(content="喵" * 5000, timestamp=1.0) for _ in range(4)]
+
+    ctx = _NS(messages=list(big))
+    _a.run(h._compact_mid_turn(ctx))
+    assert len(ctx.messages) == 4, "首请求不该被压缩拦下"
+    assert h._skip_gate_once is False, "跳过标记必须只用一次"
+
+    # 下一次请求（工具调用之后）恢复正常压缩
+    _a.run(h._compact_mid_turn(ctx))
+    assert ctx.messages == ["压缩后"]

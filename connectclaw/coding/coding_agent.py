@@ -110,22 +110,30 @@ class CodingAgent:
             proxy=config.proxy.url,
         )
 
+        # [sandbox] mode decides isolation for the agent's OWN bash: "auto"
+        # detects, "none" runs unsandboxed on the host (operator's full-trust
+        # switch). config.toml is agent-read-only, so only the operator flips it.
+        self._sandbox_mode = getattr(
+            getattr(config, "sandbox", None), "mode", "auto")
+        # sandbox=none 是主人显式授予的完全宿主权限：文件工具也随之解除 cwd
+        # 封锁，否则 bash 能碰 /etc、write 却被关在 cwd 里（2026-10 实测）。
+        # 逃生配置 config.toml / models.toml 仍由 is_protected 硬拦截。
+        allow_outside_cwd = self._sandbox_mode == "none"
+
         # Create base tools (always available)
-        self._read_tool = create_read_tool(config.agent.cwd)
-        self._write_tool = create_write_tool(config.agent.cwd, self._read_tool)
-        self._hash_read_tool = create_hash_read_tool(config.agent.cwd, self._read_tool)
-        self._hash_edit_tool = create_hash_edit_tool(config.agent.cwd)
+        self._read_tool = create_read_tool(config.agent.cwd, allow_outside_cwd=allow_outside_cwd)
+        self._write_tool = create_write_tool(
+            config.agent.cwd, self._read_tool, allow_outside_cwd=allow_outside_cwd)
+        self._hash_read_tool = create_hash_read_tool(
+            config.agent.cwd, self._read_tool, allow_outside_cwd=allow_outside_cwd)
+        self._hash_edit_tool = create_hash_edit_tool(
+            config.agent.cwd, allow_outside_cwd=allow_outside_cwd)
         self._bash_guard = BashGuard()
         # M35：后台任务强引用集合——fire-and-forget 的 create_task 可能被 GC
         self._bg_tasks: set[asyncio.Task] = set()
         # M41：模型切换互斥——并发 /model 时 self._model 与 llm.api_key
         # 分两步落地，await 窗口内可能形成"A 的 base_url + B 的 api_key"
         self._model_lock = asyncio.Lock()
-        # [sandbox] mode decides isolation for the agent's OWN bash: "auto"
-        # detects, "none" runs unsandboxed on the host (operator's full-trust
-        # switch). config.toml is agent-read-only, so only the operator flips it.
-        self._sandbox_mode = getattr(
-            getattr(config, "sandbox", None), "mode", "auto")
         self._sandbox_cls = resolve_sandbox_cls(self._sandbox_mode)
         self._bash_tool = create_bash_tool(
             config.agent.cwd, self._bash_guard, self._sandbox_cls)
@@ -153,7 +161,8 @@ class CodingAgent:
         self._attach_image_tool = AttachImageTool(self._attachment_store)
         # 本地图片"看"的能力（codex view_image 同款）：多模态主模型按路径
         # 看工作目录内的图片，image_ref 阅后即弃不污染前缀缓存。
-        self._view_image_tool = create_view_image_tool(config.agent.cwd)
+        self._view_image_tool = create_view_image_tool(
+            config.agent.cwd, allow_outside_cwd=allow_outside_cwd)
 
         # Skill library gateway: the model sees ONE `skills` tool and searches /
         # loads SKILL.md packages on demand (see tools/skills.py).
@@ -261,7 +270,10 @@ class CodingAgent:
         self._compaction_settings = CompactionSettings(
             enabled=config.compaction.enabled,
             reserve_tokens=config.compaction.reserve_tokens,
+            trigger_ratio=config.compaction.trigger_ratio,
             keep_recent_tokens=config.compaction.keep_recent_tokens,
+            summary_max_tokens=config.compaction.summary_max_tokens,
+            memory_snapshot_max_tokens=config.compaction.memory_snapshot_max_tokens,
         )
 
         # Per-conversation harnesses

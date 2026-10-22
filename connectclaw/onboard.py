@@ -273,7 +273,8 @@ def _write_config(feishu: dict, model: dict, opts: dict) -> str:
         f"[session]\ndir = \"~/.connectclaw/sessions\"\n\n"
         f"[rag]\nenabled = {str(opts['rag_enabled']).lower()}\ndocs_dir = \"{esc(opts['rag_docs_dir'])}\"\ndb_path = \"~/.connectclaw/rag_db\"\ntop_k = 20\ntop_n = 5\n\n"
         f"[web_search]\nmax_chars = 8000\ntimeout = 30\n\n"
-        f"[compaction]\nenabled = true\nreserve_tokens = 16384\nkeep_recent_tokens = 20000\n"
+        f"[compaction]\nenabled = true\nreserve_tokens = 16384\ntrigger_ratio = 0.8\nkeep_recent_tokens = 20000\n"
+        f"summary_max_tokens = 4096\nmemory_snapshot_max_tokens = 2000\n"
     )
     # P2：以 0600 直接创建——原 open() 后再 chmod 之间存在密钥可读窗口
     fd = os.open(CONFIG_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

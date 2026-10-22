@@ -40,9 +40,16 @@ class WriteTool(AgentTool):
         "required": ["file_path", "content"],
     }
 
-    def __init__(self, cwd: str, read_tool: object):
+    def __init__(self, cwd: str, read_tool: object, allow_outside_cwd: bool = False):
         self._cwd = cwd
         self._read_tool = read_tool
+        self._allow_outside_cwd = allow_outside_cwd
+        if allow_outside_cwd:
+            self.description = (
+                "Write content to a file (any path on the host — full host access "
+                "is enabled). If the file already exists, read it first (read or "
+                "hash_read). The write is atomic."
+            )
 
     async def execute(
         self,
@@ -87,17 +94,19 @@ class WriteTool(AgentTool):
                 details={"is_error": True},
             )
 
-        # Only allow writes within cwd — bash runs in sandbox which can't
-        # see files outside cwd, so write must match.
-        # realpath 容器检查：symlink 指向 cwd 外、或绝对路径中的 .. 都拒绝。
-        if not path_within_cwd(self._cwd, absolute_path):
+        # Default contract: writes stay inside cwd because the bash sandbox
+        # cannot see anything else. With sandbox.mode="none" the operator has
+        # granted full host access, so the confinement is lifted to match bash.
+        # path_within_cwd uses realpath: symlinks out of cwd and ".." are refused.
+        if not self._allow_outside_cwd and not path_within_cwd(self._cwd, absolute_path):
             return AgentToolResult(
                 content=[{
                     "type": "text",
                     "text": (
                         f"错误：只能写入工作目录（"
                         f"{self._cwd}）内的文件。'{file_path}' 在目录之外。"
-                        f"请使用 cwd 内的 /tmp 路径，或写入项目目录。"
+                        f"如需写宿主任意路径，请把 config.toml 的 "
+                        f"[sandbox] mode 设为 \"none\"。"
                     ),
                 }],
                 details={"is_error": True},
@@ -167,5 +176,7 @@ class WriteTool(AgentTool):
         return resolve_tool_path(self._cwd, path)
 
 
-def create_write_tool(cwd: str, read_tool: object) -> WriteTool:
-    return WriteTool(cwd, read_tool)
+def create_write_tool(
+    cwd: str, read_tool: object, allow_outside_cwd: bool = False,
+) -> WriteTool:
+    return WriteTool(cwd, read_tool, allow_outside_cwd=allow_outside_cwd)

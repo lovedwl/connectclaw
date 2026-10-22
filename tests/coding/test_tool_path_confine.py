@@ -16,6 +16,7 @@ import pytest
 from connectclaw.coding.tools.hash_edit import create_hash_edit_tool
 from connectclaw.coding.tools.hash_read import create_hash_read_tool
 from connectclaw.coding.tools.read import create_read_tool
+from connectclaw.coding.tools.view_image import create_view_image_tool
 from connectclaw.coding.tools.write import create_write_tool
 from connectclaw.security import is_protected, resolve_tool_path
 
@@ -146,3 +147,56 @@ async def test_read_binary_file_gives_clear_guidance(layout):
     assert "二进制" in text
     assert "send_file" in text
     assert "codec" not in text
+
+
+# ── sandbox.mode = "none"：完全宿主权限下解除 cwd 封锁 ─────────
+# 2026-10 事故：bash 在 sandbox=none 下能碰任意路径，文件工具却仍被关在 cwd，
+# 模型被自相矛盾的行为卡死（write 报"只能写工作目录"）。
+
+
+async def test_full_host_access_allows_file_tools_outside_cwd(layout):
+    cwd, outside = layout
+    target = os.path.join(outside, "new.txt")
+
+    wt = create_write_tool(cwd, read_tool=None, allow_outside_cwd=True)
+    r = await wt.execute("t", {"file_path": target, "content": "hello\n"})
+    assert not (r.details or {}).get("is_error")
+    assert open(target).read() == "hello\n"
+
+    rt = create_read_tool(cwd, allow_outside_cwd=True)
+    r = await rt.execute("t", {"file_path": target})
+    assert not (r.details or {}).get("is_error")
+    assert "hello" in r.content[0]["text"]
+
+    hr = create_hash_read_tool(cwd, allow_outside_cwd=True)
+    r = await hr.execute("t", {"path": target})
+    assert not (r.details or {}).get("is_error")
+    assert "hello" in r.content[0]["text"]
+
+    he = create_hash_edit_tool(cwd, allow_outside_cwd=True)
+    r = await he.execute(
+        "t", {"path": target, "edits": [{"op": "append", "lines": ["world"]}]})
+    assert not (r.details or {}).get("is_error")
+    assert "world" in open(target).read()
+
+
+async def test_full_host_access_view_image_passes_cwd_gate(layout):
+    cwd, outside = layout
+    vt = create_view_image_tool(cwd, allow_outside_cwd=True)
+    r = await vt.execute("t", {"path": os.path.join(outside, "nope.png")})
+    # 通过 cwd 闸后才会走到"图片不存在"（而不是"只能查看工作目录"）
+    assert "图片不存在" in r.content[0]["text"]
+
+
+async def test_full_host_access_still_refuses_protected_files(layout, tmp_path, monkeypatch):
+    cwd, outside = layout
+    real_cfg = tmp_path / "real" / "config.toml"
+    real_cfg.parent.mkdir()
+    real_cfg.write_text("[bash]\n")
+    monkeypatch.setattr(
+        "connectclaw.security.protected_file_paths", lambda: [str(real_cfg)])
+    wt = create_write_tool(cwd, read_tool=None, allow_outside_cwd=True)
+    r = await wt.execute("t", {"file_path": str(real_cfg), "content": "pwned"})
+    assert r.details.get("is_error") is True
+    assert "受保护" in r.content[0]["text"]
+    assert real_cfg.read_text() == "[bash]\n"

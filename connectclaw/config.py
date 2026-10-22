@@ -277,7 +277,12 @@ class WebSearchConfig:
 class CompactionConfig:
     enabled: bool = True
     reserve_tokens: int = 16384
+    # Compact at this fraction of the usable budget (window - reserve).
+    trigger_ratio: float = 0.8
     keep_recent_tokens: int = 20000
+    # 压缩产物也会留在上下文里：摘要/记忆快照不封顶 → 压缩后仍超阈值 → 抖动。
+    summary_max_tokens: int = 4096
+    memory_snapshot_max_tokens: int = 2000
 
 
 @dataclass
@@ -469,7 +474,10 @@ class Config:
         compaction = CompactionConfig(
             enabled=_safe_bool(co.get("enabled"), True),
             reserve_tokens=_safe_int(co.get("reserve_tokens"), 16384),
+            trigger_ratio=_safe_float(co.get("trigger_ratio"), 0.8),
             keep_recent_tokens=_safe_int(co.get("keep_recent_tokens"), 20000),
+            summary_max_tokens=_safe_int(co.get("summary_max_tokens"), 4096),
+            memory_snapshot_max_tokens=_safe_int(co.get("memory_snapshot_max_tokens"), 2000),
         )
 
         # Memory

@@ -88,8 +88,16 @@ class ViewImageTool(AgentTool):
         "required": ["path"],
     }
 
-    def __init__(self, cwd: str):
+    def __init__(self, cwd: str, allow_outside_cwd: bool = False):
         self._cwd = cwd
+        self._allow_outside_cwd = allow_outside_cwd
+        if allow_outside_cwd:
+            self.description = (
+                "Show a local image file (png/jpeg/gif/webp/bmp/tiff/svg, max 20MB, "
+                "any path on the host — full host access is enabled) to you as an "
+                "inline image. Use when asked to look at, check, or pick image files "
+                "on disk. Chat history images: attach_image; send files: send_file."
+            )
 
     async def execute(
         self,
@@ -107,8 +115,8 @@ class ViewImageTool(AgentTool):
 
         absolute_path = resolve_tool_path(self._cwd, file_path)
 
-        # 与 read 同一契约（H2）：cwd 容器 + 逃生配置拒绝
-        if not path_within_cwd(self._cwd, absolute_path):
+        # 与 read 同一契约（H2）：默认 cwd 容器（sandbox=none 时解除）+ 逃生配置拒绝
+        if not self._allow_outside_cwd and not path_within_cwd(self._cwd, absolute_path):
             return AgentToolResult(
                 content=[{
                     "type": "text",
@@ -207,5 +215,5 @@ class ViewImageTool(AgentTool):
         )
 
 
-def create_view_image_tool(cwd: str) -> ViewImageTool:
-    return ViewImageTool(cwd)
+def create_view_image_tool(cwd: str, allow_outside_cwd: bool = False) -> ViewImageTool:
+    return ViewImageTool(cwd, allow_outside_cwd=allow_outside_cwd)

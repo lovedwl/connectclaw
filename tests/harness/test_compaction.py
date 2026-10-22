@@ -17,10 +17,12 @@ from connectclaw.agent.harness.compaction import (
     _cap_summary,
     _extract_file_ops,
     _serialize,
+    compaction_trigger,
     count_tokens,
     estimate_tokens,
     find_cut_point,
     prepare_compaction,
+    should_compact,
     strip_tool_call_artifacts,
 )
 
@@ -35,6 +37,33 @@ def _mk(prefix: str, n: int, content: str) -> list[dict]:
 
 WINDOW, RESERVE, KEEP = 65536, 16384, 20000
 SETTINGS = CompactionSettings(enabled=True, reserve_tokens=RESERVE, keep_recent_tokens=KEEP)
+
+
+# ── 0. 预算分配：触发线 / 保留窗口 / 压缩产物 ─────────────────
+# 400k 窗口 + 64k 输出预留 → 可用 344k；80% 触发（275k），保留最近 20%
+# （69k），摘要+快照最多 33k → 压缩后约 102k，离触发线还有 173k。
+
+def test_trigger_is_fraction_of_usable_budget():
+    s = CompactionSettings(enabled=True, reserve_tokens=65536, trigger_ratio=0.8)
+    usable = 409600 - 65536
+    trigger = compaction_trigger(409600, s)
+    assert trigger == int(usable * 0.8)
+    assert should_compact(trigger, 409600, s) is False
+    assert should_compact(trigger + 1, 409600, s) is True
+
+
+def test_worst_case_post_compaction_has_large_headroom():
+    s = CompactionSettings(
+        enabled=True, reserve_tokens=65536, trigger_ratio=0.8,
+        keep_recent_tokens=68800, summary_max_tokens=24576,
+        memory_snapshot_max_tokens=8192,
+    )
+    trigger = compaction_trigger(409600, s)
+    worst_post = (
+        s.keep_recent_tokens + s.summary_max_tokens + s.memory_snapshot_max_tokens
+    )
+    # 压缩后必须远低于触发线，否则工具输出几轮就又顶回去（88 次抖动事故）。
+    assert worst_post < trigger * 0.4
 
 
 # ── 1. Real-token estimation ─────────────────────────────────
@@ -190,7 +219,12 @@ def _region() -> list[dict]:
 
 def test_prepare_compaction_squashes_injections():
     """区域内散落的注入 op 要合并成一个当前状态（结构化快照 + 冻结文本），随摘要进上下文。"""
-    prep = prepare_compaction(_region(), CompactionSettings(), context_window=32768)
+    # Keep the summary small relative to the condensed region: a compaction that
+    # cannot shrink is now refused before it reaches this assert.
+    settings = CompactionSettings(
+        keep_recent_tokens=4000, summary_max_tokens=1024,
+    )
+    prep = prepare_compaction(_region(), settings, context_window=32768)
     assert prep is not None
     assert "<remembered-context>" in prep.merged_context
     assert "甲" in prep.merged_context
@@ -212,7 +246,10 @@ def test_prepare_compaction_folds_previous_snapshot():
         "tokens_before": 1000, "merged_context": "x", "context_state": snapshot,
     }]
     rows.extend(_region())
-    prep = prepare_compaction(rows, CompactionSettings(), context_window=32768)
+    settings = CompactionSettings(
+        keep_recent_tokens=4000, summary_max_tokens=1024,
+    )
+    prep = prepare_compaction(rows, settings, context_window=32768)
     assert prep is not None
     assert "远古记忆" in prep.merged_context, "上一轮的快照必须被折进新的合并结果"
     assert "远古记忆" in str(prep.context_state["memory"])
@@ -253,6 +290,92 @@ def test_extract_file_ops_skips_none_and_empty_details():
     assert "None" not in ops.edited
 
 
+# ── 6. 压缩产物封顶：摘要 + 记忆快照（2026-10 抖动事故）───────
+# 事故形态：摘要上限 = 0.8×reserve ≈ 13k token、记忆快照不封顶（实测 83 条 /
+# 16k token），两者都留在压缩后的上下文里 → 压缩完仍有 49k > 触发阈值 49.1k
+# → 下一轮立刻再压，一个会话压了 88 次；每次压缩 4-6 分钟，用户看到的就是
+# "发消息后迟迟不思考"。
+
+
+def test_summary_cap_comes_from_settings_not_reserve():
+    settings = CompactionSettings(summary_max_tokens=512)
+    assert settings.summary_max_tokens == 512
+    assert settings.summary_max_tokens < int(settings.reserve_tokens * 0.8)
+
+
+def test_post_compact_estimate_includes_merged_context():
+    settings = CompactionSettings(
+        reserve_tokens=4096, keep_recent_tokens=4000,
+        summary_max_tokens=1024, memory_snapshot_max_tokens=256,
+    )
+    prep = prepare_compaction(_region(), settings, context_window=16384)
+    assert prep is not None
+
+    merged_tokens = count_tokens(prep.merged_context)
+    # 快照按 token 预算裁剪，不再无限膨胀
+    assert merged_tokens <= settings.memory_snapshot_max_tokens + 300  # 表头开销
+    # 预算估算必须把快照算进去（旧实现完全忽略它 → 高估压缩收益）
+    assert prep.post_compact_estimate >= merged_tokens
+    assert prep.post_compact_estimate <= 16384 - settings.reserve_tokens
+
+
+def test_snapshot_cap_keeps_newest_entries():
+    settings = CompactionSettings(
+        memory_snapshot_max_tokens=128,
+        keep_recent_tokens=4000,
+        summary_max_tokens=1024,
+    )
+    prep = prepare_compaction(_region(), settings, context_window=16384)
+    assert prep is not None
+    memory = prep.context_state["memory"]
+    # 裁剪后仍有记忆可用（不是整个注入块消失），且小于区域内的条目总数
+    assert 0 < len(memory) < 41
+    assert "<remembered-context>" in prep.merged_context
+    assert "记忆" in prep.merged_context
+
+
+async def test_compact_uses_summary_max_tokens(monkeypatch):
+    import connectclaw.agent.harness.compaction as C
+    from connectclaw.provider.types import Model
+
+    async def fake_generate(*args, **kwargs):
+        return "长" * 20000
+
+    monkeypatch.setattr(C, "generate_summary", fake_generate)
+    prep = C.CompactionPreparation(
+        first_kept_entry_id="m1",
+        messages_to_summarize=[{"role": "user", "content": "hi"}],
+    )
+    settings = CompactionSettings(summary_max_tokens=256)
+    result = await C.compact(prep, Model(id="test-model"), settings=settings)
+    assert count_tokens(result.summary) <= 320  # 预算 + 截断提示
+
+
+async def test_generate_summary_forwards_max_tokens(monkeypatch):
+    import connectclaw.agent.harness.compaction as C
+    from connectclaw.provider.types import AssistantMessage, Model, StreamEvent
+
+    captured: dict = {}
+
+    def fake_stream(model, context, **kwargs):
+        captured.update(kwargs)
+
+        async def _gen():
+            msg = AssistantMessage(
+                content=[{"type": "text", "text": "summary"}],
+                model="test-model", stop_reason="stop", timestamp=1.0,
+            )
+            yield StreamEvent(type="done", message=msg)
+
+        return _gen()
+
+    monkeypatch.setattr(C, "stream_simple", fake_stream)
+    out = await C.generate_summary(
+        [{"role": "user", "content": "hi"}], Model(id="test-model"), max_tokens=777)
+    assert captured["max_tokens"] == 777
+    assert out == "summary"
+
+
 def test_extract_file_ops_routes_read_and_write():
     msgs = [
         {"role": "toolResult", "tool_name": "read", "details": {"path": "/tmp/in.txt"}},
@@ -263,3 +386,61 @@ def test_extract_file_ops_routes_read_and_write():
     ops = _extract_file_ops(msgs)
     assert ops.read == {"/tmp/in.txt"}
     assert ops.edited == {"/tmp/out.txt"}
+
+
+# ── 7. 摘要输入保真：按角色头尾截断 + thinking/toolCall（2026-10-22）──
+
+
+def test_serialize_keeps_tool_result_head_and_tail():
+    # 旧实现每条消息只留前 300 字符，工具输出的结论/报错常在后半段。
+    body = "HEAD-" + ("x" * 20_000) + "-TAIL"
+    out = _serialize([{"role": "toolResult", "content": body}])
+    assert "HEAD-" in out
+    assert "-TAIL" in out
+    assert "chars omitted" in out
+
+
+def test_serialize_includes_thinking_and_tool_calls():
+    msgs = [{
+        "role": "assistant",
+        "content": [
+            {"type": "thinking", "thinking": "先检查配置再启动服务"},
+            {"type": "text", "text": "我来执行。"},
+            {"type": "toolCall", "id": "c1", "name": "bash",
+             "arguments": {"command": "systemctl restart demo"}},
+        ],
+    }]
+    out = _serialize(msgs)
+    assert "[thinking]" in out
+    assert "先检查配置再启动服务" in out
+    assert "[toolCall bash" in out
+    assert "systemctl restart demo" in out
+
+
+def test_extract_file_ops_from_tool_call_arguments():
+    # 真实会话里 toolResult 不带 details；路径必须从配对的 toolCall 参数里取。
+    msgs = [
+        {"role": "assistant", "content": [
+            {"type": "toolCall", "id": "r1", "name": "hash_read",
+             "arguments": {"path": "/proj/a.py"}},
+            {"type": "toolCall", "id": "e1", "name": "hash_edit",
+             "arguments": {"path": "/proj/b.py"}},
+            {"type": "toolCall", "id": "w1", "name": "write",
+             "arguments": {"path": "/proj/c.py"}},
+        ]},
+        {"role": "toolResult", "tool_call_id": "r1", "tool_name": "hash_read"},
+        {"role": "toolResult", "tool_call_id": "e1", "tool_name": "hash_edit"},
+        {"role": "toolResult", "tool_call_id": "w1", "tool_name": "write"},
+    ]
+    ops = _extract_file_ops(msgs)
+    assert ops.read == {"/proj/a.py"}
+    assert ops.edited == {"/proj/b.py", "/proj/c.py"}
+
+
+def test_refuses_compaction_that_cannot_shrink():
+    # 摘要和快照把省下来的 token 又吃回去 → 不落盘，避免"压了等于没压"。
+    entries = _mk("m", 40, "内容" * 40)
+    settings = CompactionSettings(
+        keep_recent_tokens=100, summary_max_tokens=100_000,
+    )
+    assert prepare_compaction(list(entries), settings, context_window=65536) is None

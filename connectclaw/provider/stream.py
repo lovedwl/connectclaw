@@ -75,6 +75,7 @@ async def stream_simple(
     max_retries: int = 3,
     base_url: str | None = None,
     proxy: str | None = None,
+    max_tokens: int | None = None,
     _provider_instance: DeepSeekProvider | None = None,
 ) -> AsyncIterator[StreamEvent]:
     """
@@ -153,6 +154,8 @@ async def stream_simple(
     }
     if tools:
         params["tools"] = tools
+    if max_tokens and max_tokens > 0:
+        params["max_tokens"] = max_tokens
 
     # Reasoning effort (thinking mode)
     if reasoning and reasoning != "off":
