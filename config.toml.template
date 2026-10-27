@@ -17,8 +17,13 @@ model_id = "deepseek-chat"
 [proxy]
 # Outbound proxy for MODEL APIs only (LLM + retained vision). Feishu SDK,
 # Lightpanda/browser, and other outbound consumers deliberately do NOT go
-# through this. Env override: CONNECTCLAW_PROXY_URL.
+# through this. Env override: CONNECTCLAW_PROXY_URL (default route only).
+#
+# `url` is the default for every endpoint; `hosts` maps a destination
+# hostname to its own proxy URL ("" = explicitly direct).
 url = ""
+# [proxy.hosts]
+# "api.example.com" = "http://127.0.0.1:8080/"
 
 [feishu]
 # Feishu/Lark app ID (required)
@@ -33,7 +38,8 @@ api_key = "${VISION_API_KEY}"
 base_url = ""
 # Vision model ID
 model_id = ""
-# Vision is a model API too: it uses [proxy].url by default. Override with:
+# Vision is a model API too: it uses the per-host [proxy] route for its
+# base_url (falling back to [proxy].url). Override with:
 # proxy = "http://127.0.0.1:7980/"
 
 [agent]

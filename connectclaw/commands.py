@@ -337,9 +337,16 @@ _MODEL_WIZARD_PROMPTS = {
 _CANCEL_WORDS = ("取消", "cancel", "/cancel", "退出")
 
 
-def _proxy_of(agent: Any) -> str | None:
+def _proxy_of(agent: Any, base_url: str) -> str | None:
+    """Proxy for this endpoint — per-host routing, not one global URL."""
     cfg = getattr(agent, "_config", None)
-    return (getattr(cfg, "proxy", None) and cfg.proxy.url) or None
+    proxy = getattr(cfg, "proxy", None)
+    if proxy is None:
+        return None
+    resolver = getattr(proxy, "for_url", None)
+    if callable(resolver):
+        return resolver(base_url) or None
+    return getattr(proxy, "url", "") or None
 
 
 def _render_pick_list(items: list[dict]) -> str:
@@ -459,7 +466,7 @@ async def run_model_wizard_step(agent: Any, state: dict, text: str) -> str:
     api_key = state["fields"].get("api_key", "")
     try:
         entries, endpoint = await model_discovery.fetch_model_list(
-            base, api_key, _proxy_of(agent), timeout=10)
+            base, api_key, _proxy_of(agent, base), timeout=10)
     except Exception as e:  # noqa: BLE001 — keep the wizard alive
         agent.set_wizard(state.get("_conv", ""), state)
         return (f"⚠️ 自动发现失败（{e}）。直接回复 model_id 手动添加：\n"
@@ -569,7 +576,7 @@ async def _model_sync(agent: Any, conversation_key: str, provider_arg: str) -> s
     seed = ps[0]
     try:
         entries, endpoint = await model_discovery.fetch_model_list(
-            seed.base_url, seed.resolved_api_key(), _proxy_of(agent))
+            seed.base_url, seed.resolved_api_key(), _proxy_of(agent, seed.base_url))
     except model_discovery.DiscoveryError as e:
         return f"❌ 发现失败（{prov}）：{e}"
     if not entries:
@@ -824,7 +831,12 @@ async def _model_verify(agent: Any, url: str) -> str:
     if "://" not in base:
         return ("请给出完整端点地址（含 `https://`，如 `https://api.deepseek.com` 或 "
                 "`https://网关/v1`；粘贴的链接也可以）。")
-    proxy = getattr(agent, "_config", None) and agent._config.proxy.url or None
+    proxy = None
+    _cfg = getattr(agent, "_config", None)
+    _px = getattr(_cfg, "proxy", None)
+    if _px is not None:
+        _resolver = getattr(_px, "for_url", None)
+        proxy = (_resolver(base) if callable(_resolver) else getattr(_px, "url", "")) or None
     bases = [base] if base.endswith("/v1") else [base, f"{base}/v1"]
     try:
         async with httpx.AsyncClient(

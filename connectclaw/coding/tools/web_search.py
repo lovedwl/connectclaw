@@ -169,6 +169,7 @@ class WebFetchTool(AgentTool):
         model_provider: Callable[[], Any] | None = None,
         api_key_provider: Callable[[], str] | None = None,
         proxy: str = "",
+        proxy_for: Callable[[str], str] | None = None,
     ):
         self._config = config
         # Callables, not objects: resolved at execute() time so /model
@@ -176,6 +177,14 @@ class WebFetchTool(AgentTool):
         self._model_provider = model_provider
         self._api_key_provider = api_key_provider
         self._proxy = proxy
+        # Per-endpoint proxy routing: extraction models may live on different
+        # networks and need different routes.
+        self._proxy_for = proxy_for
+
+    def _proxy_of(self, base_url: str) -> str:
+        if self._proxy_for is not None:
+            return self._proxy_for(base_url) or ""
+        return self._proxy
 
     async def execute(
         self,
@@ -253,7 +262,7 @@ class WebFetchTool(AgentTool):
                     profile.base_url,
                     profile.model_id,
                     profile.resolved_api_key(),
-                    self._proxy,  # profiles don't carry a proxy; model APIs ride [proxy]
+                    self._proxy_of(profile.base_url),
                 )
             logger.warning(
                 "web_fetch extract_model %r not found in models.toml — using the main model",
@@ -263,7 +272,7 @@ class WebFetchTool(AgentTool):
         if model is None or not getattr(model, "base_url", None):
             return None
         api_key = self._api_key_provider() if self._api_key_provider else ""
-        return model.base_url, model.id, api_key, getattr(model, "proxy", "") or self._proxy
+        return model.base_url, model.id, api_key, getattr(model, "proxy", "") or self._proxy_of(model.base_url)
 
     async def _extract_answer(self, prompt: str, page_text: str) -> str | None:
         """One-shot LLM: answer `prompt` from the page text. None on any
@@ -328,6 +337,7 @@ def create_web_fetch_tool(
     model_provider: Callable[[], Any] | None = None,
     api_key_provider: Callable[[], str] | None = None,
     proxy: str = "",
+    proxy_for: Callable[[str], str] | None = None,
 ) -> WebFetchTool:
     return WebFetchTool(
         config=WebSearchConfig(
@@ -336,4 +346,5 @@ def create_web_fetch_tool(
         model_provider=model_provider,
         api_key_provider=api_key_provider,
         proxy=proxy,
+        proxy_for=proxy_for,
     )

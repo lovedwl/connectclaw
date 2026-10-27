@@ -188,9 +188,16 @@ def _cache_get(message_id: str) -> dict | None:
     return _DISCOVERY_CACHE.get(message_id)
 
 
-def _proxy_of(agent: Any) -> str | None:
+def _proxy_of(agent: Any, base_url: str) -> str | None:
+    """Proxy for this endpoint — per-host routing, not one global URL."""
     cfg = getattr(agent, "_config", None)
-    return (getattr(cfg, "proxy", None) and cfg.proxy.url) or None
+    proxy = getattr(cfg, "proxy", None)
+    if proxy is None:
+        return None
+    resolver = getattr(proxy, "for_url", None)
+    if callable(resolver):
+        return resolver(base_url) or None
+    return getattr(proxy, "url", "") or None
 
 
 def _active_of(agent: Any) -> str | None:
@@ -328,7 +335,7 @@ async def _stage_discover(agent, channel, value: dict, message_id: str) -> None:
         result_card(f"🔍 正在查询 **{provider}** 的模型列表（{seed.base_url}）…", ok=None))
     try:
         entries, endpoint = await model_discovery.fetch_model_list(
-            seed.base_url, seed.resolved_api_key(), _proxy_of(agent))
+            seed.base_url, seed.resolved_api_key(), _proxy_of(agent, seed.base_url))
     except model_discovery.AuthError as e:
         # key 已死：该 provider 全部 profile 都不可用 → 转入清理模式，
         # 复用 gone 清单 + 🗑 逐个删（正在使用的模型受同样护栏）。
@@ -505,7 +512,7 @@ async def on_model_card_action(agent: Any, value: dict, chat_id: str, message_id
                             f"（发送超大 prompt 触发 400，每个可能 10~60 秒）…", ok=None))
             for item in batch:
                 limit, note = await model_discovery.probe_context_window(
-                    payload["base_url"], payload["resolved_key"], item["id"], _proxy_of(agent))
+                    payload["base_url"], payload["resolved_key"], item["id"], _proxy_of(agent, payload["base_url"]))
                 if limit:
                     item["ctx"] = limit
                 item["probe_note"] = note

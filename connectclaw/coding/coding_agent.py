@@ -107,7 +107,7 @@ class CodingAgent:
             reasoning=config.llm.reasoning,
             context_window=config.llm.context_window,
             max_tokens=config.llm.max_tokens,
-            proxy=config.proxy.url,
+            proxy=config.proxy.for_url(config.llm.base_url),
         )
 
         # [sandbox] mode decides isolation for the agent's OWN bash: "auto"
@@ -153,7 +153,7 @@ class CodingAgent:
             # resolves them per call, so /model hot-switches are honored.
             model_provider=lambda: self._model,
             api_key_provider=lambda: self._config.llm.api_key or "",
-            proxy=config.proxy.url,
+            proxy_for=config.proxy.for_url,
         )
         # Image attach registry: main.py registers downloaded images here and
         # the model re-attaches any of them to the current turn via the tool.
@@ -592,7 +592,7 @@ class CodingAgent:
             reasoning=p.reasoning,
             context_window=p.context_window,
             max_tokens=p.max_tokens,
-            proxy=self._config.proxy.url,
+            proxy=self._config.proxy.for_url(p.base_url),
         )
 
     def _api_key_for(self, p: ModelProfile) -> str:
@@ -870,14 +870,20 @@ class CodingAgent:
                 + ("（[vision] 配置存在但当前无工具消费）" if configured else "")
             )
             proxy = getattr(self._config, "proxy", None)
-            purl = getattr(proxy, "url", "") if proxy else ""
-            if purl:
+            if proxy is not None:
                 from urllib.parse import urlparse
 
-                host = urlparse(purl).hostname or "127.0.0.1"
-                port = urlparse(purl).port or 0
-                alive = _port_open(host, port) if port else False
-                lines.append(f"- [proxy] url={purl} → 端口{'监听中' if alive else '未监听'}")
+                routes = [("默认", getattr(proxy, "url", ""))]
+                routes.extend(sorted((getattr(proxy, "hosts", {}) or {}).items()))
+                for label, purl in routes:
+                    if not purl:
+                        continue
+                    host = urlparse(purl).hostname or "127.0.0.1"
+                    port = urlparse(purl).port or 0
+                    alive = _port_open(host, port) if port else False
+                    lines.append(
+                        f"- [proxy] {label}={purl} → 端口{'监听中' if alive else '未监听'}"
+                    )
             lines.append(f"- 工作目录：{self._config.agent.cwd}")
             sb = getattr(self._config, "sandbox", None)
             sb_mode = getattr(sb, "mode", "auto")

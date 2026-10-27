@@ -17,6 +17,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from connectclaw.logging import get_logger
 
@@ -151,6 +152,18 @@ class ProxyConfig:
     """
 
     url: str = ""
+    # Destination hostname → proxy URL ("" = explicitly direct).
+    hosts: dict[str, str] = field(default_factory=dict)
+
+    def for_url(self, base_url: str) -> str:
+        """Proxy for one endpoint: host override first, then the default."""
+        host = (urlparse(base_url or "").hostname or "").lower()
+        if not host:
+            return self.url or ""
+        for pattern, proxy in self.hosts.items():
+            if pattern.strip().lower() == host:
+                return proxy or ""
+        return self.url or ""
 
 
 @dataclass
@@ -357,6 +370,10 @@ class Config:
         proxy = ProxyConfig(
             url=os.environ.get("CONNECTCLAW_PROXY_URL")
                 or _expand_env(px.get("url", "")),
+            hosts={
+                str(host).strip().lower(): _expand_env(str(purl))
+                for host, purl in (px.get("hosts") or {}).items()
+            },
         )
 
         # Feishu
@@ -374,20 +391,23 @@ class Config:
 
         # Vision (supports [vision] with fallback to legacy [mimo] section)
         vision_raw = raw.get("vision") or raw.get("mimo", {})
+        vision_base = (
+            os.environ.get("VISION_BASE_URL")
+            or os.environ.get("MIMO_BASE_URL")
+            or vision_raw.get("base_url", "")
+        )
         vision = VisionConfig(
             api_key=_expand_env(
                 os.environ.get("VISION_API_KEY", "")
                 or os.environ.get("MIMO_API_KEY", "")
                 or vision_raw.get("api_key", "")
             ),
-            base_url=os.environ.get("VISION_BASE_URL")
-                or os.environ.get("MIMO_BASE_URL")
-                or vision_raw.get("base_url", ""),
+            base_url=vision_base,
             model_id=os.environ.get("VISION_MODEL")
                 or os.environ.get("MIMO_MODEL")
                 or vision_raw.get("model_id", ""),
-            # Vision is a model API: it goes through the same [proxy] as the LLM.
-            proxy=os.environ.get("VISION_PROXY_URL") or proxy.url,
+            # Vision is a model API: routed like any other model endpoint.
+            proxy=os.environ.get("VISION_PROXY_URL") or proxy.for_url(vision_base),
         )
 
         # Agent
